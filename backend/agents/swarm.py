@@ -70,6 +70,7 @@ class ChallengeSwarm:
     def _create_solver(self, model_spec: str):
         """Create the right solver type based on provider.
 
+        - cursor/* → CursorSolver (Cursor SDK + CURSOR_API_KEY)
         - claude-sdk/* → ClaudeSolver (Claude Agent SDK, subscription-first)
         - codex/* → CodexSolver (Codex App Server, subscription-first)
         - bedrock/*, azure/*, zen/*, google/* → Pydantic AI Solver (API)
@@ -78,6 +79,22 @@ class ChallengeSwarm:
 
         def _submit_fn(flag): return self.try_submit_flag(flag, model_spec)
         _notify = self._make_notify_fn(model_spec)
+
+        if provider == "cursor":
+            from backend.agents.cursor_solver import CursorSolver
+            return CursorSolver(
+                model_spec=model_spec,
+                challenge_dir=self.challenge_dir,
+                meta=self.meta,
+                ctfd=self.ctfd,
+                cost_tracker=self.cost_tracker,
+                settings=self.settings,
+                cancel_event=self.cancel_event,
+                no_submit=self.no_submit,
+                submit_fn=_submit_fn,
+                message_bus=self.message_bus,
+                notify_coordinator=_notify,
+            )
 
         if provider == "claude-sdk":
             from backend.agents.claude_solver import ClaudeSolver

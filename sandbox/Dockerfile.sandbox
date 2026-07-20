@@ -9,10 +9,12 @@ ENV TERM=xterm
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
     # Networking
-    netcat-openbsd curl wget nmap \
-    # Binary analysis
+    netcat-openbsd curl wget nmap socat \
+    # Binary analysis / pwn
     binutils file xxd bsdmainutils binwalk \
-    gdb ltrace strace \
+    gdb gdbserver ltrace strace patchelf \
+    qemu-user-static binfmt-support \
+    libc6-dbg \
     # Forensics / steg / image analysis
     exiftool steghide \
     pngcheck imagemagick \

@@ -1,0 +1,34 @@
+CTF SANDBOX (PWN) TOOLS
+=======================
+Prefer image: ctf-sandbox-pwn (linux/amd64 when possible).
+
+== ARCH ==
+uname -m                 Container arch. Challenge bins are usually x86_64.
+qemu-x86_64-static       Run x86_64 ELF on aarch64. Alias: q64
+qemu-i386-static         Run i386 ELF. Alias: q32
+file ./chal              Identify arch/ABI before running.
+
+== PWN CORE ==
+python3 + pwntools       from pwn import *; ELF, process, remote, ROP, cyclic
+gdb + gef                gdb ./chal ; checksec ; vmmap ; heap
+checksec                 checksec --file=./chal  (pwntools)
+ROPgadget                ROPgadget --binary ./chal
+one_gadget               one_gadget /lib/x86_64-linux-gnu/libc.so.6
+patchelf                 patchelf --set-interpreter --set-rpath
+seccomp-tools            seccomp-tools dump ./chal
+r2 / radare2             r2 -A ./chal
+strace / ltrace          Syscall / libc tracing
+socat / nc               Local listeners / relays
+
+== TYPICAL FLOW ==
+1. file + checksec on the binary
+2. If aarch64 host and x86_64 bin: process(['qemu-x86_64-static','./chal']) or q64
+3. Find leak / overflow with cyclic + gdb/gef
+4. Identify libc (strings / libc-database) ; patchelf if needed for local
+5. one_gadget or ROP to system/execve
+6. remote(host, port) for the live service
+
+== PATHS ==
+/challenge/distfiles     Challenge files (read-only mount)
+/challenge/workspace     Writable work dir
+/tools.txt               This file

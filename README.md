@@ -27,7 +27,7 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
                                  |
                         +--------v--------+
                         | Coordinator LLM |
-                        | (Claude/Codex)  |
+                        | (Cursor/Claude) |
                         +--------+--------+
                                  |
               +------------------+------------------+
@@ -36,11 +36,8 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
      | Swarm:          | | Swarm:         | | Swarm:         |
      | challenge-1     | | challenge-2    | | challenge-N    |
      |                 | |                | |                |
-     |  Opus (med)     | |  Opus (med)    | |                |
-     |  Opus (max)     | |  Opus (max)    | |     ...        |
-     |  GPT-5.4        | |  GPT-5.4       | |                |
-     |  GPT-5.4-mini   | |  GPT-5.4-mini  | |                |
-     |  GPT-5.3-codex  | |  GPT-5.3-codex | |                |
+     |  composer-2.5   | |  composer-2.5  | |     ...        |
+     |  (Cursor SDK)   | |  (Cursor SDK)  | |                |
      +--------+--------+ +--------+-------+ +----------------+
               |                    |
      +--------v--------+  +-------v--------+
@@ -54,7 +51,7 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
 
 Each solver runs in an isolated Docker container with CTF tools pre-installed. Solvers never give up — they keep trying different approaches until the flag is found.
 
-## Quick Start
+## Quick Start (Cursor API key)
 
 ```bash
 # Install
@@ -65,9 +62,10 @@ docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .
 
 # Configure credentials
 cp .env.example .env
-# Edit .env with your API keys and CTFd token
+# Set CURSOR_API_KEY from https://cursor.com/dashboard/integrations
+# and your CTFd token
 
-# Run against a CTFd instance
+# Run against a CTFd instance (Cursor coordinator + composer-2.5 solver)
 uv run ctf-solve \
   --ctfd-url https://ctf.example.com \
   --ctfd-token ctfd_your_token \
@@ -76,10 +74,23 @@ uv run ctf-solve \
   -v
 ```
 
+Single challenge:
+
+```bash
+uv run ctf-solve \
+  --challenge ./challenges/my-chal \
+  --models cursor/composer-2.5 \
+  --no-submit \
+  -v
+```
+
 ## Coordinator Backends
 
 ```bash
-# Claude SDK coordinator (default)
+# Cursor SDK coordinator (default) — uses CURSOR_API_KEY
+uv run ctf-solve --coordinator cursor --coordinator-model composer-2.5 ...
+
+# Claude SDK coordinator
 uv run ctf-solve --coordinator claude ...
 
 # Codex coordinator (GPT-5.4 via JSON-RPC)
@@ -92,11 +103,12 @@ Default model lineup (configurable in `backend/models.py`):
 
 | Model | Provider | Notes |
 |-------|----------|-------|
-| Claude Opus 4.6 (medium) | Claude SDK | Balanced speed/quality |
-| Claude Opus 4.6 (max) | Claude SDK | Deep reasoning |
-| GPT-5.4 | Codex | Best overall solver |
-| GPT-5.4-mini | Codex | Fast, good for easy challenges |
-| GPT-5.3-codex | Codex | Reasoning model (xhigh effort) |
+| composer-2.5 | Cursor SDK | Default — billed via Cursor API key |
+| auto | Cursor SDK | Server-selected Cursor model |
+| Claude Opus 4.6 (medium/max) | Claude SDK | Optional — needs `ANTHROPIC_API_KEY` |
+| GPT-5.4 / mini / codex | Codex | Optional — needs `OPENAI_API_KEY` + `codex` CLI |
+
+Model specs use `provider/model` form, e.g. `cursor/composer-2.5` or `cursor/auto`.
 
 ## Sandbox Tooling
 
@@ -132,6 +144,8 @@ cp .env.example .env
 ```env
 CTFD_URL=https://ctf.example.com
 CTFD_TOKEN=ctfd_your_token
+CURSOR_API_KEY=cursor_...
+# Optional alternate backends:
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
@@ -143,9 +157,10 @@ All settings can also be passed as environment variables or CLI flags.
 
 - Python 3.14+
 - Docker
-- API keys for at least one provider (Anthropic, OpenAI, Google)
-- `codex` CLI (for Codex solver/coordinator)
-- `claude` CLI (bundled with claude-agent-sdk)
+- `CURSOR_API_KEY` (primary) — from [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations)
+- Optional: Anthropic / OpenAI / Google keys for non-Cursor backends
+- `codex` CLI (only for Codex solver/coordinator)
+- `claude` CLI (only for Claude SDK backend; bundled with claude-agent-sdk)
 
 ## Acknowledgements
 

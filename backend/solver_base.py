@@ -27,7 +27,7 @@ class SolverResult:
 
 
 class SolverProtocol(Protocol):
-    """Common interface for all solver backends (Pydantic AI, Claude SDK, Codex)."""
+    """Common interface for all solver backends (Cursor, Claude SDK, Codex, Pydantic AI)."""
 
     model_spec: str
     agent_name: str

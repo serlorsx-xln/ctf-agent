@@ -19,6 +19,7 @@ PROVIDER_MAP: dict[str, str] = {
     "zen": "openai",
     "codex": "openai",
     "google": "google",
+    "cursor": "cursor",
 }
 
 # Fallback pricing for models not in genai-prices (per 1M tokens, USD)
@@ -57,6 +58,17 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
         "input": 0.15,
         "cached_input": 0.02,
         "output": 0.60,
+    },
+    # Cursor usage is billed via Cursor; keep a rough estimate for local tallies.
+    "composer-2.5": {
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.00,
+    },
+    "auto": {
+        "input": 1.25,
+        "cached_input": 0.125,
+        "output": 10.00,
     },
 }
 

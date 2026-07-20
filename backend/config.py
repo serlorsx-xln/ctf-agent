@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     ctfd_token: str = ""
 
     # API Keys
+    cursor_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""

@@ -8,7 +8,7 @@ import boto3
 from pydantic_ai.models import Model
 from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
-from pydantic_ai.models.openai import OpenAIModel, OpenAIModelSettings
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.bedrock import BedrockProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -17,13 +17,10 @@ from pydantic_ai.settings import ModelSettings
 if TYPE_CHECKING:
     from backend.config import Settings
 
-# Default model specs — claude-sdk and codex providers use the new solver backends
+# Default model specs — Cursor SDK is the primary backend (CURSOR_API_KEY).
+# Override with --models for claude-sdk/*, codex/*, bedrock/*, etc.
 DEFAULT_MODELS: list[str] = [
-    "claude-sdk/claude-opus-4-6/medium",
-    "claude-sdk/claude-opus-4-6/max",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/gpt-5.3-codex",
+    "cursor/composer-2.5",
 ]
 
 # Context window sizes (tokens)
@@ -35,6 +32,8 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.3-codex": 1_000_000,
     "gpt-5.3-codex-spark": 128_000,
     "gemini-3-flash-preview": 1_000_000,
+    "composer-2.5": 200_000,
+    "auto": 200_000,
 }
 
 # Models that support vision
@@ -44,6 +43,8 @@ VISION_MODELS: set[str] = {
     "gpt-5.4",
     "gpt-5.4-mini",
     "gemini-3-flash-preview",
+    "composer-2.5",
+    "auto",
 }
 
 
@@ -69,7 +70,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                     provider=BedrockProvider(bedrock_client=client),
                 )
         case "azure":
-            return OpenAIModel(
+            return OpenAIChatModel(
                 model_id,
                 provider=OpenAIProvider(
                     base_url=settings.azure_openai_endpoint,
@@ -77,7 +78,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 ),
             )
         case "zen":
-            return OpenAIModel(
+            return OpenAIChatModel(
                 model_id,
                 provider=OpenAIProvider(
                     base_url="https://opencode.ai/zen/v1",
@@ -89,7 +90,7 @@ def resolve_model(spec: str, settings: Settings) -> Model:
                 model_id,
                 provider=GoogleProvider(api_key=settings.gemini_api_key),
             )
-        case "claude-sdk" | "codex":
+        case "cursor" | "claude-sdk" | "codex":
             raise ValueError(
                 f"Provider '{provider}' uses its own solver backend, not Pydantic AI. "
                 f"resolve_model() should not be called for {spec}."
@@ -113,7 +114,7 @@ def resolve_model_settings(spec: str) -> ModelSettings:
             # Azure/Zen use OpenAI chat completions — server-side prompt caching
             # is automatic, no explicit config needed. Set max_tokens to avoid
             # reserving the full context window.
-            return OpenAIModelSettings(
+            return OpenAIChatModelSettings(
                 max_tokens=128_000,
             )
         case "google":

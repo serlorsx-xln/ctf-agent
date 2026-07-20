@@ -31,13 +31,18 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.command()
 @click.option("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
 @click.option("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
-@click.option("--image", default="ctf-sandbox", help="Docker sandbox image name")
+@click.option("--image", default=None, help="Docker sandbox image (default: SANDBOX_IMAGE or ctf-sandbox)")
 @click.option("--models", multiple=True, help="Model specs (default: all configured)")
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: claude-opus-4-6)")
-@click.option("--coordinator", default="claude", type=click.Choice(["claude", "codex"]), help="Coordinator backend")
+@click.option("--coordinator-model", default=None, help="Model for coordinator (default: composer-2.5 for cursor)")
+@click.option(
+    "--coordinator",
+    default="cursor",
+    type=click.Choice(["cursor", "claude", "codex"]),
+    help="Coordinator backend (default: cursor)",
+)
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
@@ -61,7 +66,9 @@ def main(
     """
     _setup_logging(verbose)
 
-    settings = Settings(sandbox_image=image)
+    settings = Settings()
+    if image:
+        settings.sandbox_image = image
     if ctfd_url:
         settings.ctfd_url = ctfd_url
     if ctfd_token:
@@ -162,7 +169,17 @@ async def _run_coordinator(
     await cleanup_orphan_containers()
     console.print(f"[bold]Starting coordinator ({coordinator_backend}, Ctrl+C to stop)...[/bold]\n")
 
-    if coordinator_backend == "codex":
+    if coordinator_backend == "cursor":
+        from backend.agents.cursor_coordinator import run_cursor_coordinator
+        results = await run_cursor_coordinator(
+            settings=settings,
+            model_specs=model_specs,
+            challenges_root=challenges_dir,
+            no_submit=no_submit,
+            coordinator_model=coordinator_model,
+            msg_port=msg_port,
+        )
+    elif coordinator_backend == "codex":
         from backend.agents.codex_coordinator import run_codex_coordinator
         results = await run_codex_coordinator(
             settings=settings,
