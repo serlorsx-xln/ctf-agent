@@ -1,0 +1,12 @@
+== CRYPTO TOOLS (factoring / lattice) ==
+RsaCtfTool           Automated RSA attacks. RsaCtfTool -n N -e E --attack all
+                     Installed under /opt/RsaCtfTool/
+cado-nfs             Number Field Sieve (large factoring / DLP). cado-nfs <N>
+                     Tree at /opt/cado-nfs/
+flatter              Fast LLL lattice reduction. flatter < matrix
+gmpy2 / fpylll       Fast arithmetic + LLL/BKZ via system python3
+
+== NOTES ==
+SageMath is a separate load (sage / .sage challenges).
+System python3 ≠ sage — use python3 for RsaCtfTool / gmpy2 / fpylll.
+Exit 137/124 → shrink the approach; re-read /challenge/TOOLS.txt.

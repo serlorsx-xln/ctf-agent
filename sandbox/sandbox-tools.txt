@@ -101,11 +101,13 @@ keras              Keras deep learning. import keras — model loading, inferenc
 PyJWT              JWT encode/decode. import jwt; jwt.encode(payload, key, algorithm='HS256')
 
 == NOTES ==
-- Sandbox runs ARM64. Do NOT execute x86/x86-64 binaries locally.
-  Use Ghidra tools for RE, and interact with remote services for dynamic analysis.
-- Need a package not listed? Run `pip install <pkg>` or `uv pip install <pkg>`.
+- Sandbox runs on the container arch (`uname -m`). x86_64 challenge ELFs on
+  aarch64: use qemu wrappers from the pwn tools load (`q64` / `qemu-x86_64-static`).
+- Need a package not listed? Run it — missing tools may install once and retry.
+  Then re-read /tools.txt.
 - Distfiles are at /challenge/distfiles/ (read-only)
 - Write generated/repaired files to /challenge/workspace/ (writable)
 - Services on the host are reachable via host.docker.internal (bridge networking).
-- RsaCtfTool is at /opt/RsaCtfTool/
-- CADO-NFS is at /opt/cado-nfs/
+- RsaCtfTool is at /opt/RsaCtfTool/ when that tool set is loaded
+- CADO-NFS is at /opt/cado-nfs/ when that tool set is loaded
+- Extra tools may load automatically when first used; re-read this file afterward.

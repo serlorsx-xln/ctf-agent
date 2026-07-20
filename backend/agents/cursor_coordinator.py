@@ -114,7 +114,7 @@ def _build_coordinator_tools(deps: CoordinatorDeps) -> dict[str, CustomTool]:
             execute=check_swarm_status,
         ),
         "submit_flag": CustomTool(
-            description="Submit a flag to CTFd.",
+            description="Accept a recovered flag for a challenge (ends the run when accepted).",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -179,14 +179,11 @@ async def run_cursor_coordinator(
     settings: Settings,
     model_specs: list[str] | None = None,
     challenges_root: str = "challenges",
-    no_submit: bool = False,
     coordinator_model: str | None = None,
     msg_port: int = 0,
 ) -> dict[str, Any]:
     """Run the Cursor SDK coordinator with the shared event loop."""
-    ctfd, cost_tracker, deps = build_deps(
-        settings, model_specs, challenges_root, no_submit,
-    )
+    cost_tracker, deps = build_deps(settings, model_specs, challenges_root)
     deps.msg_port = msg_port
 
     api_key = resolve_api_key(settings)
@@ -227,7 +224,7 @@ async def run_cursor_coordinator(
                 agent.agent_id,
             )
 
-        return await run_event_loop(deps, ctfd, cost_tracker, turn_fn)
+        return await run_event_loop(deps, cost_tracker, turn_fn)
     finally:
         if agent is not None:
             try:

@@ -21,6 +21,12 @@ build/
 .ruff_cache/
 uv.lock
 
+# OS junk
+.DS_Store
+
+# Local unpack / blutter test blobs (not part of the product)
+sandbox/fixtures/
+
 # Runtime
 workspace/
 codex-schema-*/

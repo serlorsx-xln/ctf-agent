@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS, provider_from_spec
 from backend.prompts import ChallengeMeta
@@ -49,11 +48,9 @@ class ChallengeSwarm:
 
     challenge_dir: str
     meta: ChallengeMeta
-    ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: Settings
     model_specs: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))
-    no_submit: bool = False
     coordinator_inbox: asyncio.Queue | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -66,6 +63,21 @@ class ChallengeSwarm:
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+
+    def __post_init__(self) -> None:
+        # Transparent L1: stay on L0; prefetch packs into the same container.
+        from backend.tool_router import apply_router_to_settings
+
+        image, packs = apply_router_to_settings(self.settings, self.challenge_dir)
+        if packs:
+            logger.info(
+                "[%s] L0 image=%s; prefetch packs=%s",
+                self.meta.name,
+                image,
+                ",".join(packs),
+            )
+        else:
+            logger.info("[%s] L0 image=%s", self.meta.name, image)
 
     def _create_solver(self, model_spec: str):
         """Create the right solver type based on provider.
@@ -86,11 +98,9 @@ class ChallengeSwarm:
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
-                ctfd=self.ctfd,
                 cost_tracker=self.cost_tracker,
                 settings=self.settings,
                 cancel_event=self.cancel_event,
-                no_submit=self.no_submit,
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
@@ -102,11 +112,9 @@ class ChallengeSwarm:
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
-                ctfd=self.ctfd,
                 cost_tracker=self.cost_tracker,
                 settings=self.settings,
                 cancel_event=self.cancel_event,
-                no_submit=self.no_submit,
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
@@ -118,11 +126,9 @@ class ChallengeSwarm:
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
-                ctfd=self.ctfd,
                 cost_tracker=self.cost_tracker,
                 settings=self.settings,
                 cancel_event=self.cancel_event,
-                no_submit=self.no_submit,
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
@@ -145,7 +151,6 @@ class ChallengeSwarm:
             model_spec=model_spec,
             challenge_dir=self.challenge_dir,
             meta=self.meta,
-            ctfd=self.ctfd,
             cost_tracker=self.cost_tracker,
             settings=self.settings,
             cancel_event=self.cancel_event,
@@ -154,7 +159,6 @@ class ChallengeSwarm:
         )
         solver.deps.message_bus = self.message_bus
         solver.deps.model_spec = model_spec
-        solver.deps.no_submit = self.no_submit
         solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, model_spec)
         solver.deps.notify_coordinator = self._make_notify_fn(model_spec)
         return solver
@@ -200,7 +204,7 @@ class ChallengeSwarm:
             self._submitted_flags.add(normalized)
 
             from backend.tools.core import do_submit_flag
-            display, is_confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag)
+            display, is_confirmed = await do_submit_flag(self.meta.name, flag)
             if is_confirmed:
                 self.confirmed_flag = normalized
             else:

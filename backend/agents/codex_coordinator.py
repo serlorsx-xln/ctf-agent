@@ -80,7 +80,7 @@ COORDINATOR_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Submit a flag to CTFd.",
+        "description": "Accept a recovered flag for a challenge (ends the run when accepted).",
         "inputSchema": {
             "type": "object",
             "properties": {"challenge_name": {"type": "string"}, "flag": {"type": "string"}},
@@ -326,14 +326,11 @@ async def run_codex_coordinator(
     settings: Settings,
     model_specs: list[str] | None = None,
     challenges_root: str = "challenges",
-    no_submit: bool = False,
     coordinator_model: str | None = None,
     msg_port: int = 0,
 ) -> dict[str, Any]:
     """Run the Codex coordinator with the shared event loop."""
-    ctfd, cost_tracker, deps = build_deps(
-        settings, model_specs, challenges_root, no_submit,
-    )
+    cost_tracker, deps = build_deps(settings, model_specs, challenges_root)
     deps.msg_port = msg_port
 
     resolved_model = coordinator_model or "gpt-5.4"
@@ -346,6 +343,6 @@ async def run_codex_coordinator(
         logger.info("Codex coordinator turn done")
 
     try:
-        return await run_event_loop(deps, ctfd, cost_tracker, turn_fn)
+        return await run_event_loop(deps, cost_tracker, turn_fn)
     finally:
         await coordinator.stop()

@@ -29,13 +29,14 @@ def _setup_logging(verbose: bool = False) -> None:
 
 
 @click.command()
-@click.option("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
-@click.option("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
-@click.option("--image", default=None, help="Docker sandbox image (default: SANDBOX_IMAGE or ctf-sandbox)")
+@click.option(
+    "--image",
+    default=None,
+    help="Force sandbox image (optional). Default: auto-select from challenge files (L0 + packs).",
+)
 @click.option("--models", multiple=True, help="Model specs (default: all configured)")
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
-@click.option("--no-submit", is_flag=True, help="Dry run — don't submit flags")
 @click.option("--coordinator-model", default=None, help="Model for coordinator (default: composer-2.5 for cursor)")
 @click.option(
     "--coordinator",
@@ -47,13 +48,10 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
-    ctfd_url: str | None,
-    ctfd_token: str | None,
-    image: str,
+    image: str | None,
     models: tuple[str, ...],
     challenge: str | None,
     challenges_dir: str,
-    no_submit: bool,
     coordinator_model: str | None,
     coordinator: str,
     max_challenges: int,
@@ -62,46 +60,69 @@ def main(
 ) -> None:
     """CTF Agent — multi-model solver swarm.
 
-    Run without --challenge to start the full coordinator (Ctrl+C to stop).
+    Flags are accepted locally (no external scoreboard). Run without --challenge
+    to start the full coordinator over challenges/ (Ctrl+C to stop).
     """
     _setup_logging(verbose)
 
     settings = Settings()
     if image:
         settings.sandbox_image = image
-    if ctfd_url:
-        settings.ctfd_url = ctfd_url
-    if ctfd_token:
-        settings.ctfd_token = ctfd_token
+        settings.sandbox_image_locked = True
+    else:
+        settings.sandbox_image_locked = False
     settings.max_concurrent_challenges = max_challenges
 
     model_specs = list(models) if models else list(DEFAULT_MODELS)
 
-    console.print("[bold]CTF Agent v2[/bold]")
-    console.print(f"  CTFd: {settings.ctfd_url}")
+    console.print("[bold]CTF Agent[/bold]")
     console.print(f"  Models: {', '.join(model_specs)}")
-    console.print(f"  Image: {settings.sandbox_image}")
+    if image:
+        console.print(f"  Image: {settings.sandbox_image} (forced via --image)")
+    elif challenge:
+        from backend.tool_router import resolve_sandbox_image
+
+        auto_image, packs = resolve_sandbox_image(
+            challenge,
+            default_image=settings.sandbox_image,
+        )
+        pack_note = f"; prefetch packs={','.join(packs)}" if packs else ""
+        console.print(f"  Image: {auto_image} (L0{pack_note})")
+    else:
+        console.print(
+            f"  Image: L0 default={settings.sandbox_image} "
+            "(packs loaded additively per challenge)"
+        )
     console.print(f"  Max challenges: {max_challenges}")
+    console.print("  Flag submit: local accept (no CTFd)")
     console.print()
 
     if challenge:
-        asyncio.run(_run_single(settings, challenge, model_specs, no_submit, max_challenges))
+        asyncio.run(_run_single(settings, challenge, model_specs, max_challenges))
     else:
-        asyncio.run(_run_coordinator(settings, model_specs, challenges_dir, no_submit, coordinator_model, coordinator, max_challenges, msg_port))
+        asyncio.run(
+            _run_coordinator(
+                settings,
+                model_specs,
+                challenges_dir,
+                coordinator_model,
+                coordinator,
+                max_challenges,
+                msg_port,
+            )
+        )
 
 
 async def _run_single(
     settings: Settings,
     challenge_dir: str,
     model_specs: list[str],
-    no_submit: bool,
     max_challenges: int,
 ) -> None:
     """Run a single challenge with a swarm."""
+    from backend.challenge import load_challenge
     from backend.agents.swarm import ChallengeSwarm
     from backend.cost_tracker import CostTracker
-    from backend.ctfd import CTFdClient
-    from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
     max_containers = max_challenges * len(model_specs)
@@ -109,53 +130,47 @@ async def _run_single(
     await cleanup_orphan_containers()
 
     challenge_path = Path(challenge_dir)
-    meta_path = challenge_path / "metadata.yml"
-    if not meta_path.exists():
-        console.print(f"[red]No metadata.yml found in {challenge_dir}[/red]")
+    if not challenge_path.is_dir():
+        console.print(f"[red]Not a directory: {challenge_dir}[/red]")
         sys.exit(1)
 
-    meta = ChallengeMeta.from_yaml(meta_path)
-    console.print(f"[bold]Challenge:[/bold] {meta.name} ({meta.category}, {meta.value} pts)")
+    try:
+        meta = load_challenge(challenge_path)
+    except Exception as e:
+        console.print(f"[red]Failed to load challenge: {e}[/red]")
+        sys.exit(1)
 
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+    console.print(f"[bold]Challenge:[/bold] {meta.name}")
+    if meta.connection_info:
+        console.print(f"  Endpoint: {meta.connection_info}")
+
     cost_tracker = CostTracker()
 
     swarm = ChallengeSwarm(
-        challenge_dir=str(challenge_path),
+        challenge_dir=str(challenge_path.resolve()),
         meta=meta,
-        ctfd=ctfd,
         cost_tracker=cost_tracker,
         settings=settings,
         model_specs=model_specs,
-        no_submit=no_submit,
     )
 
-    try:
-        result = await swarm.run()
-        from backend.solver_base import FLAG_FOUND
-        if result and result.status == FLAG_FOUND:
-            console.print(f"\n[bold green]FLAG FOUND:[/bold green] {result.flag}")
-        else:
-            console.print("\n[bold red]No flag found.[/bold red]")
+    result = await swarm.run()
+    from backend.solver_base import FLAG_FOUND
+    if result and result.status == FLAG_FOUND:
+        console.print(f"\n[bold green]FLAG FOUND:[/bold green] {result.flag}")
+    else:
+        console.print("\n[bold red]No flag found.[/bold red]")
 
-        console.print("\n[bold]Cost Summary:[/bold]")
-        for agent_name in cost_tracker.by_agent:
-            console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
-        console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
-    finally:
-        await ctfd.close()
+    console.print("\n[bold]Cost Summary:[/bold]")
+    for agent_name in cost_tracker.by_agent:
+        console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
+    console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
 
 
 async def _run_coordinator(
     settings: Settings,
     model_specs: list[str],
     challenges_dir: str,
-    no_submit: bool,
     coordinator_model: str | None,
     coordinator_backend: str,
     max_challenges: int,
@@ -175,7 +190,6 @@ async def _run_coordinator(
             settings=settings,
             model_specs=model_specs,
             challenges_root=challenges_dir,
-            no_submit=no_submit,
             coordinator_model=coordinator_model,
             msg_port=msg_port,
         )
@@ -185,7 +199,6 @@ async def _run_coordinator(
             settings=settings,
             model_specs=model_specs,
             challenges_root=challenges_dir,
-            no_submit=no_submit,
             coordinator_model=coordinator_model,
             msg_port=msg_port,
         )
@@ -195,7 +208,6 @@ async def _run_coordinator(
             settings=settings,
             model_specs=model_specs,
             challenges_root=challenges_dir,
-            no_submit=no_submit,
             coordinator_model=coordinator_model,
             msg_port=msg_port,
         )

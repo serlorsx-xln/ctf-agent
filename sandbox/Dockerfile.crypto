@@ -1,8 +1,10 @@
-# Deprecated entrypoint — same donor as Dockerfile.crypto.
-# Prefer:
+# Crypto pack donor — SageMath (conda-forge) for additive install into L0.
+# Ubuntu 24.04 to match ctf-sandbox-core userspace (apt has no sagemath on 24.04).
+#
+# Build (from repo root, needs network + ~10–20 min + several GB):
 #   docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
 #
-# Kept so older scripts that reference Dockerfile.sage still build the crypto donor.
+# Runtime: L0 stays ctf-sandbox-core; pack "crypto" copies /opt/sagemath in.
 
 FROM ubuntu:24.04
 
@@ -17,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Micromamba + Sage into a single prefix we can docker-cp into L0.
 RUN set -eux; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -31,6 +34,8 @@ RUN set -eux; \
     micromamba clean -a -y; \
     rm -rf /tmp/bin "$MAMBA_ROOT_PREFIX/pkgs"
 
+# Thin wrappers on PATH (copied with the pack via /usr/local/bin/sage*).
+# Use Sage's python3 directly — newer sage CLI has no `sage -python`.
 RUN printf '%s\n' '#!/bin/bash' 'exec /opt/sagemath/bin/sage "$@"' \
       > /usr/local/bin/sage \
     && printf '%s\n' '#!/bin/bash' 'exec /opt/sagemath/bin/python3 "$@"' \
@@ -38,9 +43,11 @@ RUN printf '%s\n' '#!/bin/bash' 'exec /opt/sagemath/bin/sage "$@"' \
     && chmod +x /usr/local/bin/sage /usr/local/bin/sage-python \
     && /usr/local/bin/sage -c 'print("sage_ok", 1+1)'
 
+# System python (donor image) + Sage python (so `sage` scripts can import Crypto).
 RUN pip3 install --no-cache-dir --break-system-packages \
         pycryptodome sympy galois pwntools requests || \
     pip3 install --no-cache-dir pycryptodome sympy galois pwntools requests
+RUN /opt/sagemath/bin/python3 -m pip install --no-cache-dir pycryptodome
 
 COPY sandbox/scripts/gf128_roots.py /opt/ctf/gf128_roots.py
 RUN printf '%s\n' '#!/bin/bash' 'exec python3 /opt/ctf/gf128_roots.py "$@"' \

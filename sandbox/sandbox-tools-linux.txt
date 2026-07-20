@@ -1,0 +1,16 @@
+== LINUX BOX / LIGHT REMOTE ==
+linpeas              Linux privilege-escalation enumerator.
+                     linpeas   or   bash /opt/linux-tools/bin/linpeas.sh
+pspy                 Process spy without root. pspy
+ffuf                 Web content discovery. ffuf -u http://HOST/FUZZ -w wordlist
+smbclient            SMB shares. smbclient -L //host -N
+ftp                  FTP client
+sshpass              Non-interactive SSH password helper
+impacket             Python AD/SMB/remote helpers (light). examples: psexec.py, smbclient.py
+evil-winrm           Windows WinRM shell (optional; needs reachable WinRM)
+
+== NOTES ==
+For Jeopardy / Linux boxes when the host has no Kali.
+Full Active Directory lab stacks are intentionally not included.
+Loaded on demand; re-read /challenge/TOOLS.txt after install.
+Exit 137/124 → shrink scans / wordlists.

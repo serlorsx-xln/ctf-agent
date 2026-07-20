@@ -1,11 +1,11 @@
-# Mobile / Flutter RE sandbox (PWNKnight-class challenges).
+# Mobile / Flutter RE sandbox.
 # Ubuntu 24.04 for g++>=13 + modern ICU (required by blutter).
 #
 # Build (from repo root):
 #   docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
 #
-# Run:
-#   uv run ctf-solve --image ctf-sandbox-mobile --challenge ./challenges/pwnknight ...
+# The tool router selects this image automatically when challenge files look
+# like Android/Flutter; users should not need --image.
 
 FROM ubuntu:24.04
 
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb gdbserver strace ltrace \
     binutils patchelf \
     qemu-user-static binfmt-support \
+    libc6-amd64-cross libc6-i386-cross \
     python3 python3-pip python3-dev python3-venv \
     python3-pyelftools python3-requests \
     openjdk-17-jre-headless \
@@ -70,24 +71,39 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN curl -fsSL https://raw.githubusercontent.com/hugsy/gef/main/gef.py -o /root/.gdbinit-gef.py \
     && printf 'source /root/.gdbinit-gef.py\n' > /root/.gdbinit
 
-# qemu helpers
-RUN printf '%s\n' '#!/bin/bash' 'exec qemu-x86_64-static "$@"' > /usr/local/bin/q64 \
-    && printf '%s\n' '#!/bin/bash' 'exec qemu-i386-static "$@"' > /usr/local/bin/q32 \
-    && chmod +x /usr/local/bin/q64 /usr/local/bin/q32
+# qemu-user: inject -L cross-prefix when present (see Dockerfile.pwn).
+RUN set -e; \
+    case "$(uname -m)" in aarch64|arm64) \
+      mkdir -p /lib64; \
+      if [ ! -e /lib64/ld-linux-x86-64.so.2 ]; then \
+        ln -sfn /usr/x86_64-linux-gnu/lib/ld-linux-x86-64.so.2 \
+          /lib64/ld-linux-x86-64.so.2; \
+      fi ;; \
+    esac; \
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'PREFIX="${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}"' \
+        'for a in "$@"; do case "$a" in -L) exec /usr/bin/qemu-x86_64-static "$@";; esac; done' \
+        'if [ -d "$PREFIX/lib" ]; then exec /usr/bin/qemu-x86_64-static -L "$PREFIX" "$@"; fi' \
+        'exec /usr/bin/qemu-x86_64-static "$@"' \
+        > /usr/local/bin/qemu-x86_64-static; \
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'PREFIX="${QEMU_LD_PREFIX:-/usr/i686-linux-gnu}"' \
+        'for a in "$@"; do case "$a" in -L) exec /usr/bin/qemu-i386-static "$@";; esac; done' \
+        'if [ -d "$PREFIX/lib" ]; then exec /usr/bin/qemu-i386-static -L "$PREFIX" "$@"; fi' \
+        'exec /usr/bin/qemu-i386-static "$@"' \
+        > /usr/local/bin/qemu-i386-static; \
+    printf '%s\n' '#!/bin/bash' 'exec qemu-x86_64-static "$@"' > /usr/local/bin/q64; \
+    printf '%s\n' '#!/bin/bash' 'exec qemu-i386-static "$@"' > /usr/local/bin/q32; \
+    chmod +x /usr/local/bin/qemu-x86_64-static /usr/local/bin/qemu-i386-static \
+        /usr/local/bin/q64 /usr/local/bin/q32
 
 # blutter (needs g++>=13; Ubuntu 24.04)
-RUN git clone --depth=1 https://github.com/worawit/blutter.git /opt/blutter \
-    && printf '%s\n' '#!/bin/bash' 'exec python3 /opt/blutter/blutter.py "$@"' > /usr/local/bin/blutter \
-    && chmod +x /usr/local/bin/blutter
-
-# Prebuild blutter for PWNKnight Dart snapshot so the agent does not compile at runtime.
-# Fixtures live under sandbox/ (challenges/ is dockerignored). Needs libapp.so + libflutter.so.
-COPY sandbox/fixtures/pwnknight-arm64 /tmp/pwnknight-arm64
-RUN ls -la /tmp/pwnknight-arm64/ \
-    && python3 /opt/blutter/blutter.py /tmp/pwnknight-arm64 /opt/blutter-pwnknight \
-    && test -d /opt/blutter-pwnknight \
-    && rm -rf /tmp/pwnknight-arm64 /opt/blutter/dartsdk /opt/blutter/build \
-    && ls /opt/blutter/bin/ | head -20
+RUN git clone --depth=1 https://github.com/worawit/blutter.git /opt/blutter
+COPY sandbox/scripts/blutter.sh /usr/local/bin/blutter
+RUN chmod +x /usr/local/bin/blutter \
+    && test -f /opt/blutter/blutter.py
 
 COPY sandbox/sandbox-tools-mobile.txt /tools.txt
 

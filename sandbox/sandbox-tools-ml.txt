@@ -1,0 +1,9 @@
+== ML (CPU) ==
+torch                PyTorch CPU. import torch
+keras                Keras with torch backend.
+                     KERAS_BACKEND=torch is set in the environment after load.
+                     Example: KERAS_BACKEND=torch python3 -c 'import keras'
+
+== NOTES ==
+Large download on first use. Prefer CPU wheels; Exit 137 → smaller batch / unload.
+Re-read /challenge/TOOLS.txt after install.

@@ -7,19 +7,19 @@ from backend.tools.core import do_submit_flag
 
 
 async def submit_flag(ctx: RunContext[SolverDeps], flag: str) -> str:
-    """Submit a flag to CTFd to verify it. Always call this before reporting a flag.
+    """Submit a recovered flag. Always call this when you have the real flag.
 
-    Returns CORRECT, ALREADY SOLVED, or INCORRECT.
-    Do NOT submit placeholder flags like CTF{flag} or CTF{placeholder}.
+    Submit the exact string the challenge awards (PREFIX{...}, FLAG-..., or a
+    compact formatless secret). Do not wrap or rewrite formats just to pass
+    the checker.
+
+    Returns CORRECT (challenge complete), ALREADY SOLVED, or REJECTED/INCORRECT.
+    Do NOT submit placeholders like CTF{flag} or CTF{placeholder}.
     """
-    if ctx.deps.no_submit:
-        return f'DRY RUN — would submit "{flag.strip()}" but --no-submit is set.'
-
-    # Use deduped submission via swarm if available, otherwise direct CTFd call
     if ctx.deps.submit_fn:
         display, is_confirmed = await ctx.deps.submit_fn(flag)
     else:
-        display, is_confirmed = await do_submit_flag(ctx.deps.ctfd, ctx.deps.challenge_name, flag)
+        display, is_confirmed = await do_submit_flag(ctx.deps.challenge_name, flag)
     if is_confirmed:
         ctx.deps.confirmed_flag = flag.strip()
     return display

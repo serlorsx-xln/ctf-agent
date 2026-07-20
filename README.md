@@ -14,15 +14,16 @@ The agent solves challenges across all categories — pwn, rev, crypto, forensic
 
 ## How It Works
 
-A **coordinator** LLM manages the competition while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to find the flag wins.
+A **coordinator** LLM manages local challenges under `challenges/` while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to submit an accepted flag wins.
 
 ```
                         +-----------------+
-                        |  CTFd Platform  |
+                        | challenges/     |
+                        | (local dirs)    |
                         +--------+--------+
                                  |
                         +--------v--------+
-                        |  Poller (5s)    |
+                        | Local poller    |
                         +--------+--------+
                                  |
                         +--------v--------+
@@ -49,7 +50,7 @@ A **coordinator** LLM manages the competition while **solver swarms** attack ind
      +-----------------+  +----------------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools pre-installed. Solvers never give up — they keep trying different approaches until the flag is found.
+Each solver runs in an isolated Docker container with CTF tools. Flags are accepted **locally** (plausible non-decoy `PREFIX{...}`) — there is no external CTFd/scoreboard dependency. A CORRECT `submit_flag` ends the challenge run.
 
 ## Quick Start (Cursor API key)
 
@@ -57,31 +58,39 @@ Each solver runs in an isolated Docker container with CTF tools pre-installed. S
 # Install
 uv sync
 
-# Build sandbox image
-docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .
+# Build L0 sandbox (+ optional pack donors)
+docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
+docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
+docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
+# SageMath donor for .sage challenges (first build is large / slow):
+docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
+# Optional donors (loaded on demand; multi-stage — toolchain not kept in final image):
+# docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
+# docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
+# docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
 
 # Configure credentials
 cp .env.example .env
 # Set CURSOR_API_KEY from https://cursor.com/dashboard/integrations
-# and your CTFd token
 
-# Run against a CTFd instance (Cursor coordinator + composer-2.5 solver)
-uv run ctf-solve \
-  --ctfd-url https://ctf.example.com \
-  --ctfd-token ctfd_your_token \
-  --challenges-dir challenges \
-  --max-challenges 10 \
-  -v
+# Drop a challenge folder, then solve:
+#   challenges/my-chal/challenge.txt   ← paste from the CTF page
+#   challenges/my-chal/...files...     ← attachments (or under distfiles/)
+uv run ctf-solve --challenge ./challenges/my-chal --models cursor/composer-2.5 -v
+
+# Harder challenges (same key / other backends):
+# uv run ctf-solve --challenge ./challenges/my-chal --models cursor/claude-4-sonnet -v
 ```
 
-Single challenge:
+L0 includes common helpers (see `/challenge/TOOLS.txt`). Packs load additively
+(`mobile` / `pwn` / `crypto` / `crypto-tools` / `steg` / `linux` / `forensics` /
+`web` / `ml` / `containers`). Exit 137/124 get generic resource hints; repeated
+failures ask the agent to change strategy — not a category playbook.
+
+Coordinator over all local challenges:
 
 ```bash
-uv run ctf-solve \
-  --challenge ./challenges/my-chal \
-  --models cursor/composer-2.5 \
-  --no-submit \
-  -v
+uv run ctf-solve --challenges-dir challenges --max-challenges 10 -v
 ```
 
 ## Coordinator Backends
@@ -112,17 +121,25 @@ Model specs use `provider/model` form, e.g. `cursor/composer-2.5` or `cursor/aut
 
 ## Sandbox Tooling
 
-Each solver gets an isolated Docker container pre-loaded with CTF tools:
+Default runtime is **L0** `ctf-sandbox-core` plus **additive packs** loaded on
+demand. Prefer core + packs; do not use a monolithic all-in-one image.
+Donors for `linux` / `steg` / `crypto-tools` are multi-stage (build toolchain
+discarded from the final image).
 
-| Category | Tools |
-|----------|-------|
-| **Binary** | radare2, GDB, objdump, binwalk, strings, readelf |
-| **Pwn** | pwntools, ROPgadget, angr, unicorn, capstone |
-| **Crypto** | SageMath, RsaCtfTool, z3, gmpy2, pycryptodome, cado-nfs |
-| **Forensics** | volatility3, Sleuthkit (mmls/fls/icat), foremost, exiftool |
-| **Stego** | steghide, stegseek, zsteg, ImageMagick, tesseract OCR |
-| **Web** | curl, nmap, Python requests, flask |
-| **Misc** | ffmpeg, sox, Pillow, numpy, scipy, PyTorch, podman |
+| Layer | Tools (representative) |
+|-------|------------------------|
+| **L0 core** | python3, pwntools, z3, gdb, binutils, curl, socat, gf128-roots |
+| **pwn** | qemu-user (+ guest libc on aarch64), GEF, ROPgadget, one_gadget, patchelf, angr, r2 |
+| **crypto** | SageMath, pycryptodome (in Sage), galois |
+| **crypto-tools** | flatter, cado-nfs, RsaCtfTool, fpylll, gmpy2 |
+| **mobile** | jadx, apktool, blutter, frida-tools, androguard |
+| **steg** | steghide, stegseek, zsteg, exiftool, tesseract |
+| **linux** | linpeas, pspy, ffuf, smbclient, sshpass, impacket |
+| **forensics / web / ml / containers** | volatility3, burp helpers, torch/keras, docker CLI — as needed |
+
+Heavy packs raise the container memory floor automatically (e.g. crypto ≥12g).
+Host pack cache defaults to 25 GiB with LRU eviction (`CTF_PACK_CACHE_MAX_GB`).
+After rebuilding donors: `bash scripts/prune_docker.sh`.
 
 ## Features
 
@@ -142,8 +159,6 @@ cp .env.example .env
 ```
 
 ```env
-CTFD_URL=https://ctf.example.com
-CTFD_TOKEN=ctfd_your_token
 CURSOR_API_KEY=cursor_...
 # Optional alternate backends:
 ANTHROPIC_API_KEY=sk-ant-...
@@ -152,6 +167,7 @@ GEMINI_API_KEY=...
 ```
 
 All settings can also be passed as environment variables or CLI flags.
+Flags are accepted locally via `submit_flag` (no CTFd URL/token required).
 
 ## Requirements
 
@@ -164,4 +180,5 @@ All settings can also be passed as environment variables or CLI flags.
 
 ## Acknowledgements
 
-- [es3n1n/Eruditus](https://github.com/es3n1n/Eruditus) — CTFd interaction and HTML helpers in `pull_challenges.py`
+- Challenge directories: drop `challenge.txt` (paste from the CTF page) plus the
+  challenge files. No metadata.yml.

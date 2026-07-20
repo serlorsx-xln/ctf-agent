@@ -1,10 +1,12 @@
-"""Background CTFd poller — detects new and solved challenges every 5 seconds."""
+"""Local challenge directory poller — detects new challenges under challenges_root."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-
-from backend.ctfd import CTFdClient
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +19,11 @@ class PollEvent:
 
 
 @dataclass
-class CTFdPoller:
-    """Polls CTFd every interval_s seconds, emits events for new/solved challenges."""
+class LocalChallengePoller:
+    """Watch a local challenges directory; track solves via callback."""
 
-    ctfd: CTFdClient
+    challenges_root: str
+    solved_fn: Callable[[], set[str]]
     interval_s: float = 5.0
 
     _known_challenges: set[str] = field(default_factory=set)
@@ -29,24 +32,38 @@ class CTFdPoller:
     _task: asyncio.Task | None = field(default=None, repr=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
+    def _scan_names(self) -> set[str]:
+        root = Path(self.challenges_root)
+        if not root.is_dir():
+            return set()
+        names: set[str] = set()
+        from backend.challenge import is_challenge_dir, load_challenge
+
+        for d in root.iterdir():
+            if not d.is_dir() or not is_challenge_dir(d):
+                continue
+            try:
+                names.add(load_challenge(d).name)
+            except Exception:
+                names.add(d.name)
+        return names
+
     async def start(self) -> None:
-        """Do initial poll (silent — no events) and start the background loop."""
         await self._seed()
         logger.info(
-            "Poller initialized: %d challenges, %d solved",
+            "Local poller initialized: %d challenges, %d solved",
             len(self._known_challenges),
             len(self._known_solved),
         )
-        self._task = asyncio.create_task(self._loop(), name="ctfd-poller")
+        self._task = asyncio.create_task(self._loop(), name="local-challenge-poller")
 
     async def _seed(self) -> None:
-        """Initial fetch — just populate known state, no events."""
+        self._known_challenges = self._scan_names()
         try:
-            stubs = await self.ctfd.fetch_challenge_stubs()
-            self._known_challenges = {ch["name"] for ch in stubs}
-            self._known_solved = await self.ctfd.fetch_solved_names()
+            self._known_solved = set(self.solved_fn())
         except Exception as e:
-            logger.warning("Initial poll error: %s", e)
+            logger.warning("Initial solved scan error: %s", e)
+            self._known_solved = set()
 
     async def stop(self) -> None:
         self._stop.set()
@@ -58,14 +75,12 @@ class CTFdPoller:
                 pass
 
     async def get_event(self, timeout: float = 1.0) -> PollEvent | None:
-        """Non-blocking get — returns None if no event within timeout."""
         try:
             return await asyncio.wait_for(self._event_queue.get(), timeout=timeout)
         except (TimeoutError, asyncio.CancelledError):
             return None
 
     def drain_events(self) -> list[PollEvent]:
-        """Drain all pending events without blocking."""
         events: list[PollEvent] = []
         while not self._event_queue.empty():
             try:
@@ -84,40 +99,21 @@ class CTFdPoller:
 
     async def _poll_once(self) -> None:
         try:
-            stubs = await self.ctfd.fetch_challenge_stubs()
-            current_names = {ch["name"] for ch in stubs}
-            current_solved = await self.ctfd.fetch_solved_names()
+            current_names = self._scan_names()
+            current_solved = set(self.solved_fn())
 
-            # Sanity check: if results look bogus compared to what we know, skip.
-            if self._known_challenges and len(current_names) < len(self._known_challenges) // 2:
-                logger.warning(f"Poll returned suspicious data ({len(current_names)} challenges vs {len(self._known_challenges)} known) — skipping")
-                return
-            # Don't let solved count regress (API might return empty on errors)
-            if self._known_solved and not current_solved:
-                logger.warning("Poll returned 0 solved (had %d) — skipping", len(self._known_solved))
-                return
+            for name in current_names - self._known_challenges:
+                logger.info("New local challenge detected: %s", name)
+                self._event_queue.put_nowait(PollEvent("new_challenge", name))
 
-            # Detect new challenges
-            new_challenges = current_names - self._known_challenges
-            for name in new_challenges:
-                logger.info("New challenge detected: %s", name)
-                self._event_queue.put_nowait(
-                    PollEvent("new_challenge", name)
-                )
-
-            # Detect newly solved
-            new_solves = current_solved - self._known_solved
-            for name in new_solves:
+            for name in current_solved - self._known_solved:
                 logger.info("Challenge solved: %s", name)
-                self._event_queue.put_nowait(
-                    PollEvent("challenge_solved", name)
-                )
+                self._event_queue.put_nowait(PollEvent("challenge_solved", name))
 
             self._known_challenges = current_names
             self._known_solved = current_solved
-
         except Exception as e:
-            logger.warning(f"Poll error: {e}")
+            logger.warning("Local poll error: %s", e)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

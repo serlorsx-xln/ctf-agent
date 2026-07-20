@@ -1,4 +1,4 @@
-"""Shared coordinator event loop — used by both Claude SDK and Codex coordinators."""
+"""Shared coordinator event loop — used by Cursor / Claude / Codex coordinators."""
 
 from __future__ import annotations
 
@@ -11,10 +11,9 @@ from typing import Any
 
 from backend.config import Settings
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.deps import CoordinatorDeps
 from backend.models import DEFAULT_MODELS
-from backend.poller import CTFdPoller
+from backend.poller import LocalChallengePoller
 from backend.prompts import ChallengeMeta
 
 logger = logging.getLogger(__name__)
@@ -27,69 +26,64 @@ def build_deps(
     settings: Settings,
     model_specs: list[str] | None = None,
     challenges_root: str = "challenges",
-    no_submit: bool = False,
     challenge_dirs: dict[str, str] | None = None,
     challenge_metas: dict[str, ChallengeMeta] | None = None,
-) -> tuple[CTFdClient, CostTracker, CoordinatorDeps]:
-    """Create CTFd client, cost tracker, and coordinator deps."""
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+) -> tuple[CostTracker, CoordinatorDeps]:
+    """Create cost tracker and coordinator deps (local challenges only)."""
     cost_tracker = CostTracker()
     specs = model_specs or list(DEFAULT_MODELS)
     Path(challenges_root).mkdir(parents=True, exist_ok=True)
 
     deps = CoordinatorDeps(
-        ctfd=ctfd,
         cost_tracker=cost_tracker,
         settings=settings,
         model_specs=specs,
         challenges_root=challenges_root,
-        no_submit=no_submit,
         max_concurrent_challenges=getattr(settings, "max_concurrent_challenges", 10),
         challenge_dirs=challenge_dirs or {},
         challenge_metas=challenge_metas or {},
     )
 
-    # Pre-load already-pulled challenges
-    for d in Path(challenges_root).iterdir():
-        meta_path = d / "metadata.yml"
-        if meta_path.exists():
-            meta = ChallengeMeta.from_yaml(meta_path)
-            if meta.name not in deps.challenge_dirs:
-                deps.challenge_dirs[meta.name] = str(d)
-                deps.challenge_metas[meta.name] = meta
+    # Pre-load local challenges
+    from backend.challenge import is_challenge_dir, load_challenge
 
-    return ctfd, cost_tracker, deps
+    for d in Path(challenges_root).iterdir():
+        if not d.is_dir() or not is_challenge_dir(d):
+            continue
+        try:
+            meta = load_challenge(d)
+        except Exception:
+            continue
+        if meta.name not in deps.challenge_dirs:
+            deps.challenge_dirs[meta.name] = str(d)
+            deps.challenge_metas[meta.name] = meta
+
+    return cost_tracker, deps
 
 
 async def run_event_loop(
     deps: CoordinatorDeps,
-    ctfd: CTFdClient,
     cost_tracker: CostTracker,
     turn_fn: TurnFn,
     status_interval: int = 60,
 ) -> dict[str, Any]:
-    """Run the shared coordinator event loop.
+    """Run the shared coordinator event loop over local challenges/."""
 
-    Args:
-        deps: Coordinator dependencies (shared state).
-        ctfd: CTFd client (for poller).
-        cost_tracker: Cost tracker.
-        turn_fn: Async function that sends a message to the coordinator LLM.
-        status_interval: Seconds between status updates.
-    """
-    poller = CTFdPoller(ctfd=ctfd, interval_s=5.0)
+    def _solved() -> set[str]:
+        return set(deps.results.keys())
+
+    poller = LocalChallengePoller(
+        challenges_root=deps.challenges_root,
+        solved_fn=_solved,
+        interval_s=5.0,
+    )
     await poller.start()
 
     # Start operator message HTTP endpoint
     msg_server = await _start_msg_server(deps.operator_inbox, deps.msg_port)
 
     logger.info(
-        "Coordinator starting: %d models, %d challenges, %d solved",
+        "Coordinator starting: %d models, %d local challenges, %d solved",
         len(deps.model_specs),
         len(poller.known_challenges),
         len(poller.known_solved),
@@ -97,8 +91,8 @@ async def run_event_loop(
 
     unsolved = poller.known_challenges - poller.known_solved
     initial_msg = (
-        f"CTF is LIVE. {len(poller.known_challenges)} challenges, "
-        f"{len(poller.known_solved)} solved.\n"
+        f"Local CTF workspace is LIVE. {len(poller.known_challenges)} challenges under "
+        f"{deps.challenges_root}/, {len(poller.known_solved)} solved.\n"
         f"Unsolved: {sorted(unsolved) if unsolved else 'NONE'}\n"
         "Fetch challenges and spawn swarms for all unsolved."
     )
@@ -130,7 +124,6 @@ async def run_event_loop(
             for evt in events:
                 if evt.kind == "new_challenge":
                     parts.append(f"NEW CHALLENGE: '{evt.challenge_name}' appeared. Spawn a swarm.")
-                    # Auto-spawn for new challenges
                     await _auto_spawn_one(deps, evt.challenge_name)
                 elif evt.kind == "challenge_solved":
                     parts.append(f"SOLVED: '{evt.challenge_name}' — swarm auto-killed.")
@@ -169,7 +162,6 @@ async def run_event_loop(
                     f"STATUS: {len(solved_set)} solved, {len(unsolved_set)} unsolved, "
                     f"{len(active)} active swarms. Cost: ${cost_tracker.total_cost_usd:.2f}"
                 )
-                # Only send to coordinator if there's something happening
                 if active or parts:
                     parts.append(status_line)
                 else:
@@ -196,10 +188,6 @@ async def run_event_loop(
         if deps.swarm_tasks:
             await asyncio.gather(*deps.swarm_tasks.values(), return_exceptions=True)
         cost_tracker.log_summary()
-        try:
-            await ctfd.close()
-        except Exception:
-            pass
 
     return {
         "results": deps.results,

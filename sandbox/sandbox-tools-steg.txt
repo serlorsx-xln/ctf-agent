@@ -1,0 +1,15 @@
+== STEG / MEDIA / OCR ==
+steghide             Embed/extract in JPEG/BMP/WAV. steghide extract -sf file.jpg
+stegseek             Brute steghide passwords. stegseek file.jpg wordlist.txt
+zsteg                PNG/BMP LSB / bit-plane scans. zsteg file.png
+exiftool             EXIF / metadata. exiftool file.jpg
+pngcheck             PNG structure. pngcheck -v file.png
+identify / convert   ImageMagick. identify img.png ; convert in.png out.png
+ffmpeg               Audio/video. ffmpeg -i in.wav out.mp3
+sox                  Audio analysis. sox in.wav -n spectrogram -o spec.png
+tesseract            OCR. tesseract image.png stdout
+Pillow / pytesseract Python imaging + OCR wrappers
+
+== NOTES ==
+Loaded on demand when these commands are first used.
+Exit 137/124 → shrink inputs; re-read /challenge/TOOLS.txt.

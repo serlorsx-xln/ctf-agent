@@ -1,5 +1,14 @@
-# CTF challenge solver sandbox image.
-# Build once: docker build -f Dockerfile.sandbox -t ctf-sandbox .
+# CTF challenge solver sandbox image — DEPRECATED.
+#
+# Prefer L0 + additive packs:
+#   docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
+#   docker build -f sandbox/Dockerfile.<pack> -t ctf-sandbox-<pack> .
+#
+# This monolith is kept only as a last-resort reference for operators who still
+# have a local `ctf-sandbox` tag. Do not build it for new setups.
+#
+# Legacy build (not recommended):
+#   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .
 
 FROM ubuntu:22.04
 

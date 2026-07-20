@@ -24,7 +24,6 @@ from claude_agent_sdk import (
 )
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.output_types import solver_output_json_schema
@@ -44,11 +43,9 @@ class ClaudeSolver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
-        no_submit: bool = False,
         submit_fn=None,
         message_bus=None,
         notify_coordinator=None,
@@ -57,17 +54,15 @@ class ClaudeSolver:
         self.model_id = model_id_from_spec(model_spec)
         self.challenge_dir = challenge_dir
         self.meta = meta
-        self.ctfd = ctfd
         self.cost_tracker = cost_tracker
         self.settings = settings
         self.cancel_event = cancel_event or asyncio.Event()
-        self.no_submit = no_submit
         self.submit_fn = submit_fn
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
 
         self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox"),
+            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
@@ -148,19 +143,16 @@ class ClaudeSolver:
                 flag_match = re.match(r"submit_flag\s+['\"]?(.+?)['\"]?\s*$", command.strip())
                 if flag_match:
                     flag_val = flag_match.group(1).strip()
-                    if self.no_submit:
-                        result_msg = f'DRY RUN — would submit "{flag_val}"'
+                    if self.submit_fn:
+                        display, confirmed = await self.submit_fn(flag_val)
                     else:
-                        if self.submit_fn:
-                            display, confirmed = await self.submit_fn(flag_val)
-                        else:
-                            from backend.tools.core import do_submit_flag
-                            display, confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag_val)
-                        result_msg = display
-                        if confirmed:
-                            self._confirmed = True
-                            self._flag = flag_val
-                            self.tracer.event("flag_confirmed", flag=flag_val, step=self._step_count)
+                        from backend.tools.core import do_submit_flag
+                        display, confirmed = await do_submit_flag(self.meta.name, flag_val)
+                    result_msg = display
+                    if confirmed:
+                        self._confirmed = True
+                        self._flag = flag_val
+                        self.tracer.event("flag_confirmed", flag=flag_val, step=self._step_count)
                     # Rewrite to an echo so Bash returns the submission result
                     return {
                         "hookSpecificOutput": {
@@ -331,8 +323,7 @@ class ClaudeSolver:
                         if output.get("type") == "flag_found":
                             self._flag = output.get("flag")
                             self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-                            if self.no_submit:
-                                self._confirmed = True
+                            # JSON alone does not confirm — only submit_flag does.
 
             self.tracer.event("turn_complete", duration=round(time.monotonic() - t0, 1), cost=round(self._cost_usd, 4))
 

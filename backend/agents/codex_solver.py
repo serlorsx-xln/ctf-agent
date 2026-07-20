@@ -21,7 +21,6 @@ import time
 from typing import Any
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
@@ -85,7 +84,7 @@ SANDBOX_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Submit a flag to CTFd. Returns CORRECT, ALREADY SOLVED, or INCORRECT.",
+        "description": "Submit a recovered flag. Returns CORRECT (challenge complete), ALREADY SOLVED, or REJECTED/INCORRECT.",
         "inputSchema": {"type": "object", "properties": {"flag": {"type": "string"}}, "required": ["flag"]},
     },
     {
@@ -124,11 +123,9 @@ class CodexSolver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
-        no_submit: bool = False,
         submit_fn=None,
         message_bus=None,
         notify_coordinator=None,
@@ -139,15 +136,13 @@ class CodexSolver:
         self.meta = meta
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
-        self.ctfd = ctfd
         self.cost_tracker = cost_tracker
         self.settings = settings
         self.cancel_event = cancel_event or asyncio.Event()
-        self.no_submit = no_submit
         self.submit_fn = submit_fn
 
         self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox"),
+            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
@@ -395,6 +390,12 @@ class CodexSolver:
             if loop_status == "warn" and isinstance(result, str):
                 from backend.loop_detect import LOOP_WARNING_MESSAGE
                 result = f"{result}\n\n{LOOP_WARNING_MESSAGE}"
+            if isinstance(result, str):
+                fail_status = self.loop_detector.check_result(tool_name, result)
+                if fail_status in ("oom_break", "fail_break"):
+                    from backend.loop_detect import OOM_STUCK_MESSAGE
+                    self.tracer.event("resource_loop", tool=tool_name, step=self._step_count)
+                    result = f"{result}\n\n{OOM_STUCK_MESSAGE}"
 
         # Build content items — handle image tuples from view_image
         if isinstance(result, tuple):
@@ -430,13 +431,11 @@ class CodexSolver:
             return await do_list_files(self.sandbox, args.get("path", "/challenge/distfiles"))
         elif name == "submit_flag":
             flag = args.get("flag", "")
-            if self.no_submit:
-                return f'DRY RUN — would submit "{flag}"'
             if self.submit_fn:
                 display, is_confirmed = await self.submit_fn(flag)
             else:
                 from backend.tools.core import do_submit_flag
-                display, is_confirmed = await do_submit_flag(self.ctfd, self.meta.name, flag)
+                display, is_confirmed = await do_submit_flag(self.meta.name, flag)
             if is_confirmed:
                 self._confirmed = True
                 self._flag = flag
@@ -502,8 +501,7 @@ class CodexSolver:
                 if self._structured_output.get("type") == "flag_found":
                     self._flag = self._structured_output.get("flag")
                     self._findings = f"Flag found via {self._structured_output.get('method', '?')}: {self._flag}"
-                    if self.no_submit:
-                        self._confirmed = True
+                    # JSON alone does not confirm — only submit_flag does.
 
             if self._confirmed and self._flag:
                 return self._result(FLAG_FOUND)

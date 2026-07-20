@@ -1,0 +1,34 @@
+# Steg / media pack donor — stegseek binary only (zsteg/apt install on L0).
+# Multi-stage: compilers stay out of the final donor image.
+#
+# Build (from repo root):
+#   docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
+
+FROM ubuntu:24.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git cmake g++ make pkg-config \
+    libmhash-dev libmcrypt-dev libjpeg-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth=1 https://github.com/RickdeJager/stegseek /tmp/stegseek \
+    && cmake -S /tmp/stegseek -B /tmp/stegseek/build \
+    && cmake --build /tmp/stegseek/build --target install \
+    && mkdir -p /opt/stegseek/bin \
+    && cp "$(command -v stegseek)" /opt/stegseek/bin/stegseek \
+    && rm -rf /tmp/stegseek
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV LANG=C.UTF-8
+
+COPY --from=build /opt/stegseek /opt/stegseek
+COPY sandbox/sandbox-tools-steg.txt /tools.txt
+
+WORKDIR /challenge
+CMD ["sleep", "infinity"]

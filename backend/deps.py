@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.sandbox import DockerSandbox
 
 if TYPE_CHECKING:
@@ -21,7 +20,6 @@ SubmitFn = Callable[[str], Coroutine[Any, Any, tuple[str, bool]]]
 @dataclass
 class SolverDeps:
     sandbox: DockerSandbox
-    ctfd: CTFdClient
     challenge_dir: str
     challenge_name: str
     workspace_dir: str
@@ -31,18 +29,15 @@ class SolverDeps:
     message_bus: ChallengeMessageBus | None = None
     model_spec: str = ""
     submit_fn: SubmitFn | None = None  # Deduped flag submission via swarm
-    no_submit: bool = False
     notify_coordinator: Callable[[str], Coroutine[Any, Any, None]] | None = None
 
 
 @dataclass
 class CoordinatorDeps:
-    ctfd: CTFdClient
     cost_tracker: CostTracker
     settings: Any
     model_specs: list[str] = field(default_factory=list)
     challenges_root: str = "challenges"
-    no_submit: bool = False
     max_concurrent_challenges: int = 10
 
     msg_port: int = 0  # 0 = auto-pick free port

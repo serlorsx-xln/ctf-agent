@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb gdbserver strace ltrace \
     binutils patchelf \
     qemu-user-static binfmt-support \
+    # Guest glibc for qemu-user on aarch64 hosts (x86_64 / i386 CTF bins).
+    libc6-amd64-cross libc6-i386-cross \
     python3 python3-pip python3-dev python3-venv \
     ruby ruby-dev \
     libssl-dev libffi-dev \
@@ -52,10 +54,35 @@ RUN curl -fsSL https://raw.githubusercontent.com/hugsy/gef/main/gef.py -o /root/
 # Ruby pwn helpers
 RUN gem install one_gadget seccomp-tools --no-document
 
-# Convenience wrappers for foreign-arch challenge binaries
-RUN printf '%s\n' '#!/bin/bash' 'exec qemu-x86_64-static "$@"' > /usr/local/bin/q64 \
-    && printf '%s\n' '#!/bin/bash' 'exec qemu-i386-static "$@"' > /usr/local/bin/q32 \
-    && chmod +x /usr/local/bin/q64 /usr/local/bin/q32
+# qemu-user needs -L <cross-prefix> when the guest glibc lives under
+# /usr/x86_64-linux-gnu (typical aarch64 host). Wrappers no-op the -L when
+# that prefix is absent (native amd64). Never overwrite amd64's /lib64 ld.
+RUN set -e; \
+    case "$(uname -m)" in aarch64|arm64) \
+      mkdir -p /lib64; \
+      if [ ! -e /lib64/ld-linux-x86-64.so.2 ]; then \
+        ln -sfn /usr/x86_64-linux-gnu/lib/ld-linux-x86-64.so.2 \
+          /lib64/ld-linux-x86-64.so.2; \
+      fi ;; \
+    esac; \
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'PREFIX="${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}"' \
+        'for a in "$@"; do case "$a" in -L) exec /usr/bin/qemu-x86_64-static "$@";; esac; done' \
+        'if [ -d "$PREFIX/lib" ]; then exec /usr/bin/qemu-x86_64-static -L "$PREFIX" "$@"; fi' \
+        'exec /usr/bin/qemu-x86_64-static "$@"' \
+        > /usr/local/bin/qemu-x86_64-static; \
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'PREFIX="${QEMU_LD_PREFIX:-/usr/i686-linux-gnu}"' \
+        'for a in "$@"; do case "$a" in -L) exec /usr/bin/qemu-i386-static "$@";; esac; done' \
+        'if [ -d "$PREFIX/lib" ]; then exec /usr/bin/qemu-i386-static -L "$PREFIX" "$@"; fi' \
+        'exec /usr/bin/qemu-i386-static "$@"' \
+        > /usr/local/bin/qemu-i386-static; \
+    printf '%s\n' '#!/bin/bash' 'exec qemu-x86_64-static "$@"' > /usr/local/bin/q64; \
+    printf '%s\n' '#!/bin/bash' 'exec qemu-i386-static "$@"' > /usr/local/bin/q32; \
+    chmod +x /usr/local/bin/qemu-x86_64-static /usr/local/bin/qemu-i386-static \
+        /usr/local/bin/q64 /usr/local/bin/q32
 
 COPY sandbox/sandbox-tools-pwn.txt /tools.txt
 

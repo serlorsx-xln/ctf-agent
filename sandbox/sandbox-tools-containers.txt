@@ -1,0 +1,9 @@
+== NESTED CONTAINERS ==
+podman               Run challenge container images inside the sandbox
+buildah              Build OCI images
+podman-compose       Compose-compatible helper (if packaged)
+
+== NOTES ==
+Optional — install may be skipped on hosts where nested containers are unavailable.
+Prefer host.docker.internal for services on the host network.
+Loaded on demand when these commands are first used.

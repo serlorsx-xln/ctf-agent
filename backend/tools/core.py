@@ -18,7 +18,40 @@ def _truncate(text: str, limit: int = MAX_OUTPUT) -> str:
 
 
 async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
+    from backend.tool_router import (
+        infer_pack_from_failure,
+        parse_ensure_pack_command,
+    )
+
+    ensure_arg = parse_ensure_pack_command(command)
+    if ensure_arg is not None:
+        if hasattr(sandbox, "ensure_pack"):
+            return await sandbox.ensure_pack(ensure_arg)
+        return "Additional tool install is not available in this sandbox."
+
     result = await sandbox.exec(command, timeout_s=timeout_seconds)
+    out = _format_exec(result)
+
+    if result.exit_code == 0 or not hasattr(sandbox, "ensure_pack"):
+        return out
+
+    pack = infer_pack_from_failure(command, result.stderr, result.stdout)
+    if not pack:
+        return out
+    if pack in getattr(sandbox, "ensured_packs", ()):
+        return out
+
+    ensure_msg = await sandbox.ensure_pack(pack)
+    # If ensure failed, don't retry forever.
+    if ensure_msg.startswith("Failed") or "not installed" in ensure_msg:
+        return f"{out}\n\n[sandbox] {ensure_msg}"
+
+    result2 = await sandbox.exec(command, timeout_s=timeout_seconds)
+    out2 = _format_exec(result2)
+    return f"[sandbox] {ensure_msg}\n\n{out2}"
+
+
+def _format_exec(result) -> str:
     parts: list[str] = []
     if result.stdout:
         parts.append(result.stdout)
@@ -26,6 +59,11 @@ async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
         parts.append(f"[stderr]\n{result.stderr}")
     if result.exit_code != 0:
         parts.append(f"[exit {result.exit_code}]")
+        from backend.loop_detect import RESOURCE_HINTS
+
+        hint = RESOURCE_HINTS.get(result.exit_code)
+        if hint:
+            parts.append(hint)
     out = "\n".join(parts).strip() or "(no output)"
     return _truncate(out)
 
@@ -73,18 +111,15 @@ async def do_list_files(sandbox, path: str = "/challenge/distfiles") -> str:
     return out or f"{path} is empty."
 
 
-async def do_submit_flag(ctfd, challenge_name: str, flag: str) -> tuple[str, bool]:
-    """Submit a flag. Returns (display_message, is_confirmed)."""
-    flag = flag.strip()
-    if not flag:
-        return "Empty flag — nothing to submit.", False
+async def do_submit_flag(_challenge_name: str, flag: str) -> tuple[str, bool]:
+    """Accept a flag locally. Returns (display_message, is_confirmed).
 
-    try:
-        result = await ctfd.submit_flag(challenge_name, flag)
-        is_confirmed = result.status in ("correct", "already_solved")
-        return result.display, is_confirmed
-    except Exception as e:
-        return f"submit_flag error: {e}", False
+    No external scoreboard — a plausible non-decoy flag ends the challenge run.
+    ``_challenge_name`` is kept for call-site compatibility / logging only.
+    """
+    from backend.flags import accept_flag
+
+    return accept_flag(flag)
 
 
 def _is_internal_url(url: str) -> bool:

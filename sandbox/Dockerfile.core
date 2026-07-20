@@ -1,0 +1,43 @@
+# L0 core sandbox — always start here; L1 packs are copied in at runtime.
+# Ubuntu 24.04 so mobile pack (jadx/blutter) shares a compatible userspace.
+#
+# Build (from repo root):
+#   docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget git file xxd bsdmainutils unzip zip jq \
+    netcat-openbsd socat \
+    openssl \
+    gcc g++ make cmake pkg-config \
+    gdb gdbserver strace ltrace \
+    binutils \
+    python3 python3-pip python3-dev python3-venv \
+    libssl-dev libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Minimal Python CTF helpers (packs add more via pip/apt on ensure)
+RUN pip3 install --no-cache-dir --break-system-packages \
+        pwntools \
+        requests \
+        pyelftools \
+        pycryptodome \
+        sympy \
+        z3-solver \
+        numpy
+
+# Low-memory GF(2^128) root finder (GCM field) — always available on L0
+COPY sandbox/scripts/gf128_roots.py /opt/ctf/gf128_roots.py
+RUN printf '%s\n' '#!/bin/bash' 'exec python3 /opt/ctf/gf128_roots.py "$@"' \
+      > /usr/local/bin/gf128-roots \
+    && chmod +x /usr/local/bin/gf128-roots /opt/ctf/gf128_roots.py
+
+COPY sandbox/sandbox-tools-core.txt /tools.txt
+
+WORKDIR /challenge
+CMD ["sleep", "infinity"]

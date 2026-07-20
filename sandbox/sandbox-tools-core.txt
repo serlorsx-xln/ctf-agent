@@ -1,0 +1,35 @@
+CTF SANDBOX TOOLS
+=================
+Installed tools in this sandbox. Extra tools may appear after first use.
+
+== Read this first ==
+cat /tools.txt
+
+== CORE ==
+bash / curl / wget / git / openssl
+python3 + pwntools + requests + pyelftools + pycryptodome + sympy + z3 + numpy
+                       from z3 import *; s=Solver(); s.add(...); s.check()
+file / strings / xxd / binutils (objdump, readelf, nm)
+gdb / strace / ltrace
+nc / socat / jq / unzip
+gf128-roots            GF(2^128) poly roots (NIST field used by AES-GCM)
+                       gf128-roots --demo
+                       gf128-roots --coeffs HEX0,HEX1,...,HEXd
+
+Extra category tools (steg, forensics, sage, RsaCtfTool, angr, …) load
+automatically when first used — re-read this file afterward.
+
+== MEMORY ==
+Exit 137 = OOM kill — shrink work / stream / use lighter tools from this list.
+Exit 124 = timeout — narrow scope or pick a faster tool.
+
+== PATHS ==
+/challenge/distfiles     Challenge files (read-only)
+/challenge/workspace     Writable
+/tools.txt               This file (updates when more tools load)
+/opt and /usr/local      Common install prefixes for extra tools
+
+== NOTES ==
+Python packages belong to the interpreter you run (e.g. `python3` vs `sage`).
+If a needed command is missing, just run it — the sandbox may install it
+once and retry. Then re-read /tools.txt. Workspace is preserved.

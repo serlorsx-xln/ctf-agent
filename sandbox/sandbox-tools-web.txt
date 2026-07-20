@@ -1,0 +1,7 @@
+== NETWORK / WEB HELPERS ==
+nmap                 Port / service scan. nmap -sV host
+flask                Quick HTTP listeners for callbacks
+PyJWT                JWT encode/decode. import jwt
+
+== NOTES ==
+Loaded on demand. curl / wget / nc / requests are already on the base image.

@@ -28,7 +28,7 @@ from cursor_sdk import (
 
 from backend.agents.cursor_runtime import acquire_client, release_client, resolve_api_key
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
+from backend.flags import is_decoy_flag
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
@@ -57,27 +57,32 @@ def _live(tag: str, text: str, *, limit: int = 4000) -> None:
 
 
 SOLVER_PREAMBLE = """\
-IMPORTANT: You are solving a CTF challenge. All challenge files and tools live
-inside a Docker sandbox. You MUST use the custom tools listed below for every
+IMPORTANT: You are solving a CTF challenge. Challenge files and installed tools
+live inside a Docker sandbox. You MUST use the custom tools listed below for every
 operation — do NOT use the built-in Shell, Read, Write, Edit, Glob, or Grep tools
 (those run on the host and will not see challenge files).
 
 Available tools:
 - bash — run a command in the sandbox
 - read_file / write_file / list_files — file I/O in the sandbox
-- submit_flag — submit a candidate flag to CTFd
+- submit_flag — submit a recovered flag (ends the challenge when accepted)
 - webhook_create / webhook_get_requests — out-of-band HTTP callbacks
 - view_image — inspect an image file in the sandbox
 - notify_coordinator — send a strategic note to the coordinator
 
-All paths are under /challenge/ (distfiles at /challenge/distfiles/, workspace at
-/challenge/workspace/). When you find the flag, call submit_flag.
+Paths:
+- Challenge: /challenge/distfiles (read-only), /challenge/workspace (writable)
+- Tool inventory: /challenge/TOOLS.txt (same as /tools.txt) — read this early
+- If a tool is missing, just run it — the sandbox may install it and retry.
+  Then re-read /tools.txt.
 
-HARD RULE — NO WRITEUPS:
-- Do NOT use WebSearch, WebFetch, browser, or any internet lookup for challenge
-  names, solutions, or writeups.
-- web_fetch is intentionally unavailable. Solve only from local challenge files
-  and your own reasoning.
+FIRST: `cat /challenge/TOOLS.txt`, then inspect the challenge files and solve.
+Prefer installed tools over guessing. Do not search writeups.
+Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.
+
+When you recover the real flag, call submit_flag.
+Ignore decoys (*fake_flag*, CTF{flag}, CTF{placeholder}, TRYHARDER).
+CORRECT from submit_flag means the challenge is done — stop.
 
 """
 
@@ -90,11 +95,9 @@ class CursorSolver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
-        no_submit: bool = False,
         submit_fn=None,
         message_bus=None,
         notify_coordinator=None,
@@ -103,17 +106,15 @@ class CursorSolver:
         self.model_id = model_id_from_spec(model_spec)
         self.challenge_dir = challenge_dir
         self.meta = meta
-        self.ctfd = ctfd
         self.cost_tracker = cost_tracker
         self.settings = settings
         self.cancel_event = cancel_event or asyncio.Event()
-        self.no_submit = no_submit
         self.submit_fn = submit_fn
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
 
         self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox"),
+            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
@@ -151,11 +152,32 @@ class CursorSolver:
         self._api_key = resolve_api_key(self.settings)
         self._workdir = tempfile.TemporaryDirectory(prefix="ctf-cursor-")
         workdir = Path(self._workdir.name)
-        (workdir / "AGENTS.md").write_text(
-            "# CTF Solver Workspace\n\n"
-            "Use only the custom sandbox tools. Do not use host Shell/Read/Write.\n",
-            encoding="utf-8",
+        skill_path = (
+            Path(__file__).resolve().parents[2]
+            / ".cursor"
+            / "skills"
+            / "ctf-tools-first"
+            / "SKILL.md"
         )
+        skill_body = ""
+        if skill_path.is_file():
+            # Strip YAML frontmatter for AGENTS.md
+            raw = skill_path.read_text(encoding="utf-8")
+            if raw.startswith("---"):
+                parts = raw.split("---", 2)
+                skill_body = parts[2].strip() if len(parts) >= 3 else raw
+            else:
+                skill_body = raw.strip()
+        agents_md = (
+            "# CTF Solver Workspace\n\n"
+            "Use only the custom sandbox tools. Do not use host Shell/Read/Write.\n\n"
+            "Start with: bash `cat /challenge/TOOLS.txt`\n"
+            "If a tool is missing, run it anyway — the sandbox may install it "
+            "automatically. Then re-read /tools.txt.\n"
+        )
+        if skill_body:
+            agents_md += "\n" + skill_body + "\n"
+        (workdir / "AGENTS.md").write_text(agents_md, encoding="utf-8")
 
         self._client = await acquire_client(workspace=str(workdir))
         try:
@@ -206,6 +228,13 @@ class CursorSolver:
 
                 text = f"{text}\n\n{LOOP_WARNING_MESSAGE}"
 
+            fail_status = self.loop_detector.check_result(name, text)
+            if fail_status in ("oom_break", "fail_break"):
+                from backend.loop_detect import OOM_STUCK_MESSAGE
+
+                self.tracer.event("resource_loop", tool=name, step=self._step_count)
+                text = f"{text}\n\n{OOM_STUCK_MESSAGE}"
+
             self.tracer.tool_result(name, text[:500], self._step_count)
             _live(f"{self.agent_name} tool#{self._step_count} ← {name}", text, limit=2000)
 
@@ -255,24 +284,23 @@ class CursorSolver:
 
         async def submit_flag(args: dict[str, Any], _ctx: CustomToolContext) -> str:
             async def _run() -> str:
-                flag = args.get("flag", "")
-                if self.no_submit:
-                    self._flag = flag
-                    self._confirmed = True
-                    self.tracer.event("flag_confirmed", flag=flag, step=self._step_count, dry_run=True)
-                    return f'DRY RUN — would submit "{flag}"'
+                flag = str(args.get("flag", "")).strip()
                 if self.submit_fn:
                     display, is_confirmed = await self.submit_fn(flag)
                 else:
                     from backend.tools.core import do_submit_flag
 
-                    display, is_confirmed = await do_submit_flag(
-                        self.ctfd, self.meta.name, flag
-                    )
+                    display, is_confirmed = await do_submit_flag(self.meta.name, flag)
                 if is_confirmed:
                     self._confirmed = True
                     self._flag = flag
                     self.tracer.event("flag_confirmed", flag=flag, step=self._step_count)
+                elif is_decoy_flag(flag):
+                    self.tracer.event(
+                        "flag_rejected_decoy",
+                        flag=flag,
+                        step=self._step_count,
+                    )
                 return display
 
             return await _wrap("submit_flag", args, _run)
@@ -353,7 +381,10 @@ class CursorSolver:
                 execute=list_files,
             ),
             "submit_flag": CustomTool(
-                description="Submit a flag to CTFd. Returns CORRECT, ALREADY SOLVED, or INCORRECT.",
+                description=(
+                    "Submit a recovered flag. Returns CORRECT (challenge complete), "
+                    "ALREADY SOLVED, or REJECTED/INCORRECT. Do not submit decoys."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {"flag": {"type": "string"}},
@@ -488,9 +519,6 @@ class CursorSolver:
 
             if self._confirmed and self._flag:
                 return self._result(FLAG_FOUND)
-            if self.no_submit and self._flag:
-                self._confirmed = True
-                return self._result(FLAG_FOUND)
 
             run_steps = self._step_count - steps_before
             run_cost = self._cost_usd - cost_before
@@ -531,10 +559,13 @@ class CursorSolver:
         if isinstance(parsed, dict) and parsed.get("type") == "flag_found":
             flag = parsed.get("flag")
             if flag:
-                self._flag = str(flag)
+                flag_s = str(flag)
+                if is_decoy_flag(flag_s):
+                    self._findings = f"Rejected decoy flag from model JSON: {flag_s}"
+                    return
+                self._flag = flag_s
                 self._findings = f"Flag found via {parsed.get('method', '?')}: {self._flag}"
-                if self.no_submit:
-                    self._confirmed = True
+                # JSON alone does not confirm — only submit_flag does.
 
     def bump(self, insights: str) -> None:
         self._bump_insights = insights

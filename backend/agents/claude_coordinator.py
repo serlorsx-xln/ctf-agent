@@ -78,7 +78,7 @@ def _build_coordinator_mcp(deps: CoordinatorDeps):
     async def check_swarm_status(args: dict) -> dict:
         return _text(await do_check_swarm_status(deps, args["challenge_name"]))
 
-    @tool("submit_flag", "Submit a flag to CTFd.", {"challenge_name": str, "flag": str})
+    @tool("submit_flag", "Accept a recovered flag for a challenge (ends the run when accepted).", {"challenge_name": str, "flag": str})
     async def submit_flag(args: dict) -> dict:
         return _text(await do_submit_flag(deps, args["challenge_name"], args["flag"]))
 
@@ -109,14 +109,11 @@ async def run_claude_coordinator(
     settings: Settings,
     model_specs: list[str] | None = None,
     challenges_root: str = "challenges",
-    no_submit: bool = False,
     coordinator_model: str | None = None,
     msg_port: int = 0,
 ) -> dict[str, Any]:
     """Run the Claude Agent SDK coordinator with the shared event loop."""
-    ctfd, cost_tracker, deps = build_deps(
-        settings, model_specs, challenges_root, no_submit,
-    )
+    cost_tracker, deps = build_deps(settings, model_specs, challenges_root)
     deps.msg_port = msg_port
 
     mcp_server = _build_coordinator_mcp(deps)
@@ -174,4 +171,4 @@ async def run_claude_coordinator(
             if msg_count == 0:
                 logger.warning("Coordinator turn produced no messages!")
 
-        return await run_event_loop(deps, ctfd, cost_tracker, turn_fn)
+        return await run_event_loop(deps, cost_tracker, turn_fn)

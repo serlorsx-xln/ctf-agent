@@ -15,7 +15,6 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.deps import SolverDeps
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import (
@@ -80,6 +79,13 @@ class TracingToolset(WrapperToolset[SolverDeps]):
         if loop_status == "warn":
             result = f"{result}\n\n{LOOP_WARNING_MESSAGE}" if isinstance(result, str) else result
 
+        fail_status = self.loop_detector.check_result(name, result_str)
+        if fail_status in ("oom_break", "fail_break") and isinstance(result, str):
+            from backend.loop_detect import OOM_STUCK_MESSAGE
+
+            self.tracer.event("resource_loop", tool=name, step=step)
+            result = f"{result}\n\n{OOM_STUCK_MESSAGE}"
+
         # Check for confirmed flag
         if name == "submit_flag" and any(m in result_str for m in CORRECT_MARKERS):
             self.tracer.event("flag_confirmed", tool=name, step=step)
@@ -111,7 +117,6 @@ class Solver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
@@ -122,21 +127,19 @@ class Solver:
         self.model_id = model_id_from_spec(model_spec)
         self.challenge_dir = challenge_dir
         self.meta = meta
-        self.ctfd = ctfd
         self.cost_tracker = cost_tracker
         self.settings = settings
         self.cancel_event = cancel_event or asyncio.Event()
         self._owns_sandbox = owns_sandbox if owns_sandbox is not None else (sandbox is None)
 
         self.sandbox = sandbox or DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox"),
+            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
         )
         self.use_vision = supports_vision(model_spec)
         self.deps = SolverDeps(
             sandbox=self.sandbox,
-            ctfd=ctfd,
             challenge_dir=challenge_dir,
             challenge_name=meta.name,
             workspace_dir="",
@@ -198,7 +201,6 @@ class Solver:
         assert self._agent is not None
 
         t0 = time.monotonic()
-        steps_before = self._step_count[0]
 
         try:
             from pydantic_ai.usage import UsageLimits
@@ -244,10 +246,7 @@ class Solver:
             if isinstance(output, FlagFound):
                 self._flag = output.flag
                 self._findings = f"Flag found via {output.method}: {output.flag}"
-                # In dry-run mode, structured output is sufficient (can't verify via CTFd)
-                if self.deps.no_submit:
-                    self._confirmed = True
-            # CTFd confirmation always counts (the primary path when not in dry-run)
+            # Local accept via submit_flag sets confirmed_flag
             if self.deps.confirmed_flag:
                 self._confirmed = True
                 self._flag = self._flag or self.deps.confirmed_flag

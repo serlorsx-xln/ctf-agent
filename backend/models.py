@@ -18,9 +18,19 @@ if TYPE_CHECKING:
     from backend.config import Settings
 
 # Default model specs — Cursor SDK is the primary backend (CURSOR_API_KEY).
-# Override with --models for claude-sdk/*, codex/*, bedrock/*, etc.
+# Override with --models for harder challenges or other backends.
 DEFAULT_MODELS: list[str] = [
     "cursor/composer-2.5",
+]
+
+# Stronger options for hard crypto/rev (same Cursor key, or other backends).
+# Example:
+#   uv run ctf-solve --challenge ./challenges/X --models cursor/claude-4-sonnet -v
+#   uv run ctf-solve --challenge ./challenges/X --models claude-sdk/claude-opus-4-6 -v
+HARDER_MODELS: list[str] = [
+    "cursor/claude-4-sonnet",
+    "claude-sdk/claude-opus-4-6",
+    "codex/gpt-5.4",
 ]
 
 # Context window sizes (tokens)
@@ -33,6 +43,7 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.3-codex-spark": 128_000,
     "gemini-3-flash-preview": 1_000_000,
     "composer-2.5": 200_000,
+    "claude-4-sonnet": 200_000,
     "auto": 200_000,
 }
 
@@ -44,6 +55,7 @@ VISION_MODELS: set[str] = {
     "gpt-5.4-mini",
     "gemini-3-flash-preview",
     "composer-2.5",
+    "claude-4-sonnet",
     "auto",
 }
 

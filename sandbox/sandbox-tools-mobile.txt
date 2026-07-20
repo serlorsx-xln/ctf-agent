@@ -1,50 +1,35 @@
-CTF SANDBOX (MOBILE / FLUTTER) TOOLS
-====================================
-Image: ctf-sandbox-mobile
-For Android/Flutter CTF (e.g. PWNKnight APK + libapp.so).
-
-== Read this first ==
-cat /tools.txt
-
-== APK / DEX ==
+== ANDROID / FLUTTER ==
 jadx                 Java/Kotlin decompiler. jadx -d out app.apk
-jadx-gui             (if DISPLAY; usually headless: jadx CLI)
 apktool              apktool d app.apk -o out
 unzip / zip          APK is a zip; unzip -l app.apk
-aapt / aapt2         Resource dump if installed
 androguard           python -c "from androguard.misc import AnalyzeAPK"
 
-== Flutter / Dart AOT (libapp.so) ==
+== FLUTTER / DART AOT (libapp.so) ==
 blutter              Dump Dart AOT objects/asm. Typical:
                        blutter /path/to/lib/arm64-v8a/ ./blutter_out
-                     Needs matching libapp.so + libflutter.so directory.
-/opt/blutter-pwnknight
-                     Prebuilt blutter dump for PWNKnight (Dart 3.10.x).
-                     Start here: ls /opt/blutter-pwnknight ; grep -R EncryptedDialogs /opt/blutter-pwnknight | head
-reflutter            pip/reflutter helpers for Flutter reverse
-strings / r2         Baseline string + disasm on libapp.so
-pyelftools           Parse ELF snapshot symbols (_kDartIsolateSnapshotData)
+                     Needs matching libapp.so + libflutter.so in that directory.
+                     blutter --help for usage. Wrapper validates inputs.
+reflutter            Flutter reverse helpers
+strings / objdump       Baseline string + disasm on libapp.so
+pyelftools           Parse ELF / Dart snapshot sections
 
-== Dynamic (optional) ==
+== DYNAMIC (optional) ==
 frida / frida-tools  frida -U -f pkg -l hook.js
 adb                  Android Debug Bridge (device/emulator)
 
-== Also present (pwn/rev basics) ==
-pwntools, gdb+gef, r2, ROPgadget, one_gadget, patchelf,
-qemu-x86_64-static (q64), python3, openssl, jq, file, xxd
+== ALSO USEFUL (often via pwn pack auto-ensure) ==
+python3, file, xxd, jq
+qemu-x86_64-static / q64   x86_64 ELFs on aarch64 (pwn pack)
+pwntools, gdb+gef, ROPgadget, one_gadget, patchelf  (pwn pack)
 
-== Suggested workflow for Flutter flag challenges ==
+== SUGGESTED FLOW (Flutter APK) ==
 1. unzip APK → assets + lib/*/libapp.so libflutter.so
-2. jadx APK for Java/Kotlin glue (often thin)
-3. blutter on lib/arm64-v8a → read pp.txt / asm / objects for
-   EncryptedDialogs, SecretPinDialog, EntropyBus, flag blobs
-4. Reimplement crypto (HMAC/AES/xor) in python from dumped constants
-5. submit_flag only with a concrete recovered ARCHA{...} / real flag
+2. jadx APK for Java/Kotlin glue
+3. blutter on lib/arm64-v8a → read pp.txt / asm / objects
+4. Reimplement crypto/logic in Python from dumped constants
+5. submit_flag only with a concrete recovered flag
 
-== Paths ==
-/challenge/distfiles     Challenge files (read-only)
-/challenge/workspace     Writable
-/tools.txt               This file
+== PATHS ==
 /opt/jadx                jadx install
 /opt/apktool             apktool jar
-/opt/blutter             blutter checkout (if build succeeded)
+/opt/blutter             blutter checkout (if present)

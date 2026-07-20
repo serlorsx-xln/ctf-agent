@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # CTFd
-    ctfd_url: str = "http://localhost:8000"
-    ctfd_user: str = "admin"
-    ctfd_pass: str = "admin"
-    ctfd_token: str = ""
-
     # API Keys
     cursor_api_key: str = ""
     anthropic_api_key: str = ""
@@ -26,7 +21,10 @@ class Settings(BaseSettings):
     opencode_zen_api_key: str = ""
 
     # Infra
-    sandbox_image: str = "ctf-sandbox"
+    sandbox_image: str = "ctf-sandbox-core"
+    # True when user passed --image (router must not override).
+    sandbox_image_locked: bool = False
+    detected_packs: list[str] = Field(default_factory=list)
     max_concurrent_challenges: int = 10
     max_attempts_per_challenge: int = 3
     container_memory_limit: str = "16g"

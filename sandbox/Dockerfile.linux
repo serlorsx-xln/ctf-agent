@@ -1,0 +1,57 @@
+# Linux box helpers donor — linpeas / pspy / ffuf (small binaries + script).
+# Multi-stage: build tools (Go) stay out of the final donor image.
+# Runtime: L0 copies /opt/linux-tools only.
+#
+# Build (from repo root):
+#   docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
+
+FROM ubuntu:24.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget unzip git golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      aarch64|arm64) ffuf_arch=arm64 ;; \
+      x86_64|amd64)  ffuf_arch=amd64 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/linux-tools/bin; \
+    curl -fsSL "https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_${ffuf_arch}.tar.gz" \
+      -o /tmp/ffuf.tgz; \
+    tar -xzf /tmp/ffuf.tgz -C /opt/linux-tools/bin ffuf; \
+    rm -f /tmp/ffuf.tgz; \
+    git clone --depth=1 --branch v1.2.1 \
+      https://github.com/DominicBreuker/pspy /tmp/pspy; \
+    cd /tmp/pspy; \
+    if [ -d cmd/pspy ]; then \
+      go build -trimpath -ldflags="-s -w" -o /opt/linux-tools/bin/pspy ./cmd/pspy; \
+    else \
+      go build -trimpath -ldflags="-s -w" -o /opt/linux-tools/bin/pspy .; \
+    fi; \
+    rm -rf /tmp/pspy; \
+    curl -fsSL -o /opt/linux-tools/bin/linpeas.sh \
+      "https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh"; \
+    chmod +x /opt/linux-tools/bin/ffuf /opt/linux-tools/bin/pspy \
+      /opt/linux-tools/bin/linpeas.sh; \
+    printf '%s\n' '#!/bin/bash' 'exec bash /opt/linux-tools/bin/linpeas.sh "$@"' \
+      > /opt/linux-tools/bin/linpeas; \
+    chmod +x /opt/linux-tools/bin/linpeas
+
+# ── Final donor: artifacts only ─────────────────────────────────────────────
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV LANG=C.UTF-8
+
+COPY --from=build /opt/linux-tools /opt/linux-tools
+COPY sandbox/sandbox-tools-linux.txt /tools.txt
+
+WORKDIR /challenge
+CMD ["sleep", "infinity"]

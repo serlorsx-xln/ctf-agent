@@ -1,0 +1,61 @@
+# Crypto-tools donor — RsaCtfTool / cado-nfs / flatter (additive into L0).
+# Multi-stage: compilers stay out of the final donor; L0 bootstrap installs
+# runtime apt/pip deps when the pack is ensured.
+#
+# Build (from repo root; cado-nfs compile is slow / large):
+#   docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
+
+FROM ubuntu:24.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget git cmake g++ make pkg-config \
+    python3 python3-pip python3-dev python3-flask \
+    libgmp-dev libmpfr-dev libmpc-dev libfplll-dev libeigen3-dev \
+    libhwloc-dev libbz2-dev \
+    libblas-dev liblapack-dev libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth=1 https://github.com/keeganryan/flatter /tmp/flatter \
+    && cmake -S /tmp/flatter -B /tmp/flatter/build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /tmp/flatter/build -j"$(nproc)" \
+    && cmake --install /tmp/flatter/build \
+    && ldconfig \
+    && mkdir -p /opt/flatter/bin \
+    && cp "$(command -v flatter)" /opt/flatter/bin/flatter \
+    && rm -rf /tmp/flatter
+
+RUN git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool /opt/RsaCtfTool \
+    && pip3 install --no-cache-dir --break-system-packages gmpy2 \
+    && pip3 install --no-cache-dir --break-system-packages /opt/RsaCtfTool
+
+RUN git clone --depth=1 https://gitlab.inria.fr/cado-nfs/cado-nfs.git /opt/cado-nfs \
+    && cd /opt/cado-nfs && make -j"$(nproc)" \
+    && mkdir -p /opt/cado-nfs/bin \
+    && printf '%s\n' \
+    '#!/bin/bash' \
+    'BUILD_PARENT=/opt/cado-nfs/build' \
+    'H=$(hostname)' \
+    'if [ ! -d "$BUILD_PARENT/$H" ]; then' \
+    '  src=$(ls -d "$BUILD_PARENT"/* 2>/dev/null | head -1)' \
+    '  [ -n "$src" ] && ln -sf "$src" "$BUILD_PARENT/$H"' \
+    'fi' \
+    'exec python3 /opt/cado-nfs/cado-nfs.py "$@"' \
+    > /opt/cado-nfs/bin/cado-nfs \
+    && chmod +x /opt/cado-nfs/bin/cado-nfs
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV LANG=C.UTF-8
+
+COPY --from=build /opt/flatter /opt/flatter
+COPY --from=build /opt/RsaCtfTool /opt/RsaCtfTool
+COPY --from=build /opt/cado-nfs /opt/cado-nfs
+COPY sandbox/sandbox-tools-crypto-tools.txt /tools.txt
+
+WORKDIR /challenge
+CMD ["sleep", "infinity"]

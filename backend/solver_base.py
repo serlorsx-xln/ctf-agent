@@ -12,7 +12,7 @@ CANCELLED = "cancelled"
 ERROR = "error"
 QUOTA_ERROR = "quota_error"
 
-# Flag confirmation markers from CTFd
+# Flag confirmation markers (local accept_flag / swarm submit)
 CORRECT_MARKERS = ("CORRECT", "ALREADY SOLVED")
 
 

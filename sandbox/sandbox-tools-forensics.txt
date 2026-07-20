@@ -1,0 +1,14 @@
+== FORENSICS ==
+binwalk              Firmware / embedded extract. binwalk -e file
+mmls / fls / icat    Sleuthkit partition + file listing + extract by inode
+tsk_recover          Recover deleted files. tsk_recover disk.img outdir/
+fsstat               Filesystem stats
+foremost             Header/footer carving. foremost -i disk.img -o outdir/
+testdisk             Partition recovery
+dcfldd               Forensic dd with hashing
+xfs_db / xfs_repair  XFS inspection
+volatility3          Memory forensics. vol -f memdump.raw windows.info
+
+== NOTES ==
+Loaded on demand when these commands are first used.
+Exit 137/124 → shrink dumps / use lighter plugins; re-read /challenge/TOOLS.txt.

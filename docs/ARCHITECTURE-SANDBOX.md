@@ -3,8 +3,19 @@
 เอกสารนี้อธิบายสถาปัตย์ที่เลือกไว้สำหรับ CTF Agent (Veria / Cursor backend fork)
 เพื่อให้ **เบาบนเครื่องลูกค้า** แต่ **ทำโจทย์ได้ครบหมวด** โดยไม่เปลี่ยน logic หลักของระบบ
 
-สถานะ: **สถาปัตย์ล็อกแล้ว (ceiling) / ยังไม่ implement**  
+สถานะ: **สถาปัตย์ล็อกแล้ว** — Phase 0–1 ลงโค้ดแล้ว (L0 core + L1 additive packs + cache)  
 อัปเดตล่าสุด: 2026-07-20  
+
+| Phase | สถานะ |
+|-------|--------|
+| 0 local flag accept / tools.txt | ทำแล้ว |
+| 1 L0 `Dockerfile.core` + additive `ensure_pack` + host cache + prefetch | ทำแล้ว |
+| 2 packs (mobile / pwn / crypto / crypto-tools / steg / linux / forensics / web / ml / containers) | ทำแล้ว — ครอบคลุมชุดต้นฉบับ + linux box เบา |
+| 3 L2 Kali | ยังไม่ |
+| 4 L3 cloud | ยังไม่ |
+
+โค้ดหลัก: `backend/tool_router.py`, `backend/sandbox.py` (`ensure_pack`), `sandbox/Dockerfile.core`  
+Cache: `~/.cache/ctf-agent/packs/` (หรือ `CTF_PACK_CACHE`)
 
 นี่คือทางที่ **ดีกว่านี้ไม่ได้ภายใต้ข้อจำกัดผลิตภัณฑ์ปัจจุบัน**  
 (agent logic เดิม · local-first · เบาบนเครื่องลูกค้า · รองรับมี/ไม่มี Kali · ขยายเช่าได้)
@@ -30,7 +41,7 @@ ctf-solve / coordinator
   → สร้าง Docker sandbox ใบเดียวต่อ challenge (หรือ shared ตาม config)
   → agent เรียก tools: bash, read_file, write_file, list_files, submit_flag, …
   → คำสั่งรันใน sandbox
-  → ได้ flag / dry-run
+  → ได้ flag (local accept → FLAG_FOUND)
 ```
 
 จุดสำคัญที่ **ห้ามทำลาย**:
@@ -46,7 +57,7 @@ ctf-solve / coordinator
 | Image เบาเกินไป | `ctf-sandbox` (sage) ไม่มี blutter / r2 พอ → PWNKnight วน strings |
 | Image จัดเต็ม | หนักเครื่อง, build นาน, RAM 4GB OOM, Mac ARM + Colima อึดอัด |
 | Tools ผิดหมวด | `ctf-sandbox-pwn` ช่วย binary pwn แต่ไม่แก้ Flutter AOT โดยตรง |
-| Dry-run false positive | `submit_flag` รับ guess/test flag โดยไม่ verify |
+| Flag decoys | `submit_flag` ต้อง reject placeholder / fake_flag |
 | Host tools นอก sandbox | Kali บนโฮสต์ **เรียกใช้ไม่ได้** ด้วย architecture ปัจจุบัน (bash อยู่ใน container) |
 
 บทเรียน: **ยัดครบใน image เดียวบนเครื่องลูกค้า = ไม่ไหว**  
@@ -263,7 +274,8 @@ KALI_BIN_PREFIX=/usr  # ถ้า mount Kali root แบบระมัดระ
 
 ### 6.1 ไม่เปลี่ยน (คง logic)
 
-- CLI: `ctf-solve`, coordinator loop, `--challenge`, `--models`, `--no-submit`
+- CLI: `ctf-solve`, coordinator loop, `--challenge`, `--models`
+  (flags accepted locally — no CTFd / `--no-submit`)
 - Tool surface ของ agent: `bash`, `read_file`, `write_file`, `list_files`, `submit_flag`, …
 - หนึ่ง logical sandbox ต่อบริบทการแก้โจทย์
 - โมเดล Cursor / coordinator ที่ใช้อยู่
@@ -343,7 +355,7 @@ KALI_BIN_PREFIX=/usr  # ถ้า mount Kali root แบบระมัดระ
 export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 cd /path/to/ctf
 set -a && source .env && set +a
-uv run ctf-solve --challenge ./challenges/foo --models cursor/composer-2.5 --no-submit -v
+uv run ctf-solve --challenge ./challenges/foo --models cursor/composer-2.5 -v
 ```
 
 ไม่ต้องจำว่า image ไหน — default คือ L0 + router
@@ -373,26 +385,35 @@ Lazy packs + optional Kali + optional cloud ชนะเพราะครบเ
 
 ---
 
-## 10. แผน implement แนะนำ (ยังไม่ลงมือในเอกสารนี้)
+## 10. แผน implement
 
 เรียงเฟส — ทำทีละขั้นโดยไม่พังของเดิม:
 
 ### Phase 0 — คุณภาพพื้นฐาน
-- [ ] แก้ dry-run `submit_flag` ไม่ให้ขึ้น FLAG FOUND ปลอม
-- [ ] เอกสาร `/tools.txt` แยกตาม image ปัจจุบันให้ตรงความจริง
+- [x] Local `submit_flag` — CORRECT จบรัน; reject decoy (ไม่มี CTFd)
+- [x] เอกสาร `/tools.txt` แยก L0 / pack
 - [ ] ตั้ง RAM default ที่สมเหตุสมผลต่อโจทย์
 
 ### Phase 1 — L0 บาง + pack แรก
-- [ ] Dockerfile.core (L0)
-- [ ] Pack format + cache dir
-- [ ] `ctf-ensure-pack` ใน container
-- [ ] Prefetch จากนามสกุลไฟล์โจทย์
-- [ ] Pack แรกที่คุ้มสุด: `mobile` หรือ `pwn` (ตามลูกค้าเป้าหมาย)
+- [x] Dockerfile.core (L0) → `ctf-sandbox-core`
+- [x] Pack format (donor image + path manifest) + cache dir
+- [x] Additive `ensure_pack` (copy เข้า container เดิม — ไม่สลับ image)
+- [x] Prefetch จากนามสกุลไฟล์โจทย์
+- [x] Pack: `mobile`, `pwn`, `crypto`
 
-### Phase 2 — Pack ครบหมวด
-- [ ] `web`, `crypto`, `rev`, `forensics`
-- [ ] ทดสอบโจทย์จริงทีละหมวด
-- [ ] ขนาด cache + eviction
+### Phase 2 — Pack ครบหมวด (เทียบชุดต้นฉบับ)
+- [x] `crypto` (Sage donor + bind cache)
+- [x] `crypto-tools` (RsaCtfTool / cado-nfs / flatter / gmpy2 / fpylll)
+- [x] `steg` (steghide / stegseek / zsteg / media / OCR)
+- [x] `forensics` (sleuthkit / binwalk / volatility3 / carving)
+- [x] `web` (nmap / flask / PyJWT)
+- [x] `ml` (torch CPU / keras)
+- [x] `containers` (podman / buildah — best-effort)
+- [x] `pwn` ขยาย angr + radare2
+- [x] `linux` (linpeas / pspy / ffuf / smbclient / sshpass / impacket)
+- [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev
+- [x] ขนาด cache + eviction (`CTF_PACK_CACHE_MAX_GB`, LRU via `.accessed`)
+- [x] RAM floor ต่อ pack + deprecate fat `Dockerfile.sandbox`
 
 ### Phase 3 — L2 Kali bridge
 - [ ] Config + SSH/exec adapter
@@ -484,7 +505,11 @@ CTF_CLOUD_ZERO_RETENTION=1
 
 ## 14. ทำไมมั่นใจว่าดีกว่าของที่รันอยู่ตอนนี้
 
-สถานะปัจจุบัน (ทดลอง): สลับ image ด้วยมือ (`ctf-sandbox` / `ctf-sandbox-pwn` / `ctf-sandbox-mobile`) + prompt เดิม
+สถานะปัจจุบัน (โค้ด): L0 `ctf-sandbox-core` + L1 additive `ensure_pack`
+(`mobile` / `pwn` / `crypto` / `crypto-tools` / `steg` / `forensics` / `web` /
+`ml` / `containers`) + host pack cache  
+Donors: `ctf-sandbox-mobile` / `pwn` / `crypto` / `crypto-tools` / `steg`
+(apt/pip-only packs reuse L0 as dummy donor)
 
 | มิติ | ตอนนี้ | สถาปัตย์ L0–L3 (เป้าหมาย) | ทำไมดีกว่าแน่นอน |
 |------|--------|---------------------------|------------------|
@@ -494,7 +519,7 @@ CTF_CLOUD_ZERO_RETENTION=1
 | ลูกค้ามี Kali | ใช้ไม่ได้จากใน container | L2 bridge | ไม่ duplicate ของหนัก |
 | อนาคตเช่า | ต้องรีดีไซน์ | L3 เสียบเข้า router | ไม่พัง agent API |
 | Skills อ้วน | ยังไม่ใส่ (ดี) | นโยบายห้าม inject เต็ม | ไม่ถอยหลังจากบทเรียน PWNKnight |
-| คุณภาพ flag | dry-run ยังหลอกได้ | Phase 0 แก้ submit_flag | ไม่ celebratory ปลอม |
+| คุณภาพ flag | เคยพึ่ง CTFd / dry-run | Local accept + decoy reject | จบรันเมื่อได้ flag จริง |
 
 **สิ่งที่ทำให้ “ดีกว่านี้ไม่ได้” ภายใต้ข้อจำกัดเดียวกัน:**  
 ถ้าเอา mega-Kali ทุกเครื่อง / หลาย sandbox ให้ agent เลือก / คลาวด์ล้วน / เบาอย่างเดียวไม่มี pack — จะชนข้อจำกัดข้อ 1 อย่างน้อยหนึ่งข้อ (ดู §9)
@@ -532,7 +557,9 @@ Agent logic เดิม (บาง)
 | รายการ | ที่อยู่ / หมายเหตุ |
 |--------|-------------------|
 | Repo | `/Users/serlorsx/Downloads/ctf` (branch Cursor backend) |
-| Sandbox ปัจจุบัน (ทดลอง) | `Dockerfile.sage`, `Dockerfile.pwn`, `Dockerfile.mobile` |
+| Sandbox ปัจจุบัน | L0 `Dockerfile.core`; packs `Dockerfile.pwn` / `crypto` / `crypto-tools` / `steg` / `linux` / `mobile` (`Dockerfile.sage` = deprecated alias of crypto); apt/pip packs: forensics / web / ml / containers |
+| Fat image | **Deprecated** — `Dockerfile.sandbox` kept as reference only; do not build for new setups |
+| Cache | `~/.cache/ctf-agent/packs` + `CTF_PACK_CACHE_MAX_GB` (default 25) LRU eviction; `scripts/evict_pack_cache.py`, `scripts/prune_docker.sh` |
 | Image ที่พิสูจน์ mobile | `ctf-sandbox-mobile` (blutter Dart 3.10.4 prebuilt) |
 | โจทย์ที่โชว์ช่องว่าง tools | `challenges/pwnknight`, `challenges/filtered-reality` |
 | โจทย์ที่แกนเบาพอ | `challenges/do-you-have-good-eyes` |
