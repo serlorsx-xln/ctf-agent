@@ -49,22 +49,20 @@ class LoopDetector:
         return None
 
     def check_result(self, tool_name: str, result_text: str) -> str | None:
-        """Track OOM/timeout-class failures across different commands.
+        """Track real memory deaths across different commands.
 
-        Returns \"oom_break\" when the agent keeps dying the same way.
+        Returns \"oom_break\" when the agent keeps OOMing. Network/tool
+        timeouts (exit 124) are *not* treated as a resource loop — those are
+        common on lab RPCs and must not push the agent off a valid path.
         """
         cls = classify_resource_failure(result_text)
-        if not cls:
+        if cls != "oom":
             return None
         self._fail_classes.append(f"{tool_name}:{cls}")
         n = sum(1 for s in self._fail_classes if s.endswith(f":{cls}"))
         if n >= self.fail_break_threshold:
-            return "oom_break" if cls in {"oom", "timeout"} else "fail_break"
+            return "oom_break"
         return None
-
-    @property
-    def last_sig(self) -> str:
-        return self._recent[-1] if self._recent else ""
 
     def reset(self) -> None:
         self._recent.clear()
@@ -72,37 +70,47 @@ class LoopDetector:
 
 
 def classify_resource_failure(text: str) -> str | None:
+    """Classify real resource deaths — not docs that merely mention OOM/137."""
     t = (text or "").lower()
-    if "[exit 137]" in t or "killed" in t or "out of memory" in t or "oom" in t:
+    # Require concrete failure signals. Bare "oom"/"137" match /tools.txt docs
+    # and falsely push agents off Sage onto pure-Python rewrites.
+    if (
+        "[exit 137]" in t
+        or "out of memory" in t
+        or "oom-kill" in t
+        or "oom killed" in t
+        or "killed (oom)" in t
+    ):
         return "oom"
-    if "[exit 124]" in t or "timed out" in t or "command timed out" in t:
+    # Timeouts are reported via RESOURCE_HINTS only — do not classify as a
+    # stuckness class (lab network / RPC timeouts are not "resource loops").
+    if "[exit 124]" in t or "command timed out" in t:
         return "timeout"
     return None
 
 
 LOOP_WARNING_MESSAGE = (
-    "⚠️ **You are stuck in a loop** — you have run the exact same command multiple times "
-    "with identical results. STOP repeating this command. Step back, reconsider your approach, "
-    "and try a **completely different** technique or tool. "
-    "If you were grepping/searching, try a Python script instead. "
-    "If you were analyzing one aspect of the file, switch to another. "
-    "What other angles haven't you explored?"
+    "⚠️ **You are stuck in a loop** — the exact same command has been repeated "
+    "with identical results. Change arguments, targets, or tool flags before "
+    "abandoning the technique. If grepping/searching, try a short Python script; "
+    "if analyzing one aspect, switch to another surface."
 )
 
 OOM_STUCK_MESSAGE = (
-    "⚠️ **Resource failure loop** — recent commands died with OOM (exit 137) or timeout "
-    "(exit 124). Do NOT retry the same heavy approach. "
-    "Shrink the work, stream/chunk results, or use a lighter installed tool from "
-    "`/challenge/TOOLS.txt`. Then switch strategy."
+    "⚠️ **Memory failure loop** — recent commands were OOM-killed (exit 137). "
+    "Do NOT retry the same heavy approach. Shrink the work, stream/chunk results, "
+    "or use a lighter installed tool from `/challenge/TOOLS.txt`."
 )
 
 RESOURCE_HINTS = {
     137: (
-        "Hint: exit 137 usually means the process was OOM-killed. "
-        "Shrink memory use; prefer streaming / smaller steps; check /challenge/TOOLS.txt."
+        "Hint: exit 137 is SIGKILL (OOM or hard-kill). "
+        "If the command was hanging on the network, shrink timeouts / scan fewer ports; "
+        "otherwise shrink memory use and check /challenge/TOOLS.txt."
     ),
     124: (
-        "Hint: exit 124 is a timeout. Narrow the search space or use a faster/lighter tool "
-        "from /challenge/TOOLS.txt."
+        "Hint: exit 124 is a timeout (often network/RPC, not a dead technique). "
+        "Increase timeout, fix targets/flags (e.g. -target-ip / -dc-host), or narrow "
+        "scope — do not abandon a working approach solely because of a timeout."
     ),
 }

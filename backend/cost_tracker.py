@@ -227,7 +227,8 @@ class CostTracker:
             hit_rate = f"{(s['cached'] / s['input'] * 100):.0f}%" if s["input"] > 0 else "n/a"
             logger.info(
                 "  %s: $%.2f | %s in / %s cached (%s hit) / %s out",
-                model, s["cost"],
+                model,
+                s["cost"],
                 _fmt_tokens(s["input"]),
                 _fmt_tokens(s["cached"]),
                 hit_rate,

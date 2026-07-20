@@ -57,11 +57,14 @@ class ChallengeSwarm:
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
-    confirmed_flag: str | None = None
+    confirmed_flag: str | None = None  # joined flags when challenge complete
+    confirmed_flags: list[str] = field(default_factory=list)
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
-    _last_submit_time: dict[str, float] = field(default_factory=dict)  # per-model last submit timestamp
+    _last_submit_time: dict[str, float] = field(
+        default_factory=dict
+    )  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
 
     def __post_init__(self) -> None:
@@ -89,11 +92,14 @@ class ChallengeSwarm:
         """
         provider = provider_from_spec(model_spec)
 
-        def _submit_fn(flag): return self.try_submit_flag(flag, model_spec)
+        def _submit_fn(flag):
+            return self.try_submit_flag(flag, model_spec)
+
         _notify = self._make_notify_fn(model_spec)
 
         if provider == "cursor":
             from backend.agents.cursor_solver import CursorSolver
+
             return CursorSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
@@ -108,6 +114,7 @@ class ChallengeSwarm:
 
         if provider == "claude-sdk":
             from backend.agents.claude_solver import ClaudeSolver
+
             return ClaudeSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
@@ -122,6 +129,7 @@ class ChallengeSwarm:
 
         if provider == "codex":
             from backend.agents.codex_solver import CodexSolver
+
             return CodexSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
@@ -138,14 +146,16 @@ class ChallengeSwarm:
 
     def _make_notify_fn(self, model_spec: str):
         """Create a callback that pushes solver messages to the coordinator inbox."""
+
         async def _notify(message: str) -> None:
             if self.coordinator_inbox:
-                self.coordinator_inbox.put_nowait(
-                    f"[{self.meta.name}/{model_spec}] {message}"
-                )
+                self.coordinator_inbox.put_nowait(f"[{self.meta.name}/{model_spec}] {message}")
+
         return _notify
 
-    def _create_pydantic_solver(self, model_spec: str, sandbox=None, owns_sandbox: bool | None = None) -> Solver:
+    def _create_pydantic_solver(
+        self, model_spec: str, sandbox=None, owns_sandbox: bool | None = None
+    ) -> Solver:
         """Create a Pydantic AI solver. Pass sandbox to reuse an existing container (quota fallback)."""
         solver = Solver(
             model_spec=model_spec,
@@ -161,6 +171,11 @@ class ChallengeSwarm:
         solver.deps.model_spec = model_spec
         solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, model_spec)
         solver.deps.notify_coordinator = self._make_notify_fn(model_spec)
+        from backend.flags import normalize_flags_required
+
+        solver.deps.flags_required = normalize_flags_required(
+            getattr(self.meta, "flags_required", 1)
+        )
         return solver
 
     def _gather_sibling_insights(self, exclude_model: str) -> str:
@@ -174,14 +189,28 @@ class ChallengeSwarm:
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
 
     async def try_submit_flag(self, flag: str, model_spec: str) -> tuple[str, bool]:
-        """Cooldown-gated, deduplicated flag submission. Returns (display, is_confirmed)."""
+        """Cooldown-gated, deduplicated flag submission. Returns (display, challenge_complete)."""
+        from backend.flags import normalize_flags_required
+
+        required = normalize_flags_required(getattr(self.meta, "flags_required", 1))
         async with self._flag_lock:
             if self.confirmed_flag:
-                return f"ALREADY SOLVED — flag already confirmed: {self.confirmed_flag}", True
+                return (
+                    f"ALREADY SOLVED — all flag(s) already confirmed: {self.confirmed_flag}",
+                    True,
+                )
 
             normalized = flag.strip()
 
-            # Dedup exact flags across all models
+            if normalized in self.confirmed_flags:
+                n = len(self.confirmed_flags)
+                return (
+                    f"Already accepted this flag ({n}/{required}). "
+                    "Continue and submit the remaining distinct flag(s).",
+                    False,
+                )
+
+            # Dedup exact flags across all models (rejected or accepted)
             if normalized in self._submitted_flags:
                 return "INCORRECT — already tried this exact flag.", False
 
@@ -201,16 +230,33 @@ class ChallengeSwarm:
                         False,
                     )
 
+            from backend.tools.core import do_submit_flag
+
+            display, is_complete = await do_submit_flag(
+                self.meta.name,
+                flag,
+                already_accepted=list(self.confirmed_flags),
+                required=required,
+            )
             self._submitted_flags.add(normalized)
 
-            from backend.tools.core import do_submit_flag
-            display, is_confirmed = await do_submit_flag(self.meta.name, flag)
-            if is_confirmed:
-                self.confirmed_flag = normalized
-            else:
-                self._submit_count[model_spec] = wrong_count + 1
-                self._last_submit_time[model_spec] = time.monotonic()
-            return display, is_confirmed
+            if display.startswith(("ACCEPTED", "CORRECT")):
+                self.confirmed_flags.append(normalized)
+                logger.info(
+                    "[%s] Flag progress %s/%s via %s",
+                    self.meta.name,
+                    len(self.confirmed_flags),
+                    required,
+                    model_spec,
+                )
+                if is_complete:
+                    self.confirmed_flag = " | ".join(self.confirmed_flags)
+                return display, is_complete
+
+            # Rejected / not counted
+            self._submit_count[model_spec] = wrong_count + 1
+            self._last_submit_time[model_spec] = time.monotonic()
+            return display, False
 
     async def _run_solver(self, model_spec: str) -> SolverResult | None:
         solver = self._create_solver(model_spec)
@@ -226,13 +272,19 @@ class ChallengeSwarm:
         finally:
             await solver.stop()
 
-    async def _run_solver_loop(self, solver, model_spec: str) -> tuple[SolverResult, SolverProtocol]:
+    async def _run_solver_loop(
+        self, solver, model_spec: str
+    ) -> tuple[SolverResult, SolverProtocol]:
         """Inner loop: start → run → bump → run → ..."""
         bump_count = 0
         consecutive_errors = 0
         result = SolverResult(
-            flag=None, status=CANCELLED, findings_summary="",
-            step_count=0, cost_usd=0.0, log_path="",
+            flag=None,
+            status=CANCELLED,
+            findings_summary="",
+            step_count=0,
+            cost_usd=0.0,
+            log_path="",
         )
         await solver.start()
 
@@ -240,20 +292,54 @@ class ChallengeSwarm:
             result = await solver.run_until_done_or_gave_up()
 
             # Only broadcast useful findings — skip errors and broken solvers
-            if (result.status not in (ERROR, QUOTA_ERROR)
-                    and not (result.step_count == 0 and result.cost_usd == 0)
-                    and result.findings_summary
-                    and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
+            if (
+                result.status not in (ERROR, QUOTA_ERROR)
+                and not (result.step_count == 0 and result.cost_usd == 0)
+                and result.findings_summary
+                and not result.findings_summary.startswith(("Error:", "Turn failed:"))
+            ):
                 self.findings[model_spec] = result.findings_summary
                 await self.message_bus.post(model_spec, result.findings_summary[:500])
 
-            if result.status == FLAG_FOUND:
+            if result.status == FLAG_FOUND and self.confirmed_flag:
+                # Soft race: cancel siblings only when all required flags are in.
                 self.cancel_event.set()
+                if result.flag != self.confirmed_flag:
+                    result = SolverResult(
+                        flag=self.confirmed_flag,
+                        status=result.status,
+                        findings_summary=result.findings_summary,
+                        step_count=result.step_count,
+                        cost_usd=result.cost_usd,
+                        log_path=result.log_path,
+                    )
                 self.winner = result
-                logger.info(
-                    f"[{self.meta.name}] Flag found by {model_spec}: {result.flag}"
-                )
+                logger.info(f"[{self.meta.name}] Flag(s) found by {model_spec}: {result.flag}")
                 return result, solver
+
+            if result.status == FLAG_FOUND and not self.confirmed_flag:
+                from backend.flags import normalize_flags_required
+
+                logger.warning(
+                    "[%s] %s reported FLAG_FOUND but challenge incomplete "
+                    "(%s/%s) — soft race continues",
+                    self.meta.name,
+                    model_spec,
+                    len(self.confirmed_flags),
+                    normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+                )
+                # Clear local confirm so the next turn does not re-emit FLAG_FOUND.
+                if hasattr(solver, "_confirmed"):
+                    solver._confirmed = False
+                # Treat as a normal bump cycle so we do not spin on FLAG_FOUND.
+                result = SolverResult(
+                    flag=result.flag,
+                    status=GAVE_UP,
+                    findings_summary=result.findings_summary,
+                    step_count=result.step_count,
+                    cost_usd=result.cost_usd,
+                    log_path=result.log_path,
+                )
 
             if result.status == CANCELLED:
                 break
@@ -269,7 +355,9 @@ class ChallengeSwarm:
                     # Detach sandbox from old solver so stop() doesn't destroy it
                     solver.sandbox = None  # type: ignore[assignment]
                     await solver.stop()
-                    solver = self._create_pydantic_solver(fallback_spec, sandbox=existing_sandbox, owns_sandbox=True)
+                    solver = self._create_pydantic_solver(
+                        fallback_spec, sandbox=existing_sandbox, owns_sandbox=True
+                    )
                     self.solvers[model_spec] = solver
                     await solver.start()
                     continue
@@ -306,9 +394,7 @@ class ChallengeSwarm:
                     pass  # cooldown elapsed, proceed with bump
                 insights = self._gather_sibling_insights(model_spec)
                 solver.bump(insights)
-                logger.info(
-                    f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming"
-                )
+                logger.info(f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming")
                 continue
 
         return result, solver
@@ -329,7 +415,8 @@ class ChallengeSwarm:
                         result = task.result()
                     except Exception:
                         continue
-                    if result and result.status == FLAG_FOUND:
+                    # Soft race: only kill siblings on full completion.
+                    if result and result.status == FLAG_FOUND and self.confirmed_flag:
                         self.cancel_event.set()
                         for p in pending:
                             p.cancel()
@@ -339,7 +426,7 @@ class ChallengeSwarm:
                 tasks = list(pending)
 
             self.cancel_event.set()
-            return self.winner
+            return self._end_summary()
         except Exception as e:
             logger.error(f"[{self.meta.name}] Swarm error: {e}", exc_info=True)
             self.cancel_event.set()
@@ -348,21 +435,73 @@ class ChallengeSwarm:
             await asyncio.gather(*tasks, return_exceptions=True)
             return None
 
+    def _end_summary(self) -> SolverResult | None:
+        """Return winner, or a partial summary when flags were found but race unfinished."""
+        if self.winner:
+            return self.winner
+        if self.confirmed_flag:
+            return SolverResult(
+                flag=self.confirmed_flag,
+                status=FLAG_FOUND,
+                findings_summary=self._summary_findings(),
+                step_count=0,
+                cost_usd=0.0,
+                log_path="",
+            )
+        if self.confirmed_flags:
+            from backend.flags import normalize_flags_required
+
+            req = normalize_flags_required(getattr(self.meta, "flags_required", 1))
+            joined = " | ".join(self.confirmed_flags)
+            return SolverResult(
+                flag=joined,
+                status=GAVE_UP,
+                findings_summary=(
+                    f"Partial flags accepted ({len(self.confirmed_flags)}/{req}): {joined}\n"
+                    + self._summary_findings()
+                )[:2000],
+                step_count=0,
+                cost_usd=0.0,
+                log_path="",
+            )
+        # Best-effort: surface any solver findings even without accepts
+        summary = self._summary_findings()
+        if summary:
+            return SolverResult(
+                flag=None,
+                status=GAVE_UP,
+                findings_summary=summary[:2000],
+                step_count=0,
+                cost_usd=0.0,
+                log_path="",
+            )
+        return None
+
+    def _summary_findings(self) -> str:
+        parts = [f"[{m}]: {f}" for m, f in self.findings.items() if f]
+        return "\n\n".join(parts)
+
     def kill(self) -> None:
         """Cancel all agents for this challenge."""
         self.cancel_event.set()
 
     def get_status(self) -> dict:
         """Get per-agent progress and findings."""
+        from backend.flags import normalize_flags_required
+
+        required = normalize_flags_required(getattr(self.meta, "flags_required", 1))
         return {
             "challenge": self.meta.name,
             "cancelled": self.cancel_event.is_set(),
+            "flags_required": required,
+            "flags_accepted": list(self.confirmed_flags),
             "winner": self.winner.flag if self.winner else None,
             "agents": {
                 spec: {
                     "findings": self.findings.get(spec, ""),
-                    "status": "running" if spec in self.solvers and not self.cancel_event.is_set()
-                             else ("won" if self.winner and self.winner.flag else "finished"),
+                    "status": "running"
+                    if spec in self.solvers and not self.cancel_event.is_set()
+                    else ("won" if self.winner and self.winner.flag else "finished"),
                 }
                 for spec in self.model_specs
             },

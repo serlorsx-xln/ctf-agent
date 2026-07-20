@@ -36,7 +36,7 @@ You are a CTF competition coordinator running for the ENTIRE duration of a live 
 Your job is to maximize the number of challenges solved.
 
 Strategy:
-- Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Spawn swarms for unsolved local challenges (description + status)
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
@@ -62,7 +62,7 @@ def _text(s: str) -> dict:
 def _build_coordinator_mcp(deps: CoordinatorDeps):
     """Build MCP server — thin wrappers around coordinator_core functions."""
 
-    @tool("fetch_challenges", "List all challenges with category, points, solve count, and status.", {})
+    @tool("fetch_challenges", "List local challenges with name, status, and description.", {})
     async def fetch_challenges(args: dict) -> dict:
         return _text(await do_fetch_challenges(deps))
 
@@ -78,7 +78,11 @@ def _build_coordinator_mcp(deps: CoordinatorDeps):
     async def check_swarm_status(args: dict) -> dict:
         return _text(await do_check_swarm_status(deps, args["challenge_name"]))
 
-    @tool("submit_flag", "Accept a recovered flag for a challenge (ends the run when accepted).", {"challenge_name": str, "flag": str})
+    @tool(
+        "submit_flag",
+        "Accept a recovered flag. Ends the run only when all required flags are accepted.",
+        {"challenge_name": str, "flag": str},
+    )
     async def submit_flag(args: dict) -> dict:
         return _text(await do_submit_flag(deps, args["challenge_name"], args["flag"]))
 
@@ -86,22 +90,50 @@ def _build_coordinator_mcp(deps: CoordinatorDeps):
     async def kill_swarm(args: dict) -> dict:
         return _text(await do_kill_swarm(deps, args["challenge_name"]))
 
-    @tool("bump_agent", "Send targeted insights to a stuck agent.", {"challenge_name": str, "model_spec": str, "insights": str})
+    @tool(
+        "bump_agent",
+        "Send targeted insights to a stuck agent.",
+        {"challenge_name": str, "model_spec": str, "insights": str},
+    )
     async def bump_agent(args: dict) -> dict:
-        return _text(await do_bump_agent(deps, args["challenge_name"], args["model_spec"], args["insights"]))
+        return _text(
+            await do_bump_agent(deps, args["challenge_name"], args["model_spec"], args["insights"])
+        )
 
-    @tool("broadcast", "Broadcast a strategic hint to ALL solvers on a challenge.", {"challenge_name": str, "message": str})
+    @tool(
+        "broadcast",
+        "Broadcast a strategic hint to ALL solvers on a challenge.",
+        {"challenge_name": str, "message": str},
+    )
     async def broadcast(args: dict) -> dict:
         return _text(await do_broadcast(deps, args["challenge_name"], args["message"]))
 
-    @tool("read_solver_trace", "Read recent trace events from a specific solver. Use this to understand what a solver is doing, what it tried, and where it's stuck.", {"challenge_name": str, "model_spec": str, "last_n": int})
+    @tool(
+        "read_solver_trace",
+        "Read recent trace events from a specific solver. Use this to understand what a solver is doing, what it tried, and where it's stuck.",
+        {"challenge_name": str, "model_spec": str, "last_n": int},
+    )
     async def read_solver_trace(args: dict) -> dict:
-        return _text(await do_read_solver_trace(deps, args["challenge_name"], args["model_spec"], args.get("last_n", 20)))
+        return _text(
+            await do_read_solver_trace(
+                deps, args["challenge_name"], args["model_spec"], args.get("last_n", 20)
+            )
+        )
 
     return create_sdk_mcp_server(
-        name="coordinator", version="1.0.0",
-        tools=[fetch_challenges, get_solve_status, spawn_swarm, check_swarm_status,
-               submit_flag, kill_swarm, bump_agent, broadcast, read_solver_trace],
+        name="coordinator",
+        version="1.0.0",
+        tools=[
+            fetch_challenges,
+            get_solve_status,
+            spawn_swarm,
+            check_swarm_status,
+            submit_flag,
+            kill_swarm,
+            bump_agent,
+            broadcast,
+            read_solver_trace,
+        ],
     )
 
 
@@ -120,13 +152,22 @@ async def run_claude_coordinator(
     resolved_model = coordinator_model or "claude-opus-4-6"
 
     allowed = {
-        "mcp__coordinator__fetch_challenges", "mcp__coordinator__get_solve_status",
-        "mcp__coordinator__spawn_swarm", "mcp__coordinator__check_swarm_status",
-        "mcp__coordinator__submit_flag", "mcp__coordinator__kill_swarm",
-        "mcp__coordinator__bump_agent", "mcp__coordinator__broadcast",
+        "mcp__coordinator__fetch_challenges",
+        "mcp__coordinator__get_solve_status",
+        "mcp__coordinator__spawn_swarm",
+        "mcp__coordinator__check_swarm_status",
+        "mcp__coordinator__submit_flag",
+        "mcp__coordinator__kill_swarm",
+        "mcp__coordinator__bump_agent",
+        "mcp__coordinator__broadcast",
         "mcp__coordinator__read_solver_trace",
         "ToolSearch",
-        "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
     }
 
     async def enforce_allowlist(input_data, tool_use_id, context):
@@ -156,6 +197,7 @@ async def run_claude_coordinator(
     )
 
     async with ClaudeSDKClient(options=options) as client:
+
         async def turn_fn(msg: str) -> None:
             logger.debug(f"Coordinator query: {msg[:200]}")
             await client.query(msg)
@@ -167,7 +209,9 @@ async def run_claude_coordinator(
                 if isinstance(message, ResultMessage):
                     cost = getattr(message, "total_cost_usd", 0)
                     session = getattr(message, "session_id", None)
-                    logger.info(f"Claude coordinator turn done (messages={msg_count}, cost=${cost:.4f}, session={session})")
+                    logger.info(
+                        f"Claude coordinator turn done (messages={msg_count}, cost=${cost:.4f}, session={session})"
+                    )
             if msg_count == 0:
                 logger.warning("Coordinator turn produced no messages!")
 

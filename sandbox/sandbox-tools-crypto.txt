@@ -1,9 +1,9 @@
 == CRYPTO (Sage) ==
 sage                   Full SageMath — sage script.sage / sage -c '...'
 sage-python            Sage's Python only (rarely needed)
-galois / sympy         Finite-field / symbolic math via system python3
-pycryptodome           AES etc. — available in both python3 and sage
+sympy / pycryptodome   On system python3 (L0); pycryptodome also in sage when writable
 gf128-roots            GF(2^128) roots (also on L0)
+galois                 Optional — `pip3 install galois` if needed (heavy; pulls numba)
 
 RsaCtfTool / cado-nfs / flatter / gmpy2 / fpylll load separately when first used.
 
@@ -14,4 +14,5 @@ RsaCtfTool / cado-nfs / flatter / gmpy2 / fpylll load separately when first used
   Pattern: sage computes → write results; `python3` + pwntools (or sockets) for remote I/O.
 Do not put /opt/sagemath/bin on PATH (it shadows python3).
 Sage is shared read-only from the host pack cache across sandboxes.
-Exit 137/124 → shrink the approach; re-read /challenge/TOOLS.txt.
+Exit 137 → shrink memory work. Exit 124 → often network timeout; adjust before abandoning.
+Re-read /challenge/TOOLS.txt after packs load.

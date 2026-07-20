@@ -41,10 +41,7 @@ def main() -> int:
     print(f"max bytes:  {max_b or 'unlimited (CTF_PACK_CACHE_MAX_GB=0)'}")
     print(f"total:      {total} ({total / (1024**3):.2f} GiB)")
     for mtime, size, pack_id, path in sorted(entries, key=lambda e: e[0]):
-        print(
-            f"  {pack_id}/{path.name}: {size / (1024**3):.2f} GiB  "
-            f"mtime={mtime:.0f}"
-        )
+        print(f"  {pack_id}/{path.name}: {size / (1024**3):.2f} GiB  mtime={mtime:.0f}")
 
     if args.dry_run:
         if max_b <= 0 or total <= max_b:
@@ -54,7 +51,7 @@ def main() -> int:
         protected = set(args.protect)
         remaining = total
         would = []
-        for mtime, size, pack_id, path in sorted(entries, key=lambda e: e[0]):
+        for _mtime, size, pack_id, path in sorted(entries, key=lambda e: e[0]):
             if remaining <= max_b:
                 break
             if pack_id in protected:

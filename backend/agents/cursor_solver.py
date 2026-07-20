@@ -27,6 +27,8 @@ from cursor_sdk import (
 )
 
 from backend.agents.cursor_runtime import acquire_client, release_client, resolve_api_key
+from backend.agents.live_log import live as _live
+from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker
 from backend.flags import is_decoy_flag
 from backend.loop_detect import LoopDetector
@@ -48,14 +50,6 @@ from backend.tracing import SolverTracer
 logger = logging.getLogger(__name__)
 
 
-def _live(tag: str, text: str, *, limit: int = 4000) -> None:
-    """Print AI activity to the terminal (and log) so runs are watchable live."""
-    body = text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more chars]"
-    line = f"[{tag}] {body}"
-    print(line, flush=True)
-    logger.info("%s", line)
-
-
 SOLVER_PREAMBLE = """\
 IMPORTANT: You are solving a CTF challenge. Challenge files and installed tools
 live inside a Docker sandbox. You MUST use the custom tools listed below for every
@@ -65,7 +59,7 @@ operation — do NOT use the built-in Shell, Read, Write, Edit, Glob, or Grep to
 Available tools:
 - bash — run a command in the sandbox
 - read_file / write_file / list_files — file I/O in the sandbox
-- submit_flag — submit a recovered flag (ends the challenge when accepted)
+- submit_flag — submit a recovered flag (ACCEPTED = more needed; CORRECT = done)
 - webhook_create / webhook_get_requests — out-of-band HTTP callbacks
 - view_image — inspect an image file in the sandbox
 - notify_coordinator — send a strategic note to the coordinator
@@ -76,13 +70,14 @@ Paths:
 - If a tool is missing, just run it — the sandbox may install it and retry.
   Then re-read /tools.txt.
 
-FIRST: `cat /challenge/TOOLS.txt`, then inspect the challenge files and solve.
+Start order: if the prompt requires connecting to a live service first, do that;
+otherwise `cat /challenge/TOOLS.txt`, then inspect challenge files and solve.
 Prefer installed tools over guessing. Do not search writeups.
 Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.
 
-When you recover the real flag, call submit_flag.
+When you recover a real flag, call submit_flag. CORRECT ends the run
+(ACCEPTED means more distinct flags are still required).
 Ignore decoys (*fake_flag*, CTF{flag}, CTF{placeholder}, TRYHARDER).
-CORRECT from submit_flag means the challenge is done — stop.
 
 """
 
@@ -130,6 +125,7 @@ class CursorSolver:
         self._step_count = 0
         self._flag: str | None = None
         self._confirmed = False
+        self._accepted_flags: list[str] = []
         self._findings = ""
         self._cost_usd = 0.0
         self._bump_insights: str | None = None
@@ -211,7 +207,7 @@ class CursorSolver:
             loop_status = self.loop_detector.check(name, args)
             if loop_status == "break":
                 self.tracer.event("loop_break", tool=name, step=self._step_count)
-                msg = "Loop detected — try a completely different approach."
+                msg = "Loop detected — change arguments or tool flags before repeating."
                 _live(f"{self.agent_name} tool#{self._step_count} ✗ {name}", msg)
                 return msg
 
@@ -268,18 +264,14 @@ class CursorSolver:
             return await _wrap(
                 "write_file",
                 args,
-                lambda: do_write_file(
-                    self.sandbox, args.get("path", ""), args.get("content", "")
-                ),
+                lambda: do_write_file(self.sandbox, args.get("path", ""), args.get("content", "")),
             )
 
         async def list_files(args: dict[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "list_files",
                 args,
-                lambda: do_list_files(
-                    self.sandbox, args.get("path", "/challenge/distfiles")
-                ),
+                lambda: do_list_files(self.sandbox, args.get("path", "/challenge/distfiles")),
             )
 
         async def submit_flag(args: dict[str, Any], _ctx: CustomToolContext) -> str:
@@ -288,13 +280,29 @@ class CursorSolver:
                 if self.submit_fn:
                     display, is_confirmed = await self.submit_fn(flag)
                 else:
+                    from backend.flags import normalize_flags_required
                     from backend.tools.core import do_submit_flag
 
-                    display, is_confirmed = await do_submit_flag(self.meta.name, flag)
+                    display, is_confirmed = await do_submit_flag(
+                        self.meta.name,
+                        flag,
+                        already_accepted=list(self._accepted_flags),
+                        required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+                    )
+                if (
+                    display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
+                    and flag
+                    and flag not in self._accepted_flags
+                ):
+                    self._accepted_flags.append(flag)
                 if is_confirmed:
                     self._confirmed = True
-                    self._flag = flag
-                    self.tracer.event("flag_confirmed", flag=flag, step=self._step_count)
+                    self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag
+                    self.tracer.event(
+                        "flag_confirmed",
+                        flag=self._flag,
+                        step=self._step_count,
+                    )
                 elif is_decoy_flag(flag):
                     self.tracer.event(
                         "flag_rejected_decoy",
@@ -382,8 +390,9 @@ class CursorSolver:
             ),
             "submit_flag": CustomTool(
                 description=(
-                    "Submit a recovered flag. Returns CORRECT (challenge complete), "
-                    "ALREADY SOLVED, or REJECTED/INCORRECT. Do not submit decoys."
+                    "Submit a recovered flag. Returns ACCEPTED (n/m) if more flags "
+                    "are needed, CORRECT when all required flags are accepted, or "
+                    "REJECTED. Do not submit decoys."
                 ),
                 input_schema={
                     "type": "object",
@@ -436,20 +445,21 @@ class CursorSolver:
         cost_before = self._cost_usd
 
         if self._bump_insights:
-            prompt = (
-                f"{self._system_prompt}\n\n"
-                "Your previous attempt did not find the flag. "
-                f"Insights from other agents:\n\n{self._bump_insights}\n\n"
-                "Try a different approach. Do NOT repeat what was tried."
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+                flags_required=getattr(self.meta, "flags_required", 1),
+                bump_insights=self._bump_insights,
             )
+            prompt = f"{self._system_prompt}\n\n{cont}"
             self._bump_insights = None
         elif self._step_count == 0:
             prompt = f"{self._system_prompt}\n\nSolve this CTF challenge."
         else:
-            prompt = (
-                f"{self._system_prompt}\n\n"
-                "Continue solving. Try a different approach."
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+                flags_required=getattr(self.meta, "flags_required", 1),
             )
+            prompt = f"{self._system_prompt}\n\n{cont}"
 
         try:
             _live(self.agent_name, "── turn start ──")
@@ -554,7 +564,7 @@ class CursorSolver:
             stripped = stripped[start : end + 1]
         try:
             parsed = json.loads(stripped)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             return
         if isinstance(parsed, dict) and parsed.get("type") == "flag_found":
             flag = parsed.get("flag")

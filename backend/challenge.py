@@ -12,6 +12,10 @@ Layouts::
       challenge.txt           # may contain only a link + short text
 
 No metadata.yml. No category tutoring.
+
+Optional in ``challenge.txt``::
+
+    flags_required: 2   # distinct accepts before CORRECT (default 1 if omitted)
 """
 
 from __future__ import annotations
@@ -74,14 +78,16 @@ def load_challenge(challenge_dir: str | Path) -> ChallengeMeta:
         description = desc_path.read_text(encoding="utf-8", errors="replace").strip()
     if not description:
         description = (
-            f"Challenge `{folder_name}`. "
-            "No challenge.txt provided — inspect attached files."
+            f"Challenge `{folder_name}`. No challenge.txt provided — inspect attached files."
         )
+
+    from backend.flags import parse_flags_required
 
     return ChallengeMeta(
         name=folder_name,
         description=description,
         connection_info=guess_connection(description),
+        flags_required=parse_flags_required(description),
     )
 
 
@@ -102,9 +108,7 @@ def list_attachment_names(challenge_dir: str | Path) -> list[str]:
     dist = root / "distfiles"
     if dist.is_dir():
         return sorted(
-            p.name
-            for p in dist.iterdir()
-            if not p.name.startswith(".") and p.name != "__pycache__"
+            p.name for p in dist.iterdir() if not p.name.startswith(".") and p.name != "__pycache__"
         )
 
     names: list[str] = []

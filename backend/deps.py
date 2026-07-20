@@ -26,6 +26,8 @@ class SolverDeps:
     use_vision: bool
     cost_tracker: CostTracker | None = None
     confirmed_flag: str | None = None
+    accepted_flags: list[str] = field(default_factory=list)
+    flags_required: int = 1
     message_bus: ChallengeMessageBus | None = None
     model_spec: str = ""
     submit_fn: SubmitFn | None = None  # Deduped flag submission via swarm

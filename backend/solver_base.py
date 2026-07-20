@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 # Status constants
 FLAG_FOUND = "flag_found"
@@ -11,9 +11,6 @@ GAVE_UP = "gave_up"
 CANCELLED = "cancelled"
 ERROR = "error"
 QUOTA_ERROR = "quota_error"
-
-# Flag confirmation markers (local accept_flag / swarm submit)
-CORRECT_MARKERS = ("CORRECT", "ALREADY SOLVED")
 
 
 @dataclass
@@ -31,7 +28,8 @@ class SolverProtocol(Protocol):
 
     model_spec: str
     agent_name: str
-    sandbox: object
+    # Mutable: quota fallback may detach/clear the sandbox before stop().
+    sandbox: Any
 
     async def start(self) -> None: ...
     async def run_until_done_or_gave_up(self) -> SolverResult: ...

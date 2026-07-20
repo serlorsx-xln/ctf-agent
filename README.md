@@ -14,7 +14,7 @@ The agent solves challenges across all categories — pwn, rev, crypto, forensic
 
 ## How It Works
 
-A **coordinator** LLM manages local challenges under `challenges/` while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to submit an accepted flag wins.
+A **coordinator** LLM manages local challenges under `challenges/` while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to finish the required flag(s) wins.
 
 ```
                         +-----------------+
@@ -50,7 +50,7 @@ A **coordinator** LLM manages local challenges under `challenges/` while **solve
      +-----------------+  +----------------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools. Flags are accepted **locally** (plausible non-decoy `PREFIX{...}`) — there is no external CTFd/scoreboard dependency. A CORRECT `submit_flag` ends the challenge run.
+Each solver runs in an isolated Docker container with CTF tools. Flags are accepted **locally** (plausible non-decoy strings) — there is no external scoreboard dependency. By default one accepted flag ends the run (`CORRECT`). Multi-flag challenges set `flags_required: N` in `challenge.txt` (nth distinct accept → `CORRECT`).
 
 ## Quick Start (Cursor API key)
 
@@ -66,6 +66,7 @@ docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
 docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
 # Optional donors (loaded on demand; multi-stage — toolchain not kept in final image):
 # docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
+# docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .   # PyGhidra / analyzeHeadless
 # docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
 # docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
 
@@ -83,9 +84,10 @@ uv run ctf-solve --challenge ./challenges/my-chal --models cursor/composer-2.5 -
 ```
 
 L0 includes common helpers (see `/challenge/TOOLS.txt`). Packs load additively
-(`mobile` / `pwn` / `crypto` / `crypto-tools` / `steg` / `linux` / `forensics` /
-`web` / `ml` / `containers`). Exit 137/124 get generic resource hints; repeated
-failures ask the agent to change strategy — not a category playbook.
+(`mobile` / `pwn` / `ghidra` / `crypto` / `crypto-tools` / `steg` / `linux` /
+`forensics` / `web` / `ml` / `containers`). Exit 137/124 get generic resource
+hints; repeated failures ask the agent to change strategy — not a category
+playbook.
 
 Coordinator over all local challenges:
 
@@ -130,16 +132,24 @@ discarded from the final image).
 |-------|------------------------|
 | **L0 core** | python3, pwntools, z3, gdb, binutils, curl, socat, gf128-roots |
 | **pwn** | qemu-user (+ guest libc on aarch64), GEF, ROPgadget, one_gadget, patchelf, angr, r2 |
+| **ghidra** | Ghidra + pyghidra / analyzeHeadless (prefetched with ELF / on `import pyghidra`) |
 | **crypto** | SageMath, pycryptodome (in Sage), galois |
 | **crypto-tools** | flatter, cado-nfs, RsaCtfTool, fpylll, gmpy2 |
 | **mobile** | jadx, apktool, blutter, frida-tools, androguard |
 | **steg** | steghide, stegseek, zsteg, exiftool, tesseract |
 | **linux** | linpeas, pspy, ffuf, smbclient, sshpass, impacket |
-| **forensics / web / ml / containers** | volatility3, burp helpers, torch/keras, docker CLI — as needed |
+| **forensics / web / ml / containers** | volatility3, nmap/flask/jwt, torch/keras, podman — as needed |
 
 Heavy packs raise the container memory floor automatically (e.g. crypto ≥12g).
 Host pack cache defaults to 25 GiB with LRU eviction (`CTF_PACK_CACHE_MAX_GB`).
 After rebuilding donors: `bash scripts/prune_docker.sh`.
+
+On **macOS**, lab VPNs (e.g. HackTheBox) work automatically (`CTF_HOST_PROXY=auto`):
+use direct container routing when the lab is reachable (TCP open **or** connection
+refused); fall back to host SOCKS + proxychains when it is not. Challenge text
+IPs/ports are probed automatically so custom-only services still calibrate.
+Agent `nmap` is forced to TCP connect scan (`-Pn -sT`); full-port sweeps are
+kept intact (timeout auto-extends). No manual Colima routes or `pf` NAT.
 
 ## Features
 
@@ -167,7 +177,7 @@ GEMINI_API_KEY=...
 ```
 
 All settings can also be passed as environment variables or CLI flags.
-Flags are accepted locally via `submit_flag` (no CTFd URL/token required).
+Flags are accepted locally via `submit_flag` (no external scoreboard URL/token required).
 
 ## Requirements
 

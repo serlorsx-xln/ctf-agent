@@ -32,7 +32,11 @@ async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
     result = await sandbox.exec(command, timeout_s=timeout_seconds)
     out = _format_exec(result)
 
-    if result.exit_code == 0 or not hasattr(sandbox, "ensure_pack"):
+    # Also ensure on "command not found" when pipelines hide a non-zero exit
+    # (e.g. `nmap … | head` → head exits 0).
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    missing_cmd = "command not found" in blob
+    if (result.exit_code == 0 and not missing_cmd) or not hasattr(sandbox, "ensure_pack"):
         return out
 
     pack = infer_pack_from_failure(command, result.stderr, result.stdout)
@@ -111,19 +115,30 @@ async def do_list_files(sandbox, path: str = "/challenge/distfiles") -> str:
     return out or f"{path} is empty."
 
 
-async def do_submit_flag(_challenge_name: str, flag: str) -> tuple[str, bool]:
-    """Accept a flag locally. Returns (display_message, is_confirmed).
+async def do_submit_flag(
+    _challenge_name: str,
+    flag: str,
+    *,
+    already_accepted: list[str] | tuple[str, ...] = (),
+    required: int = 1,
+) -> tuple[str, bool]:
+    """Accept a flag locally. Returns (display_message, challenge_complete).
 
-    No external scoreboard — a plausible non-decoy flag ends the challenge run.
+    Plausible non-decoy flags count toward ``required`` (default 1).
     ``_challenge_name`` is kept for call-site compatibility / logging only.
     """
-    from backend.flags import accept_flag
+    from backend.flags import accept_flag, normalize_flags_required
 
-    return accept_flag(flag)
+    return accept_flag(
+        flag,
+        already_accepted=already_accepted,
+        required=normalize_flags_required(required),
+    )
 
 
 def _is_internal_url(url: str) -> bool:
     from urllib.parse import urlparse
+
     host = urlparse(url).hostname or ""
     if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
         return True
@@ -134,7 +149,7 @@ def _is_internal_url(url: str) -> bool:
             second_octet = int(host.split(".")[1])
             if 16 <= second_octet <= 31:
                 return True
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             pass
     return False
 

@@ -6,8 +6,8 @@ many sandboxes share one copy. Small / late packs may still be copied.
 User never picks --image for category. Agent never sees pack IDs in prompts.
 
 Packs mirror the upstream fat-sandbox inventory, split by category so the
-default L0 image stays light. Detection is file/extension based or
-command-not-found — never challenge-description keyword matching.
+default L0 image stays light. Detection is file/extension based,
+command-not-found, plus high-confidence remote AD / Assumed Breach text.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ PACK_MEMORY_FLOOR: dict[str, str] = {
     "crypto": "12g",
     "ml": "8g",
     "crypto-tools": "8g",
+    "ghidra": "8g",
     "pwn": "6g",
     "mobile": "6g",
 }
@@ -40,6 +41,7 @@ PACK_MEMORY_FLOOR: dict[str, str] = {
 PACK_BOOTSTRAP_TIMEOUT_S: dict[str, int] = {
     "crypto": 1200,
     "crypto-tools": 900,
+    "ghidra": 900,
     "ml": 900,
     "forensics": 600,
     "mobile": 600,
@@ -51,6 +53,7 @@ PACK_BOOTSTRAP_TIMEOUT_S: dict[str, int] = {
 PACK_IMAGES: dict[str, str] = {
     "mobile": "ctf-sandbox-mobile",
     "pwn": "ctf-sandbox-pwn",
+    "ghidra": "ctf-sandbox-ghidra",
     "crypto": "ctf-sandbox-crypto",
     "crypto-tools": "ctf-sandbox-crypto-tools",
     "steg": "ctf-sandbox-steg",
@@ -144,6 +147,16 @@ PACK_SPECS: dict[str, PackSpec] = {
         ),
         gems=("one_gadget", "seccomp-tools"),
     ),
+    "ghidra": PackSpec(
+        # Full Ghidra tree + PyGhidra (Veria-parity decompiler). Heavy — bind RO.
+        image="ctf-sandbox-ghidra",
+        paths=("/opt/ghidra",),
+        bind_paths=("/opt/ghidra",),
+        apt=("openjdk-21-jdk-headless",),
+        pip=("pyghidra",),
+        symlinks=(("/usr/local/bin/analyzeHeadless", "/opt/ghidra/support/analyzeHeadless"),),
+        path_dirs=("/opt/ghidra/support",),
+    ),
     "crypto": PackSpec(
         # Donor: Dockerfile.crypto → conda-forge Sage at /opt/sagemath (Ubuntu 24.04).
         image="ctf-sandbox-crypto",
@@ -153,7 +166,10 @@ PACK_SPECS: dict[str, PackSpec] = {
             "/usr/local/bin/sage-python",
         ),
         bind_paths=("/opt/sagemath",),
-        pip=("galois", "pycryptodome", "sympy"),
+        # Keep bootstrap light: core image already has pycryptodome + sympy.
+        # Do NOT pip-install galois here — it pulls numba and OOMs (exit 137)
+        # inside typical Desktop RAM. Agents can `pip3 install galois` if needed.
+        pip=(),
         path_dirs=(),
     ),
     "crypto-tools": PackSpec(
@@ -208,10 +224,14 @@ PACK_SPECS: dict[str, PackSpec] = {
             "smbclient",
             "ftp",
             "sshpass",
+            "openssh-client",
+            "nmap",
+            "faketime",
+            "krb5-user",
             "ruby",
             "ruby-dev",
         ),
-        pip=("impacket",),
+        pip=("impacket", "certipy-ad"),
         gems=("evil-winrm",),
         symlinks=(
             ("/usr/local/bin/ffuf", "/opt/linux-tools/bin/ffuf"),
@@ -287,6 +307,11 @@ TOOL_TO_PACK: dict[str, str] = {
     "radare2": "pwn",
     "rabin2": "pwn",
     "rax2": "pwn",
+    # ghidra / RE
+    "pyghidra": "ghidra",
+    "analyzeHeadless": "ghidra",
+    "ghidraRun": "ghidra",
+    "ghidra": "ghidra",
     # crypto (sage)
     "sage": "crypto",
     "sagemath": "crypto",
@@ -332,6 +357,10 @@ TOOL_TO_PACK: dict[str, str] = {
     "ffuf": "linux",
     "smbclient": "linux",
     "sshpass": "linux",
+    "ssh": "linux",
+    "faketime": "linux",
+    "kinit": "linux",
+    "certipy": "linux",
     "evil-winrm": "linux",
     "impacket-smbclient": "linux",
     "impacket-psexec": "linux",
@@ -340,6 +369,8 @@ TOOL_TO_PACK: dict[str, str] = {
     "smbclient.py": "linux",
     "wmiexec.py": "linux",
     "secretsdump.py": "linux",
+    "getTGT.py": "linux",
+    "getST.py": "linux",
     # containers
     "podman": "containers",
     "buildah": "containers",
@@ -350,6 +381,7 @@ TOOL_TO_PACK: dict[str, str] = {
 _PACK_PRIORITY = (
     "mobile",
     "pwn",
+    "ghidra",
     "crypto",
     "crypto-tools",
     "steg",
@@ -393,16 +425,15 @@ _IMPORT_FAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Prefer L0 core; fall back to legacy fat image if core is not built yet.
+# Default L0 image (packs attach on demand).
 DEFAULT_L0_CANDIDATES = ("ctf-sandbox-core",)
-# Deprecated monolith — only tried if core is missing and the image still exists.
-LEGACY_FAT_L0 = "ctf-sandbox"
 
 # Python import name → pack (auto-ensure on ModuleNotFoundError).
 _IMPORT_TO_PACK: dict[str, str] = {
     "angr": "pwn",
     "capstone": "pwn",
     "unicorn": "pwn",
+    "pyghidra": "ghidra",
     "galois": "crypto",
     "gmpy2": "crypto-tools",
     "fpylll": "crypto-tools",
@@ -455,7 +486,7 @@ def parse_memory_bytes(limit: str) -> int:
         if s.endswith("k"):
             return int(float(s[:-1]) * 1024)
         return int(s)
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return 0
 
 
@@ -629,10 +660,51 @@ def _looks_like_elf(path: Path) -> bool:
         return False
 
 
+def _challenge_text(challenge_dir: Path) -> str:
+    for name in ("challenge.txt", "README.md", "metadata.yml"):
+        path = challenge_dir / name
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+    return ""
+
+
+def _wants_linux_remote_pack(text: str) -> bool:
+    """High-confidence remote AD / Assumed Breach labs (no distfiles needed)."""
+    if not text:
+        return False
+    low = text.lower()
+    compact = low.replace(" ", "").replace("-", "")
+    if "assumedbreach" in compact:
+        return True
+    ad_keys = (
+        "active directory",
+        "domain controller",
+        "kerberos",
+        "winrm",
+        "ldap",
+        "smb ",
+        " smb",
+        "ntlm",
+        "bloodhound",
+    )
+    hits = sum(1 for k in ad_keys if k in low)
+    if hits >= 2:
+        return True
+    # HTB-style: lab IP + user/root flags + credentials line
+    has_ip = bool(re.search(r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text))
+    has_flags = "user flag" in low and "root flag" in low
+    has_creds = bool(re.search(r"\b\w+\s*/\s*\S+", text)) or "credentials" in low
+    return has_ip and has_flags and has_creds
+
+
 def detect_packs(challenge_dir: str | Path) -> list[str]:
     """Heuristic pack detection from challenge files (prefetch).
 
-    File/extension based only — do not infer from challenge.txt wording.
+    Primarily file/extension based. Also prefetch ``linux`` for high-confidence
+    remote AD / Assumed Breach challenge text (empty distfiles is common).
     """
     root = Path(challenge_dir)
     packs: set[str] = set()
@@ -658,10 +730,16 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
         if name in _CONTAINER_NAMES:
             packs.add("containers")
 
-        if _looks_like_elf(path) and name not in _MOBILE_NAMES and suffix not in {".so"}:
+        if (
+            (_looks_like_elf(path) and name not in _MOBILE_NAMES and suffix not in {".so"})
+            or suffix == ".elf"
+            or (path.suffix == "" and _looks_like_elf(path))
+        ):
             packs.add("pwn")
-        elif suffix == ".elf" or (path.suffix == "" and _looks_like_elf(path)):
-            packs.add("pwn")
+            packs.add("ghidra")
+
+    if _wants_linux_remote_pack(_challenge_text(root)):
+        packs.add("linux")
 
     return [p for p in _PACK_PRIORITY if p in packs]
 
@@ -692,6 +770,7 @@ def apply_router_to_settings(settings, challenge_dir: str | Path):
     donor_only = {
         "ctf-sandbox-mobile",
         "ctf-sandbox-pwn",
+        "ctf-sandbox-ghidra",
         "ctf-sandbox-crypto",
         "ctf-sandbox-crypto-tools",
         "ctf-sandbox-steg",
@@ -722,7 +801,7 @@ def tools_doc_for_image(image: str) -> Path | None:
         return tools_doc_path("sandbox-tools-mobile.txt")
     if "pwn" in (image or ""):
         return tools_doc_path("sandbox-tools-pwn.txt")
-    return tools_doc_path("sandbox-tools.txt") or tools_doc_path("sandbox-tools-core.txt")
+    return tools_doc_path("sandbox-tools-core.txt")
 
 
 def merged_tools_doc(base_image: str, ensured_packs: set[str] | list[str]) -> str:
@@ -769,7 +848,10 @@ def bootstrap_script(pack_id: str) -> str:
             f"|| $PIP3 install --no-cache-dir {pkgs} || true",
         ]
     if pack_id == "crypto":
+        # Sage tree is often RO bind-mounted; only touch writable wrapper paths.
+        # Host finalize already seeds pycryptodome into the Sage env when possible.
         lines += [
+            "set +e",
             "if [ -w /opt/sagemath ] && [ -x /opt/sagemath/bin/python3 ]; then",
             "  /opt/sagemath/bin/python3 -m pip install --no-cache-dir "
             "pycryptodome 2>/dev/null || true",
@@ -779,6 +861,9 @@ def bootstrap_script(pack_id: str) -> str:
             "printf '%s\\n' '#!/bin/bash' "
             "'exec /opt/sagemath/bin/python3 \"$@\"' > /usr/local/bin/sage-python",
             "chmod +x /usr/local/bin/sage /usr/local/bin/sage-python",
+            "set -e",
+            # Require sage binary from the bind/copy — fail loud if missing.
+            "test -x /opt/sagemath/bin/sage",
         ]
     if pack_id == "crypto-tools":
         lines += [
@@ -796,7 +881,7 @@ def bootstrap_script(pack_id: str) -> str:
             "'H=$(hostname)' "
             "'if [ ! -d \"$BUILD_PARENT/$H\" ]; then' "
             "'  src=$(ls -d \"$BUILD_PARENT\"/* 2>/dev/null | head -1)' "
-            "'  [ -n \"$src\" ] && ln -sf \"$src\" \"$BUILD_PARENT/$H\"' "
+            '\'  [ -n "$src" ] && ln -sf "$src" "$BUILD_PARENT/$H"\' '
             "'fi' "
             "'exec python3 /opt/cado-nfs/cado-nfs.py \"$@\"' "
             "> /usr/local/bin/cado-nfs",
@@ -806,6 +891,23 @@ def bootstrap_script(pack_id: str) -> str:
             "  ln -sfn /opt/flatter/bin/flatter /usr/local/bin/flatter || true",
             "fi",
             "ldconfig 2>/dev/null || true",
+        ]
+    if pack_id == "ghidra":
+        lines += [
+            # Non-login bash -c does not source profile.d — seed env for every python3.
+            "SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])')",
+            "printf '%s\\n' "
+            "'import os' "
+            '\'os.environ.setdefault("GHIDRA_INSTALL_DIR", "/opt/ghidra")\' '
+            '> "$SITE/ctf_ghidra_env.py"',
+            "printf '%s\\n' 'import ctf_ghidra_env' > \"$SITE/ctf_ghidra_env.pth\"",
+            "printf '%s\\n' 'export GHIDRA_INSTALL_DIR=/opt/ghidra' "
+            "> /etc/profile.d/ctf-ghidra.sh || true",
+            "grep -q GHIDRA_INSTALL_DIR /etc/environment 2>/dev/null || "
+            "echo GHIDRA_INSTALL_DIR=/opt/ghidra >> /etc/environment || true",
+            "if [ -x /opt/ghidra/support/analyzeHeadless ]; then",
+            "  ln -sfn /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless || true",
+            "fi",
         ]
     if pack_id == "pwn":
         lines += [
@@ -820,24 +922,22 @@ def bootstrap_script(pack_id: str) -> str:
             "esac",
             "printf '%s\\n' '#!/bin/bash' "
             "'PREFIX=\"${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}\"' "
-            "'for a in \"$@\"; do case \"$a\" in -L) "
-            "exec /usr/bin/qemu-x86_64-static \"$@\";; esac; done' "
-            "'if [ -d \"$PREFIX/lib\" ]; then "
-            "exec /usr/bin/qemu-x86_64-static -L \"$PREFIX\" \"$@\"; fi' "
+            '\'for a in "$@"; do case "$a" in -L) '
+            'exec /usr/bin/qemu-x86_64-static "$@";; esac; done\' '
+            '\'if [ -d "$PREFIX/lib" ]; then '
+            'exec /usr/bin/qemu-x86_64-static -L "$PREFIX" "$@"; fi\' '
             "'exec /usr/bin/qemu-x86_64-static \"$@\"' "
             "> /usr/local/bin/qemu-x86_64-static",
             "printf '%s\\n' '#!/bin/bash' "
             "'PREFIX=\"${QEMU_LD_PREFIX:-/usr/i686-linux-gnu}\"' "
-            "'for a in \"$@\"; do case \"$a\" in -L) "
-            "exec /usr/bin/qemu-i386-static \"$@\";; esac; done' "
-            "'if [ -d \"$PREFIX/lib\" ]; then "
-            "exec /usr/bin/qemu-i386-static -L \"$PREFIX\" \"$@\"; fi' "
+            '\'for a in "$@"; do case "$a" in -L) '
+            'exec /usr/bin/qemu-i386-static "$@";; esac; done\' '
+            '\'if [ -d "$PREFIX/lib" ]; then '
+            'exec /usr/bin/qemu-i386-static -L "$PREFIX" "$@"; fi\' '
             "'exec /usr/bin/qemu-i386-static \"$@\"' "
             "> /usr/local/bin/qemu-i386-static",
-            "printf '%s\\n' '#!/bin/bash' 'exec qemu-x86_64-static \"$@\"' "
-            "> /usr/local/bin/q64",
-            "printf '%s\\n' '#!/bin/bash' 'exec qemu-i386-static \"$@\"' "
-            "> /usr/local/bin/q32",
+            "printf '%s\\n' '#!/bin/bash' 'exec qemu-x86_64-static \"$@\"' > /usr/local/bin/q64",
+            "printf '%s\\n' '#!/bin/bash' 'exec qemu-i386-static \"$@\"' > /usr/local/bin/q32",
             "chmod +x /usr/local/bin/qemu-x86_64-static "
             "/usr/local/bin/qemu-i386-static "
             "/usr/local/bin/q64 /usr/local/bin/q32",
@@ -868,6 +968,27 @@ def bootstrap_script(pack_id: str) -> str:
             "> /opt/linux-tools/bin/linpeas",
             "  chmod +x /opt/linux-tools/bin/linpeas",
             "fi",
+            # /etc/hosts is often a Docker bind-mount — sed -i fails.
+            "cat > /usr/local/bin/ctf-hosts-add <<'EOF'",
+            "#!/bin/bash",
+            "set -euo pipefail",
+            "if [ $# -lt 2 ]; then",
+            '  echo "usage: ctf-hosts-add <ip> <hostname> [hostname...]" >&2',
+            "  exit 2",
+            "fi",
+            "ip=$1; shift",
+            'line="$ip $*"',
+            "tmp=$(mktemp)",
+            'cp /etc/hosts "$tmp"',
+            'for h in "$@"; do',
+            '  grep -v -E "[[:space:]]${h}([[:space:]]|$)" "$tmp" > "${tmp}.n" || true',
+            '  mv "${tmp}.n" "$tmp"',
+            "done",
+            'printf \'%s\\n\' "$line" >> "$tmp"',
+            'cat "$tmp" > /etc/hosts',
+            'rm -f "$tmp"',
+            "EOF",
+            "chmod +x /usr/local/bin/ctf-hosts-add",
         ]
     if pack_id == "containers":
         lines += [
@@ -877,8 +998,7 @@ def bootstrap_script(pack_id: str) -> str:
     if spec.gems:
         gems = " ".join(shlex.quote(g) for g in spec.gems)
         lines += [
-            "command -v gem >/dev/null 2>&1 && "
-            f"gem install {gems} --no-document || true",
+            f"command -v gem >/dev/null 2>&1 && gem install {gems} --no-document || true",
         ]
     for dest, src in spec.symlinks:
         lines.append(f"ln -sfn {shlex.quote(src)} {shlex.quote(dest)} || true")
@@ -886,7 +1006,7 @@ def bootstrap_script(pack_id: str) -> str:
         lines.append(f"chmod +x {shlex.quote(dest)} 2>/dev/null || true")
     for d in spec.path_dirs:
         lines.append(
-            f'grep -q {shlex.quote(d)} /etc/environment 2>/dev/null || '
+            f"grep -q {shlex.quote(d)} /etc/environment 2>/dev/null || "
             f'echo "PATH=\\"{d}:$PATH\\"" >> /etc/environment || true'
         )
         lines.append(
@@ -922,6 +1042,8 @@ def infer_pack_from_command(command: str) -> str | None:
         return "crypto"
     if "rsactftool" in low_cmd or "cado" in low_cmd or "fpylll" in low_cmd:
         return "crypto-tools"
+    if "pyghidra" in low_cmd or "analyzeheadless" in low_cmd or "ghidra" in low_cmd:
+        return "ghidra"
     if "volatility" in low_cmd or "binwalk" in low_cmd:
         return "forensics"
     if "steghide" in low_cmd or "zsteg" in low_cmd or "tesseract" in low_cmd:
@@ -933,6 +1055,9 @@ def infer_pack_from_command(command: str) -> str | None:
         or "impacket" in low_cmd
         or "evil-winrm" in low_cmd
         or "smbclient" in low_cmd
+        or "certipy" in low_cmd
+        or "faketime" in low_cmd
+        or "gettgt" in low_cmd
     ):
         return "linux"
     if "import torch" in low_cmd or "import keras" in low_cmd:
@@ -983,19 +1108,15 @@ def parse_ensure_pack_command(command: str) -> str | None:
 def donor_build_hint(pack_id: str) -> str:
     """Operator-facing build hint when a donor image is missing."""
     hints = {
-        "crypto": (
-            "docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto ."
-        ),
+        "crypto": ("docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto ."),
         "crypto-tools": (
-            "docker build -f sandbox/Dockerfile.crypto-tools "
-            "-t ctf-sandbox-crypto-tools ."
+            "docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools ."
         ),
         "steg": "docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .",
         "linux": "docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .",
-        "mobile": (
-            "docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile ."
-        ),
+        "mobile": ("docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile ."),
         "pwn": "docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .",
+        "ghidra": ("docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra ."),
     }
     cmd = hints.get(pack_id)
     return f" Build the donor: {cmd}" if cmd else ""

@@ -30,7 +30,7 @@ You are a CTF competition coordinator running for the ENTIRE duration of a live 
 Your job is to maximize the number of challenges solved.
 
 Strategy:
-- Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Spawn swarms for unsolved local challenges (description + status)
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
@@ -86,7 +86,7 @@ def _build_coordinator_tools(deps: CoordinatorDeps) -> dict[str, CustomTool]:
 
     return {
         "fetch_challenges": CustomTool(
-            description="List all challenges with category, points, solve count, and status.",
+            description="List local challenges with name, status, and description.",
             input_schema={"type": "object", "properties": {}},
             execute=fetch_challenges,
         ),
@@ -114,7 +114,7 @@ def _build_coordinator_tools(deps: CoordinatorDeps) -> dict[str, CustomTool]:
             execute=check_swarm_status,
         ),
         "submit_flag": CustomTool(
-            description="Accept a recovered flag for a challenge (ends the run when accepted).",
+            description="Accept a recovered flag. Ends the run only when all required flags are accepted.",
             input_schema={
                 "type": "object",
                 "properties": {

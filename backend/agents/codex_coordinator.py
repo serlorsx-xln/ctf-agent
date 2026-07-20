@@ -32,7 +32,7 @@ You are a CTF competition coordinator running for the ENTIRE duration of a live 
 Your job is to maximize the number of challenges solved while minimizing cost.
 
 Strategy:
-- Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Spawn swarms for unsolved local challenges (description + status)
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
@@ -52,7 +52,7 @@ You will receive event messages. Respond with tool calls to manage the competiti
 COORDINATOR_TOOLS = [
     {
         "name": "fetch_challenges",
-        "description": "List all challenges with category, points, solve count, and status.",
+        "description": "List local challenges with name, status, and description.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -80,7 +80,7 @@ COORDINATOR_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Accept a recovered flag for a challenge (ends the run when accepted).",
+        "description": "Accept a recovered flag. Ends the run only when all required flags are accepted.",
         "inputSchema": {
             "type": "object",
             "properties": {"challenge_name": {"type": "string"}, "flag": {"type": "string"}},
@@ -149,28 +149,35 @@ class CodexCoordinator:
 
     async def start(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            "codex", "app-server",
+            "codex",
+            "app-server",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
 
-        await self._rpc("initialize", {
-            "clientInfo": {"name": "ctf-coordinator", "version": "2.0.0"},
-            "capabilities": {"experimentalApi": True},
-        })
+        await self._rpc(
+            "initialize",
+            {
+                "clientInfo": {"name": "ctf-coordinator", "version": "2.0.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
         await self._send_notification("initialized", {})
 
-        resp = await self._rpc("thread/start", {
-            "model": self.model,
-            "personality": "pragmatic",
-            "baseInstructions": COORDINATOR_PROMPT,
-            "cwd": ".",
-            "approvalPolicy": "on-request",
-            "sandbox": "read-only",
-            "dynamicTools": COORDINATOR_TOOLS,
-        })
+        resp = await self._rpc(
+            "thread/start",
+            {
+                "model": self.model,
+                "personality": "pragmatic",
+                "baseInstructions": COORDINATOR_PROMPT,
+                "cwd": ".",
+                "approvalPolicy": "on-request",
+                "sandbox": "read-only",
+                "dynamicTools": COORDINATOR_TOOLS,
+            },
+        )
         self._thread_id = resp.get("result", {}).get("thread", {}).get("id", "")
         logger.info(f"Codex coordinator started (thread={self._thread_id}, model={self.model})")
 
@@ -182,10 +189,13 @@ class CodexCoordinator:
         self._turn_done.clear()
         self._turn_error = None
 
-        await self._rpc("turn/start", {
-            "threadId": self._thread_id,
-            "input": [{"type": "text", "text": message}],
-        })
+        await self._rpc(
+            "turn/start",
+            {
+                "threadId": self._thread_id,
+                "input": [{"type": "text", "text": message}],
+            },
+        )
 
         try:
             await asyncio.wait_for(self._turn_done.wait(), timeout=120)
@@ -293,10 +303,13 @@ class CodexCoordinator:
         except Exception as e:
             result = f"Error: {e}"
 
-        await self._respond_to_request(request_id, {
-            "contentItems": [{"type": "inputText", "text": str(result)}],
-            "success": True,
-        })
+        await self._respond_to_request(
+            request_id,
+            {
+                "contentItems": [{"type": "inputText", "text": str(result)}],
+                "success": True,
+            },
+        )
 
     async def _dispatch_tool(self, name: str, args: dict) -> str:
         deps = self.deps
@@ -313,11 +326,15 @@ class CodexCoordinator:
         elif name == "kill_swarm":
             return await do_kill_swarm(deps, args["challenge_name"])
         elif name == "bump_agent":
-            return await do_bump_agent(deps, args["challenge_name"], args["model_spec"], args["insights"])
+            return await do_bump_agent(
+                deps, args["challenge_name"], args["model_spec"], args["insights"]
+            )
         elif name == "broadcast":
             return await do_broadcast(deps, args["challenge_name"], args["message"])
         elif name == "read_solver_trace":
-            return await do_read_solver_trace(deps, args["challenge_name"], args["model_spec"], args.get("last_n", 20))
+            return await do_read_solver_trace(
+                deps, args["challenge_name"], args["model_spec"], args.get("last_n", 20)
+            )
         else:
             return f"Unknown tool: {name}"
 

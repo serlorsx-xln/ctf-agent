@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import io
 import logging
 import os
@@ -18,6 +19,7 @@ import aiodocker
 logger = logging.getLogger(__name__)
 
 CONTAINER_LABEL = "ctf-agent"
+OWNER_PID_LABEL = "ctf-agent.owner-pid"
 
 # Concurrency control
 _start_semaphore: asyncio.Semaphore | None = None
@@ -40,6 +42,55 @@ async def _pack_cache_lock(pack_id: str) -> asyncio.Lock:
         return lock
 
 
+def _pack_cache_lock_path(pack_id: str) -> Path:
+    """Cross-process lock file: one extract per pack_id globally."""
+    from backend.tool_router import pack_cache_root
+
+    d = pack_cache_root() / pack_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d / ".extract.lock"
+
+
+def _acquire_pack_flock(pack_id: str) -> int:
+    """Block until this process owns exclusive extract rights for ``pack_id``."""
+    path = _pack_cache_lock_path(pack_id)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    logger.info("Pack %s: waiting for cross-process extract lock (%s)", pack_id, path)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    logger.info("Pack %s: acquired cross-process extract lock", pack_id)
+    return fd
+
+
+def _release_pack_flock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _pack_cache_is_ready(pack_id: str) -> bool:
+    from backend.tool_router import PACK_SPECS, pack_cache_dir
+
+    spec = PACK_SPECS.get(pack_id)
+    if not spec:
+        return False
+    cache = pack_cache_dir(pack_id)
+    marker = cache / ".ready"
+    return marker.is_file() and all((cache / p.lstrip("/")).exists() for p in spec.paths)
+
+
+def _docker_client() -> aiodocker.Docker:
+    """Connect like the Docker CLI: DOCKER_HOST wins over ~/.docker currentContext.
+
+    aiodocker prefers currentContext (e.g. desktop-linux) over DOCKER_HOST, which
+    breaks Colima setups where the CLI sees images but the agent does not.
+    """
+    host = os.environ.get("DOCKER_HOST")
+    if host:
+        return aiodocker.Docker(url=host)
+    return aiodocker.Docker()
+
+
 def configure_semaphore(max_concurrent: int = 50) -> None:
     """Set the max concurrent container starts. Call once at startup."""
     global _start_semaphore
@@ -60,22 +111,55 @@ async def _track_stop() -> None:
         _active_count = max(0, _active_count - 1)
 
 
-async def cleanup_orphan_containers() -> None:
-    """Kill any leftover ctf-agent containers from a previous run."""
+def _pid_alive(pid: int) -> bool:
     try:
-        docker = aiodocker.Docker()
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+async def cleanup_orphan_containers() -> None:
+    """Remove leftover ctf-agent containers without killing concurrent solvers.
+
+    Containers labeled with a live owner PID are left alone so two ``ctf-solve``
+    processes can run at once. Unlabeled running containers are also kept
+    (legacy / in-flight). Only true orphans (dead owner, or exited unlabeled)
+    are force-deleted.
+    """
+    try:
+        docker = _docker_client()
         try:
             containers = await docker.containers.list(
                 all=True,
                 filters={"label": [CONTAINER_LABEL]},
             )
+            removed = 0
+            skipped = 0
             for c in containers:
                 try:
+                    info = await c.show()
+                    labels = (info.get("Config") or {}).get("Labels") or {}
+                    owner = (labels.get(OWNER_PID_LABEL) or "").strip()
+                    status = ((info.get("State") or {}).get("Status") or "").lower()
+                    if owner.isdigit() and _pid_alive(int(owner)):
+                        skipped += 1
+                        continue
+                    if not owner and status in {"running", "created", "restarting"}:
+                        # No owner label but still live — likely a concurrent run
+                        # started before owner labeling; do not steal it.
+                        skipped += 1
+                        continue
                     await c.delete(force=True)
+                    removed += 1
                 except Exception:
                     pass
-            if containers:
-                logger.info("Cleaned up %d orphan container(s)", len(containers))
+            if removed:
+                logger.info(
+                    "Cleaned up %d orphan container(s) (kept %d live)",
+                    removed,
+                    skipped,
+                )
         finally:
             await docker.close()
     except Exception as e:
@@ -87,6 +171,208 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+def parse_challenge_network_hints(text: str) -> tuple[list[str], list[int]]:
+    """Extract lab hosts (IPs + lab-ish FQDNs) and TCP ports from challenge text.
+
+    Generic patterns only — not challenge-specific service lists.
+    Hostnames are included so Mac+VPN calibration can probe when no RFC1918 IP
+    is pasted (common Assumed Breach writeups with only ``dc.lab.htb``).
+    """
+    import re
+
+    hosts: list[str] = []
+    seen_h: set[str] = set()
+
+    def _add_host(h: str) -> None:
+        h = h.strip().rstrip(".").lower()
+        if not h or h in seen_h or h.startswith("127."):
+            return
+        if h in {"localhost", "example.com", "example.org"}:
+            return
+        seen_h.add(h)
+        hosts.append(h)
+
+    for m in re.finditer(
+        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}"
+        r"|192\.168\.\d{1,3}\.\d{1,3})\b",
+        text,
+    ):
+        _add_host(m.group(0))
+
+    # Lab-ish DNS names (htb/thm/local/…) — not a general TLD grab.
+    for m in re.finditer(
+        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+        r"(?:htb|thm|local|lab|internal|lan|corp|vuln|offline)\b",
+        text,
+        flags=re.I,
+    ):
+        _add_host(m.group(0))
+
+    # nc host port / connect host port
+    for m in re.finditer(
+        r"\bnc\s+([A-Za-z0-9._-]+)\s+(\d{2,5})\b",
+        text,
+        flags=re.I,
+    ):
+        _add_host(m.group(1))
+
+    ports: list[int] = []
+    seen_p: set[int] = set()
+
+    def _add_port(raw: str) -> None:
+        try:
+            p = int(raw)
+        except ValueError:
+            return
+        if 1 <= p <= 65535 and p not in seen_p:
+            seen_p.add(p)
+            ports.append(p)
+
+    # host:port / :port after an IP or hostname
+    for m in re.finditer(
+        r"(?:(?:10|172|192)\.[\d.]+|localhost|127\.0\.0\.1|[A-Za-z0-9._-]+\.(?:htb|thm|local|lab))"
+        r":(\d{1,5})\b",
+        text,
+        flags=re.I,
+    ):
+        _add_port(m.group(1))
+
+    for m in re.finditer(
+        r"\bnc\s+[A-Za-z0-9._-]+\s+(\d{2,5})\b",
+        text,
+        flags=re.I,
+    ):
+        _add_port(m.group(1))
+
+    # port 31337 / ports: 80, 443, 31337 / tcp/31337 / TCP 31337
+    for m in re.finditer(
+        r"\b(?:ports?|tcp|udp)\s*[#:=/\-]?\s*(\d{1,5}(?:\s*,\s*\d{1,5})*)\b",
+        text,
+        flags=re.I,
+    ):
+        for part in re.split(r"\s*,\s*", m.group(1)):
+            _add_port(part)
+
+    return hosts[:8], ports[:32]
+
+
+# Common services + a few often-closed sentinels (REFUSED ⇒ host is routed).
+_DEFAULT_PROBE_PORTS: tuple[int, ...] = (
+    22,
+    80,
+    443,
+    445,
+    3389,
+    5985,
+    8080,
+    8443,
+    8000,
+    3000,
+    1,
+    65535,
+)
+
+
+def _lab_probe_script(hosts: list[str], ports: list[int], ok_token: str) -> str:
+    """TCP probe: open OR connection-refused both mean the lab route works."""
+    hosts_py = ",".join(repr(h) for h in hosts)
+    ports_py = ",".join(str(p) for p in ports)
+    fail_token = ok_token.replace("OK", "FAIL")
+    return f"""
+import errno, socket
+hosts=[{hosts_py}]
+ports=[{ports_py}]
+for h in hosts:
+    for p in ports:
+        try:
+            s=socket.create_connection((h,p), timeout=4)
+            s.close()
+            print({ok_token!r}, h, p, 'open')
+            raise SystemExit(0)
+        except ConnectionRefusedError:
+            print({ok_token!r}, h, p, 'refused')
+            raise SystemExit(0)
+        except OSError as e:
+            if getattr(e, 'errno', None) in (errno.ECONNREFUSED, 111, 61):
+                print({ok_token!r}, h, p, 'refused')
+                raise SystemExit(0)
+        except Exception:
+            pass
+print({fail_token!r})
+"""
+
+
+def harden_nmap_command(command: str) -> str:
+    """Make agent nmap reliable through Docker/VPN/SOCKS.
+
+    Force ``-Pn`` and TCP connect ``-sT`` (SYN scans often lie in containers).
+    Rewrite explicit ``-sS`` to ``-sT``. Does **not** rewrite port ranges —
+    custom / full-port scans stay intact on every routing path.
+    """
+    import re
+
+    # Only when nmap is invoked as a command (not `echo nmap`).
+    if not (re.match(r"nmap\b", command.lstrip()) or re.search(r"[\n;|&]\s*nmap\b", command)):
+        return command
+
+    # SYN needs raw sockets; rewrite to connect scan. Leave -sU / -sV / etc.
+    command = re.sub(r"(?<!\S)-sS\b", "-sT", command)
+
+    # Real scan types only — not -sV/-sC (version/scripts).
+    has_scan = re.search(r"(?<!\S)-s(?:T|S|A|W|M|U|Y|Z|O|N|F|X)\b", command)
+    has_pn = re.search(r"(?<!\S)-Pn\b", command)
+    list_or_ping = re.search(r"(?<!\S)-s[nL]\b", command)
+
+    insert: list[str] = []
+    if not has_pn and not list_or_ping:
+        insert.append("-Pn")
+    if not has_scan and not list_or_ping:
+        insert.append("-sT")
+    if not insert:
+        return command
+
+    flags = " ".join(insert)
+
+    def _repl_head(m: re.Match[str]) -> str:
+        return f"{m.group(1)}nmap {flags}"
+
+    if re.match(r"nmap\b", command.lstrip()):
+        leading = command[: len(command) - len(command.lstrip())]
+        return leading + re.sub(r"nmap\b", f"nmap {flags}", command.lstrip(), count=1)
+    return re.sub(r"([\n;|&]\s*)nmap\b", _repl_head, command, count=1)
+
+
+def harden_hosts_edit_command(command: str) -> str:
+    """Rewrite in-place ``sed -i … /etc/hosts`` to a temp-file rewrite.
+
+    Docker bind-mounts ``/etc/hosts``; ``sed -i`` fails with
+    ``Device or resource busy``.
+    """
+    import re
+
+    if "/etc/hosts" not in command or "sed" not in command:
+        return command
+    if "ctf-hosts-add" in command:
+        return command
+
+    # Match a sed -i (optional suffix) … /etc/hosts invocation
+    pattern = re.compile(
+        r"(?P<head>^|[\n;|&]\s*)sed\s+-i\S*\s+(?P<body>.+?)\s+/etc/hosts\b",
+    )
+
+    def _rewrite(m: re.Match[str]) -> str:
+        head = m.group("head")
+        body = m.group("body").strip()
+        # body is typically "'s/foo/bar/'" or similar sed script + optional args
+        return (
+            f'{head}tmp=$(mktemp) && sed {body} /etc/hosts > "$tmp" '
+            f'&& cat "$tmp" > /etc/hosts && rm -f "$tmp"'
+        )
+
+    return pattern.sub(_rewrite, command, count=1)
 
 
 async def _docker_cli(*args: str, timeout_s: float = 600) -> tuple[int, str, str]:
@@ -129,6 +415,15 @@ class DockerSandbox:
     _binds: list[str] = field(default_factory=list, repr=False)
     # Packs whose trees were RO bind-mounted from the host cache at start.
     _bind_mounted_packs: set[str] = field(default_factory=set, repr=False)
+    # Host SOCKS port (Mac VPN passthrough); None when disabled / unused.
+    _host_proxy_port: int | None = field(default=None, repr=False)
+    # When True, agent bash is wrapped with proxychains → host SOCKS.
+    # auto: DIRECT when the container reaches the lab; SOCKS only as fallback.
+    _host_proxy_wrap: bool = field(default=False, repr=False)
+    # Ports mentioned in challenge text (custom services); used for lab probes.
+    _challenge_ports: list[int] = field(default_factory=list, repr=False)
+    # Host temp dirs to delete on stop (e.g. empty distfiles bind).
+    _temp_dirs: list[str] = field(default_factory=list, repr=False)
 
     @property
     def container_id(self) -> str:
@@ -146,9 +441,7 @@ class DockerSandbox:
         if "404" in text and "container" in text:
             return True
         status = getattr(exc, "status", None)
-        if status == 404:
-            return True
-        return False
+        return status == 404
 
     async def _ensure_container_unlocked(self) -> None:
         """Make sure we have a live container (caller must hold ``_lock``)."""
@@ -182,11 +475,14 @@ class DockerSandbox:
             self._container = None
             await _track_stop()
         if self._docker is None:
-            self._docker = aiodocker.Docker()
+            self._docker = _docker_client()
         self.ensured_packs.clear()
         self.extra_path_dirs.clear()
         # Keep self._binds and self._bind_mounted_packs — recreate remounts them.
         await self._create_and_start(self.image)
+        if self._host_proxy_port:
+            await self._install_host_proxy_client(self._host_proxy_port)
+            await self._calibrate_host_proxy_routing()
         await self.refresh_tools_doc()
         for pack_id in packs:
             try:
@@ -203,7 +499,7 @@ class DockerSandbox:
             if s.endswith("m"):
                 return int(s[:-1]) * 1024 * 1024
             return int(s)
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             logger.warning("Invalid memory_limit %r, defaulting to 4GB", self.memory_limit)
             return 4 * 1024 * 1024 * 1024
 
@@ -227,7 +523,7 @@ class DockerSandbox:
     async def start(self) -> None:
         sem = _start_semaphore or asyncio.Semaphore(50)
         async with sem:
-            self._docker = aiodocker.Docker()
+            self._docker = _docker_client()
 
             self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
 
@@ -242,6 +538,7 @@ class DockerSandbox:
             else:
                 # Web/link-only: empty distfiles so the path still exists in-container.
                 empty_dist = tempfile.mkdtemp(prefix="ctf-dist-empty-")
+                self._temp_dirs.append(empty_dist)
                 binds.append(f"{empty_dist}:/challenge/distfiles:ro")
             for name in (
                 "challenge.txt",
@@ -292,20 +589,35 @@ class DockerSandbox:
             self._binds = binds
 
             self.image = await self._resolve_l0_image(self.image)
-            await self._create_and_start(self.image)
-            await self.refresh_tools_doc()
 
-            # Bootstrap prefetched packs (bind-mounted trees skip the copy).
+            from backend.host_proxy import acquire_host_proxy, release_host_proxy
+
+            self._host_proxy_port = await acquire_host_proxy()
+            self._host_proxy_wrap = False
             try:
-                for pack in prefetch:
-                    msg = await self.ensure_pack(pack)
-                    logger.info("Prefetch pack %s: %s", pack, msg)
-            except Exception as e:
-                logger.warning("Pack prefetch failed: %s", e)
+                await self._create_and_start(self.image)
+                if self._host_proxy_port:
+                    await self._install_host_proxy_client(self._host_proxy_port)
+                    await self._calibrate_host_proxy_routing()
+                await self.refresh_tools_doc()
+
+                # Bootstrap prefetched packs (bind-mounted trees skip the copy).
+                try:
+                    for pack in prefetch:
+                        msg = await self.ensure_pack(pack)
+                        logger.info("Prefetch pack %s: %s", pack, msg)
+                except Exception as e:
+                    logger.warning("Pack prefetch failed: %s", e)
+            except Exception:
+                if self._host_proxy_port is not None:
+                    await release_host_proxy()
+                    self._host_proxy_port = None
+                    self._host_proxy_wrap = False
+                raise
 
     async def _resolve_l0_image(self, preferred: str) -> str:
-        """Use preferred L0 if present; else core; else deprecated fat image."""
-        from backend.tool_router import DEFAULT_L0_CANDIDATES, LEGACY_FAT_L0
+        """Use preferred L0 if present; else ``ctf-sandbox-core``."""
+        from backend.tool_router import DEFAULT_L0_CANDIDATES
 
         candidates: list[str] = []
         if preferred:
@@ -313,17 +625,16 @@ class DockerSandbox:
         for c in DEFAULT_L0_CANDIDATES:
             if c not in candidates:
                 candidates.append(c)
-        if LEGACY_FAT_L0 not in candidates:
-            candidates.append(LEGACY_FAT_L0)
 
         assert self._docker is not None
         last_err: Exception | None = None
         for img in candidates:
             try:
                 await self._docker.images.inspect(img)
-                if img == LEGACY_FAT_L0 and preferred != LEGACY_FAT_L0:
+                if img != preferred:
                     logger.warning(
-                        "Using deprecated fat image %s — prefer ctf-sandbox-core + packs",
+                        "L0 image %r not found; falling back to %r",
+                        preferred,
                         img,
                     )
                 return img
@@ -343,7 +654,10 @@ class DockerSandbox:
             "Cmd": ["sleep", "infinity"],
             "WorkingDir": "/challenge",
             "Tty": False,
-            "Labels": {CONTAINER_LABEL: "true"},
+            "Labels": {
+                CONTAINER_LABEL: "true",
+                OWNER_PID_LABEL: str(os.getpid()),
+            },
             "HostConfig": self._host_config(),
         }
         self._container = await self._docker.containers.create(config)
@@ -353,6 +667,251 @@ class DockerSandbox:
         info = await self._container.show()
         short_id = info["Id"][:12]
         logger.info("Sandbox started: %s (image=%s)", short_id, image)
+
+    async def _install_host_proxy_client(self, port: int) -> None:
+        """Install proxychains + config so agent bash *can* use the host VPN SOCKS.
+
+        Whether commands are actually wrapped is decided by
+        ``_calibrate_host_proxy_routing`` (DIRECT when the lab is reachable).
+        """
+        import re
+
+        from backend.host_proxy import proxychains_conf
+
+        # proxychains4 requires a numeric first-hop IP (not a hostname).
+        # Prefer IPv4 — Docker Desktop often returns IPv6 first and hop probes fail.
+        res = await self._exec_inner(
+            "getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}' "
+            "|| getent hosts host.docker.internal | awk '/^[0-9]+\\./{print $1; exit}'",
+            timeout_s=15,
+            via_host_proxy=False,
+        )
+        proxy_host = (res.stdout or "").strip().splitlines()
+        proxy_ip = proxy_host[0].strip() if proxy_host else ""
+        if proxy_ip and ":" in proxy_ip and "." not in proxy_ip:
+            logger.warning(
+                "host.docker.internal resolved to IPv6 %s; retrying for IPv4",
+                proxy_ip,
+            )
+            res4 = await self._exec_inner(
+                "getent ahostsv4 host.docker.internal | awk '{print $1; exit}'",
+                timeout_s=15,
+                via_host_proxy=False,
+            )
+            v4 = (res4.stdout or "").strip().splitlines()
+            if v4 and re.match(r"^\d+\.\d+\.\d+\.\d+$", v4[0].strip()):
+                proxy_ip = v4[0].strip()
+        if not proxy_ip or (":" in proxy_ip and "." not in proxy_ip):
+            # Prefer container default gateway, then common Colima / Desktop addrs.
+            gw = await self._exec_inner(
+                "ip -4 route show default 2>/dev/null | awk '{print $3; exit}'",
+                timeout_s=10,
+                via_host_proxy=False,
+            )
+            gw_ip = (gw.stdout or "").strip().splitlines()
+            candidates = [
+                *(gw_ip[:1]),
+                "192.168.65.1",  # Docker Desktop
+                "192.168.5.2",  # Colima
+            ]
+            proxy_ip = next(
+                (c.strip() for c in candidates if re.match(r"^\d+\.\d+\.\d+\.\d+$", c.strip())),
+                "192.168.65.1",
+            )
+            logger.warning(
+                "Could not resolve IPv4 for host.docker.internal; using %s for SOCKS",
+                proxy_ip,
+            )
+
+        # Install package first, then overwrite config (avoid dpkg conffile fights).
+        check = await self._exec_inner(
+            "command -v proxychains4 >/dev/null || "
+            "(apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
+            "apt-get install -y -qq proxychains4)",
+            timeout_s=180,
+            via_host_proxy=False,
+        )
+        if check.exit_code != 0:
+            logger.warning(
+                "proxychains4 install failed (host VPN proxy degraded): %s",
+                (check.stderr or check.stdout)[:300],
+            )
+            self._host_proxy_wrap = False
+            return
+
+        conf = proxychains_conf(port, proxy_host=proxy_ip)
+        await self._write_file_inner("/etc/proxychains4.conf", conf.encode("utf-8"))
+        which = await self._exec_inner(
+            "command -v proxychains4 && tail -3 /etc/proxychains4.conf",
+            timeout_s=15,
+            via_host_proxy=False,
+        )
+        # Reachability of the SOCKS hop itself (not whether we will wrap).
+        hop = await self._exec_inner(
+            f'python3 -c "import socket; s=socket.create_connection(('
+            f"'{proxy_ip}',{port}),timeout=3); s.close(); print('HOP_OK')\"",
+            timeout_s=15,
+            via_host_proxy=False,
+        )
+        probe = await self._exec_inner(
+            "proxychains4 -q -f /etc/proxychains4.conf "
+            "curl -sI --connect-timeout 8 http://example.com/ >/dev/null",
+            timeout_s=30,
+            via_host_proxy=False,
+        )
+        logger.info(
+            "Host SOCKS installed socks5://%s:%s (hop=%s proxy_probe_exit=%s) %s",
+            proxy_ip,
+            port,
+            "ok" if "HOP_OK" in (hop.stdout or "") else "fail",
+            probe.exit_code,
+            (which.stdout or "")[:120],
+        )
+
+    def _challenge_text(self) -> str:
+        from pathlib import Path
+
+        root = Path(self.challenge_dir)
+        for name in (
+            "challenge.txt",
+            "challenge.md",
+            "description.txt",
+            "description.md",
+            "README.md",
+        ):
+            p = root / name
+            if p.is_file():
+                return p.read_text(encoding="utf-8", errors="replace")
+        return ""
+
+    def _challenge_probe_hosts(self) -> list[str]:
+        """Lab/target IPs from challenge text (for direct-vs-SOCKS calibration)."""
+        hosts, ports = parse_challenge_network_hints(self._challenge_text())
+        self._challenge_ports = ports
+        return hosts
+
+    def _probe_ports(self) -> list[int]:
+        """Challenge-mentioned ports first, then generic defaults (incl. sentinels)."""
+        ordered: list[int] = []
+        seen: set[int] = set()
+        for p in list(self._challenge_ports) + list(_DEFAULT_PROBE_PORTS):
+            if p not in seen:
+                seen.add(p)
+                ordered.append(p)
+        return ordered
+
+    async def _probe_direct_lab_access(self, hosts: list[str]) -> bool:
+        """True if the container can reach a lab host without SOCKS.
+
+        Success = TCP open **or** connection refused (route exists; port may be
+        closed / custom-only). Timeout/filter-only ⇒ not reachable this path.
+        """
+        if not hosts:
+            return False
+        script = _lab_probe_script(hosts, self._probe_ports(), "DIRECT_OK")
+        result = await self._exec_inner(
+            f"python3 -c {shlex.quote(script)}",
+            timeout_s=40,
+            via_host_proxy=False,
+        )
+        return "DIRECT_OK" in (result.stdout or "")
+
+    async def _probe_socks_lab_access(self, hosts: list[str]) -> bool:
+        """True if lab TCP works through host SOCKS (open or refused)."""
+        if not hosts:
+            return False
+        script = _lab_probe_script(hosts, self._probe_ports(), "SOCKS_OK")
+        result = await self._exec_inner(
+            f"proxychains4 -q -f /etc/proxychains4.conf python3 -c {shlex.quote(script)}",
+            timeout_s=50,
+            via_host_proxy=False,
+        )
+        return "SOCKS_OK" in (result.stdout or "")
+
+    async def _calibrate_host_proxy_routing(self) -> None:
+        """Pick SOCKS vs direct for agent bash.
+
+        Policy (auto):
+        1. Prefer **DIRECT** when the container can TCP-reach a lab host — faster
+           and avoids connect-scan timeouts through a high-latency SOCKS hop.
+        2. Fall back to **SOCKS** when direct fails but SOCKS reaches the lab
+           (typical Docker Desktop + host VPN gap).
+        3. If both DIRECT and SOCKS lab probes fail → leave **unwrapped** (do not
+           force proxychains onto a dead path).
+        4. No lab hosts in challenge text → no wrap (offline / local challenges).
+        5. ``CTF_HOST_PROXY=1`` forces SOCKS when the hop is up.
+
+        Reachability treats connection-refused like success so custom-only open
+        ports still calibrate correctly when a closed sentinel RSTs. Ports named
+        in the challenge text are probed first. Hosts may be RFC1918 IPs or
+        lab-ish FQDNs (``*.htb``, ``*.local``, …).
+        """
+        from backend.host_proxy import host_proxy_mode, release_host_proxy
+
+        hosts = self._challenge_probe_hosts()
+        forced = host_proxy_mode() in ("1", "true", "yes", "on")
+
+        hop = await self._exec_inner(
+            'python3 -c "'
+            "import re,pathlib,socket;"
+            "c=pathlib.Path('/etc/proxychains4.conf').read_text();"
+            "m=re.search(r'socks5\\s+(\\S+)\\s+(\\d+)',c);"
+            "assert m, 'no socks line';"
+            "socket.create_connection((m.group(1),int(m.group(2))),timeout=3).close();"
+            "print('HOP_OK')\"",
+            timeout_s=15,
+            via_host_proxy=False,
+        )
+        hop_ok = "HOP_OK" in (hop.stdout or "") and bool(self._host_proxy_port)
+
+        async def _use_direct(reason: str) -> None:
+            self._host_proxy_wrap = False
+            if self._host_proxy_port is not None:
+                await release_host_proxy()
+                self._host_proxy_port = None
+            logger.info("Host VPN routing: DIRECT (%s)", reason)
+
+        async def _use_socks(reason: str, *, warning: bool = False) -> None:
+            self._host_proxy_wrap = True
+            log = logger.warning if warning else logger.info
+            log("Host VPN routing: SOCKS (%s) — agent bash uses proxychains4", reason)
+
+        if forced and hop_ok:
+            await _use_socks("CTF_HOST_PROXY forced on")
+            return
+
+        direct = await self._probe_direct_lab_access(hosts) if hosts else False
+        if direct:
+            extra = f"; challenge ports {self._challenge_ports}" if self._challenge_ports else ""
+            await _use_direct(f"container reaches {', '.join(hosts[:3])}{extra}")
+            return
+
+        if hop_ok and hosts:
+            socks_lab = await self._probe_socks_lab_access(hosts)
+            if socks_lab:
+                await _use_socks(f"reaches {', '.join(hosts[:3])}; direct miss")
+                return
+            # Both paths failed (filtered DROP, wrong VPN, bad hop). Do NOT wrap
+            # every bash through a dead SOCKS path — prefer DIRECT + warn.
+            await _use_direct(
+                "lab probe failed on DIRECT and SOCKS — leaving unwrapped; "
+                f"check VPN/machine for {', '.join(hosts[:3])}"
+            )
+            return
+
+        if hop_ok and not hosts:
+            await _use_direct("no lab hosts in challenge text; SOCKS hop idle (offline/local)")
+            return
+
+        # No usable SOCKS hop (and direct already failed or no hosts).
+        await _use_direct("SOCKS unavailable; lab probe " + ("failed" if hosts else "skipped"))
+
+    def _harden_nmap_command(self, command: str) -> str:
+        """Harden agent nmap for Docker/VPN/SOCKS without dropping port ranges."""
+        return harden_nmap_command(command)
+
+    def _harden_hosts_edit_command(self, command: str) -> str:
+        return harden_hosts_edit_command(command)
 
     async def refresh_tools_doc(self) -> None:
         from backend.tool_router import merged_tools_doc
@@ -447,6 +1006,8 @@ class DockerSandbox:
         )
 
         try:
+            # Raise memory before bootstrap — heavy packs OOM during pip otherwise.
+            await self._maybe_raise_memory([pack_id])
             if spec.paths and not bound:
                 cache = await self._materialize_pack_cache(pack_id)
                 await self._copy_cache_into_container(cache, spec.paths)
@@ -549,10 +1110,46 @@ class DockerSandbox:
         return out
 
     async def _materialize_pack_cache(self, pack_id: str) -> Path:
-        """Populate host cache from the pack donor image (once per arch)."""
+        """Populate host cache from the pack donor image (once per arch).
+
+        Concurrent solvers (separate processes) share one extract: the first
+        holds a cross-process flock and copies from the donor; waiters block
+        on the lock, then reuse ``.ready`` — never a second parallel extract.
+        """
+        from backend.tool_router import pack_cache_dir
+
+        cache = pack_cache_dir(pack_id)
+        # Fully prepared cache: safe to share with no lock / no second extract.
+        if _pack_cache_is_ready(pack_id) and (cache / ".prepared").is_file():
+            from backend.tool_router import evict_pack_cache, touch_pack_cache
+
+            touch_pack_cache(pack_id)
+            evict_pack_cache(protect={pack_id})
+            return cache
+
         lock = await _pack_cache_lock(pack_id)
         async with lock:
-            return await self._materialize_pack_cache_unlocked(pack_id)
+            fd = await asyncio.to_thread(_acquire_pack_flock, pack_id)
+            try:
+                # Another process may have finished extract+prepare while we waited.
+                if _pack_cache_is_ready(pack_id):
+                    logger.info(
+                        "Pack %s: cache already ready (shared; skipped extract)",
+                        pack_id,
+                    )
+                    return await self._finish_ready_pack_cache(pack_id)
+                return await self._materialize_pack_cache_unlocked(pack_id)
+            finally:
+                await asyncio.to_thread(_release_pack_flock, fd)
+
+    async def _finish_ready_pack_cache(self, pack_id: str) -> Path:
+        from backend.tool_router import evict_pack_cache, pack_cache_dir, touch_pack_cache
+
+        cache = pack_cache_dir(pack_id)
+        await self._finalize_pack_cache(pack_id, cache)
+        touch_pack_cache(pack_id)
+        evict_pack_cache(protect={pack_id})
+        return cache
 
     async def _materialize_pack_cache_unlocked(self, pack_id: str) -> Path:
         from backend.tool_router import PACK_SPECS, pack_cache_dir
@@ -560,21 +1157,13 @@ class DockerSandbox:
         spec = PACK_SPECS[pack_id]
         cache = pack_cache_dir(pack_id)
         marker = cache / ".ready"
-        if marker.is_file() and all(
-            (cache / p.lstrip("/")).exists() for p in spec.paths
-        ):
-            await self._finalize_pack_cache(pack_id, cache)
-            from backend.tool_router import evict_pack_cache, touch_pack_cache
-
-            touch_pack_cache(pack_id)
-            evict_pack_cache(protect={pack_id})
-            return cache
 
         cache.mkdir(parents=True, exist_ok=True)
-        name = f"ctf-pack-extract-{pack_id}-{os.getpid()}"
-        rc, _, err = await _docker_cli(
-            "create", "--name", name, spec.image, "sleep", "infinity"
-        )
+        # One global extract container name per pack — safe because the
+        # cross-process flock guarantees a single extractor.
+        name = f"ctf-pack-extract-{pack_id}"
+        await _docker_cli("rm", "-f", name, timeout_s=60)
+        rc, _, err = await _docker_cli("create", "--name", name, spec.image, "sleep", "infinity")
         if rc != 0:
             raise RuntimeError(f"docker create {spec.image} failed: {err.strip()}")
         try:
@@ -595,21 +1184,13 @@ class DockerSandbox:
                     "cp", f"{name}:{src}", str(dest), timeout_s=cp_timeout
                 )
                 if rc != 0:
-                    raise RuntimeError(
-                        f"docker cp {src} from {spec.image} failed: {err.strip()}"
-                    )
+                    raise RuntimeError(f"docker cp {src} from {spec.image} failed: {err.strip()}")
             marker.write_text("ok\n", encoding="utf-8")
+            logger.info("Pack %s: host cache materialized at %s", pack_id, cache)
         finally:
             await _docker_cli("rm", "-f", name, timeout_s=60)
 
-        await self._finalize_pack_cache(pack_id, cache)
-        from backend.tool_router import evict_pack_cache, touch_pack_cache
-
-        touch_pack_cache(pack_id)
-        removed = evict_pack_cache(protect={pack_id})
-        if removed:
-            logger.info("Pack cache eviction removed: %s", ", ".join(removed))
-        return cache
+        return await self._finish_ready_pack_cache(pack_id)
 
     async def _finalize_pack_cache(self, pack_id: str, cache: Path) -> None:
         """One-time host-cache prep (wrappers, Sage pip) before RO binds.
@@ -636,11 +1217,11 @@ class DockerSandbox:
         wrappers = (
             (
                 cache / "usr" / "local" / "bin" / "sage",
-                "#!/bin/bash\nexec /opt/sagemath/bin/sage \"$@\"\n",
+                '#!/bin/bash\nexec /opt/sagemath/bin/sage "$@"\n',
             ),
             (
                 cache / "usr" / "local" / "bin" / "sage-python",
-                "#!/bin/bash\nexec /opt/sagemath/bin/python3 \"$@\"\n",
+                '#!/bin/bash\nexec /opt/sagemath/bin/python3 "$@"\n',
             ),
         )
         for path, body in wrappers:
@@ -715,14 +1296,9 @@ class DockerSandbox:
             "local/lib/python*/site-packages/Crypto/__init__.py",
             "lib/python*/site-packages/Cryptodome/__init__.py",
         )
-        for pattern in patterns:
-            if any(sage_root.glob(pattern)):
-                return True
-        return False
+        return any(any(sage_root.glob(pattern)) for pattern in patterns)
 
-    async def _copy_cache_into_container(
-        self, cache: Path, paths: tuple[str, ...]
-    ) -> None:
+    async def _copy_cache_into_container(self, cache: Path, paths: tuple[str, ...]) -> None:
         cid = self.container_id
         for src in paths:
             host_src = cache / src.lstrip("/")
@@ -745,8 +1321,7 @@ class DockerSandbox:
                 )
                 if rc2 != 0:
                     raise RuntimeError(
-                        f"docker cp into sandbox failed for {src}: "
-                        f"{err.strip()} | {err2.strip()}"
+                        f"docker cp into sandbox failed for {src}: {err.strip()} | {err2.strip()}"
                     )
 
     async def exec(self, command: str, timeout_s: int = 300) -> ExecResult:
@@ -756,13 +1331,13 @@ class DockerSandbox:
         async with self._lock:
             await self._ensure_container_unlocked()
             try:
-                return await self._exec_inner(command, timeout_s)
+                return await self._exec_inner(command, timeout_s, via_host_proxy=True)
             except aiodocker.exceptions.DockerError as e:
                 if self._is_container_gone_error(e):
                     logger.warning("exec hit gone container — recreating and retrying once")
                     await self._recreate_container_unlocked()
                     try:
-                        return await self._exec_inner(command, timeout_s)
+                        return await self._exec_inner(command, timeout_s, via_host_proxy=True)
                     except Exception as e2:
                         return ExecResult(
                             exit_code=-1,
@@ -771,19 +1346,59 @@ class DockerSandbox:
                         )
                 return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
 
-    async def _exec_inner(self, command: str, timeout_s: int) -> ExecResult:
-        # Wrap command with `timeout` so the container kills the process on expiry.
-        # --signal=KILL ensures hard kill; --kill-after=5 is a safety net.
+    async def _exec_inner(
+        self,
+        command: str,
+        timeout_s: int,
+        *,
+        via_host_proxy: bool = False,
+    ) -> ExecResult:
+        import re
+
+        # Prefer TERM so timed-out commands exit 124 (not 137 from SIGKILL).
+        # KILL after 5s is only a safety net for stuck processes.
         # Prepend pack PATH dirs (non-login bash -c does not read profile.d).
+        # Full-port connect scans need wall time; don't let a short agent
+        # timeout silently amputate discovery (custom ports included).
+        if (
+            via_host_proxy
+            and timeout_s < 900
+            and re.search(r"(?<!\S)nmap\b", command)
+            and re.search(
+                r"(?<!\S)-p-(?!\S)"
+                r"|(?<!\S)-p\s+-(?!\S)"
+                r"|(?<!\S)-p\s*0*1\s*-\s*65535(?!\S)"
+                r"|(?<!\S)-p0*1-65535(?!\S)",
+                command,
+            )
+        ):
+            logger.info(
+                "nmap full-port sweep: raising timeout %ss → 900s",
+                timeout_s,
+            )
+            timeout_s = 900
         path_prefix = ""
         if self.extra_path_dirs:
             joined = ":".join(self.extra_path_dirs)
             path_prefix = f"export PATH={shlex.quote(joined)}:$PATH; "
+        command = self._harden_nmap_command(command)
+        command = self._harden_hosts_edit_command(command)
         inner = path_prefix + command
-        wrapped = (
-            f"timeout --signal=KILL --kill-after=5 {timeout_s} "
-            f"bash -c {shlex.quote(inner)}"
-        )
+        runner = f"bash -c {shlex.quote(inner)}"
+        # Route agent traffic through host SOCKS only when calibration said so.
+        # Internal pack/bootstrap calls keep via_host_proxy=False.
+        if (
+            via_host_proxy
+            and self._host_proxy_wrap
+            and self._host_proxy_port
+            and "proxychains4" not in command
+        ):
+            # pipefail so `nmap | head` still surfaces nmap failures for pack ensure
+            runner = (
+                "proxychains4 -q -f /etc/proxychains4.conf "
+                f"bash -o pipefail -c {shlex.quote(inner)}"
+            )
+        wrapped = f"timeout --signal=TERM --kill-after=5 {timeout_s} {runner}"
         exec_instance = await self._container.exec(
             cmd=["bash", "-c", wrapped],
             stdout=True,
@@ -910,12 +1525,6 @@ class DockerSandbox:
         except TimeoutError as e:
             raise TimeoutError(f"Timed out writing {path}") from e
 
-    async def copy_from(self, container_path: str, host_path: str) -> None:
-        """Copy a file from the container to the host."""
-        data = await self.read_file_bytes(container_path)
-        Path(host_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(host_path).write_bytes(data)
-
     async def stop(self) -> None:
         if self._container:
             try:
@@ -932,11 +1541,31 @@ class DockerSandbox:
                 pass
             self._docker = None
 
+        if self._host_proxy_port is not None:
+            from backend.host_proxy import release_host_proxy
+
+            try:
+                await release_host_proxy()
+            except Exception:
+                pass
+            self._host_proxy_port = None
+        self._host_proxy_wrap = False
+
         if self.workspace_dir:
             import shutil
+
             try:
                 shutil.rmtree(self.workspace_dir, ignore_errors=True)
             except Exception:
                 pass
             self.workspace_dir = ""
+        if self._temp_dirs:
+            import shutil
+
+            for d in self._temp_dirs:
+                try:
+                    shutil.rmtree(d, ignore_errors=True)
+                except Exception:
+                    pass
+            self._temp_dirs.clear()
         logger.info("Sandbox stopped")

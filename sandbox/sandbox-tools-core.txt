@@ -19,9 +19,16 @@ gf128-roots            GF(2^128) poly roots (NIST field used by AES-GCM)
 Extra category tools (steg, forensics, sage, RsaCtfTool, angr, …) load
 automatically when first used — re-read this file afterward.
 
+== NETWORK / VPN ==
+On Mac, the harness calibrates routing: use DIRECT when the lab is reachable
+from the container; otherwise agent bash may use host SOCKS (host VPN). Prefer
+curl, python sockets, nmap as usual — no manual proxy config. If a lab is
+unreachable, check that the host VPN/machine is up (SOCKS is not always on).
+
 == MEMORY ==
 Exit 137 = OOM kill — shrink work / stream / use lighter tools from this list.
-Exit 124 = timeout — narrow scope or pick a faster tool.
+Exit 124 = timeout — often network/RPC; fix targets/flags/timeouts before
+abandoning the technique. For huge scans, narrow scope or use a faster tool.
 
 == PATHS ==
 /challenge/distfiles     Challenge files (read-only)

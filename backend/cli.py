@@ -24,7 +24,9 @@ def _setup_logging(verbose: bool = False) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiodocker").setLevel(logging.WARNING)
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)-8s %(message)s", datefmt="%X"))
+    handler.setFormatter(
+        logging.Formatter("[%(asctime)s] %(levelname)-8s %(message)s", datefmt="%X")
+    )
     logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
@@ -37,7 +39,11 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option("--models", multiple=True, help="Model specs (default: all configured)")
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
-@click.option("--coordinator-model", default=None, help="Model for coordinator (default: composer-2.5 for cursor)")
+@click.option(
+    "--coordinator-model",
+    default=None,
+    help="Model for coordinator (default: composer-2.5 for cursor)",
+)
 @click.option(
     "--coordinator",
     default="cursor",
@@ -45,7 +51,7 @@ def _setup_logging(verbose: bool = False) -> None:
     help="Coordinator backend (default: cursor)",
 )
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
-@click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
+@click.option("--msg-port", default=9400, type=int, help="Operator message port (default 9400)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
     image: str | None,
@@ -90,11 +96,10 @@ def main(
         console.print(f"  Image: {auto_image} (L0{pack_note})")
     else:
         console.print(
-            f"  Image: L0 default={settings.sandbox_image} "
-            "(packs loaded additively per challenge)"
+            f"  Image: L0 default={settings.sandbox_image} (packs loaded additively per challenge)"
         )
     console.print(f"  Max challenges: {max_challenges}")
-    console.print("  Flag submit: local accept (no CTFd)")
+    console.print("  Flag submit: local accept (no external scoreboard)")
     console.print()
 
     if challenge:
@@ -120,8 +125,8 @@ async def _run_single(
     max_challenges: int,
 ) -> None:
     """Run a single challenge with a swarm."""
-    from backend.challenge import load_challenge
     from backend.agents.swarm import ChallengeSwarm
+    from backend.challenge import load_challenge
     from backend.cost_tracker import CostTracker
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
@@ -155,11 +160,23 @@ async def _run_single(
     )
 
     result = await swarm.run()
-    from backend.solver_base import FLAG_FOUND
+    from backend.solver_base import FLAG_FOUND, GAVE_UP
+
     if result and result.status == FLAG_FOUND:
         console.print(f"\n[bold green]FLAG FOUND:[/bold green] {result.flag}")
+    elif result and result.flag and result.status == GAVE_UP:
+        console.print(f"\n[bold yellow]Partial progress:[/bold yellow] {result.flag}")
+        if result.findings_summary:
+            console.print(result.findings_summary[:1500])
+    elif result and result.findings_summary:
+        console.print("\n[bold red]No flag accepted.[/bold red]")
+        console.print("[dim]Last findings:[/dim]")
+        console.print(result.findings_summary[:1500])
     else:
         console.print("\n[bold red]No flag found.[/bold red]")
+
+    if swarm.confirmed_flags and not (result and result.status == FLAG_FOUND):
+        console.print(f"[dim]Accepted this run: {' | '.join(swarm.confirmed_flags)}[/dim]")
 
     console.print("\n[bold]Cost Summary:[/bold]")
     for agent_name in cost_tracker.by_agent:
@@ -186,6 +203,7 @@ async def _run_coordinator(
 
     if coordinator_backend == "cursor":
         from backend.agents.cursor_coordinator import run_cursor_coordinator
+
         results = await run_cursor_coordinator(
             settings=settings,
             model_specs=model_specs,
@@ -195,6 +213,7 @@ async def _run_coordinator(
         )
     elif coordinator_backend == "codex":
         from backend.agents.codex_coordinator import run_codex_coordinator
+
         results = await run_codex_coordinator(
             settings=settings,
             model_specs=model_specs,
@@ -204,6 +223,7 @@ async def _run_coordinator(
         )
     else:
         from backend.agents.claude_coordinator import run_claude_coordinator
+
         results = await run_claude_coordinator(
             settings=settings,
             model_specs=model_specs,

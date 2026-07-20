@@ -1,0 +1,15 @@
+== GHIDRA / REVERSE ==
+pyghidra             Native CPython API to Ghidra (headless). Requires this pack.
+                     GHIDRA_INSTALL_DIR=/opt/ghidra (set automatically).
+                     Example:
+                       import pyghidra
+                       with pyghidra.open_program('/challenge/distfiles/chal') as flat_api:
+                           prog = flat_api.getCurrentProgram()
+                           # decompile / listing …
+analyzeHeadless      Ghidra CLI batch analyzer. analyzeHeadless <project> <name> -import <bin>
+r2 / angr            Also in the pwn pack for lighter RE / symbolic work.
+
+== NOTES ==
+First ensure may download/extract a large tree into the host pack cache.
+Loaded on demand when you `import pyghidra` or run analyzeHeadless; ELF challenges
+prefetch this pack with pwn. Re-read /challenge/TOOLS.txt after install.

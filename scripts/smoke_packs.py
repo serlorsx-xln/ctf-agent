@@ -9,10 +9,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Ensure docker socket for Colima
-os.environ.setdefault(
-    "DOCKER_HOST", f"unix://{Path.home()}/.colima/default/docker.sock"
-)
+# Prefer an existing DOCKER_HOST; else Colima; else Docker Desktop / system sock.
+if "DOCKER_HOST" not in os.environ:
+    for candidate in (
+        Path.home() / ".colima/default/docker.sock",
+        Path.home() / ".docker/run/docker.sock",
+        Path("/var/run/docker.sock"),
+    ):
+        if candidate.exists():
+            os.environ["DOCKER_HOST"] = f"unix://{candidate}"
+            break
 
 from backend.sandbox import DockerSandbox  # noqa: E402
 from backend.tool_router import PACK_SPECS  # noqa: E402
@@ -26,8 +32,15 @@ PROBES: dict[str, str] = {
         "&& command -v exiftool && command -v tesseract "
         "&& python3 -c 'from PIL import Image; import pytesseract'"
     ),
-    "pwn": (
-        "command -v q64 && command -v r2 && python3 -c 'import angr,capstone'"
+    "pwn": ("command -v q64 && command -v r2 && python3 -c 'import angr,capstone'"),
+    "ghidra": (
+        "test -x /opt/ghidra/support/analyzeHeadless "
+        "&& command -v analyzeHeadless "
+        "&& python3 -c '"
+        "import os; "
+        'assert os.environ.get("GHIDRA_INSTALL_DIR") == "/opt/ghidra", os.environ.get("GHIDRA_INSTALL_DIR"); '
+        "import pyghidra; "
+        "print(pyghidra.__file__)'"
     ),
     "crypto": "command -v sage && sage -c 'print(1+1)'",
     "crypto-tools": (
@@ -102,14 +115,14 @@ async def main() -> int:
                 continue
 
             # Longer for sage / torch / angr
-            timeout = 600 if pack in ("crypto", "ml", "pwn", "crypto-tools") else 180
+            timeout = 600 if pack in ("crypto", "ml", "pwn", "crypto-tools", "ghidra") else 180
             print(f"  probe: {cmd[:80]}…", flush=True)
             # use exec with higher timeout via inner
             r = await sb.exec(cmd, timeout_s=timeout)
             out = ((r.stdout or "") + (r.stderr or "")).strip()[:400]
             if r.exit_code == 0:
                 results.append((pack, "OK", out or "probe ok"))
-                print(f"  OK", flush=True)
+                print("  OK", flush=True)
             else:
                 # containers: soft-ok if apt couldn't install nested runtime
                 if pack == "containers" and r.exit_code != 0:

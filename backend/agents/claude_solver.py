@@ -1,18 +1,22 @@
 """Claude Agent SDK solver — native tools with execution hooks.
 
 Uses Claude's native Bash tool, but intercepts every command via a PreToolUse
-hook and rewrites it to run inside the Docker sandbox via `docker exec`. Read,
+hook and runs it through ``DockerSandbox.exec`` / ``do_bash`` (pack ensure,
+host VPN proxy, nmap/hosts harden) — not a raw ``docker exec`` rewrite. Read,
 Write, and Edit are blocked — the model uses bash for all file operations.
-Flag submission is intercepted from bash commands matching `submit_flag <flag>`.
+
+Flag submission is available both as an MCP tool (preferred) and via bash
+``submit_flag …`` (including compound commands like ``cd … && submit_flag …``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shlex
+import tempfile
 import time
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -21,8 +25,20 @@ from claude_agent_sdk import (
     HookMatcher,
     ResultMessage,
     TextBlock,
+    ThinkingBlock,
+    create_sdk_mcp_server,
+    tool,
 )
 
+from backend.agents.live_log import live as _live
+from backend.agents.live_log import live_json
+from backend.bash_intercept import (
+    SUBMIT_EXPANSION_ERROR,
+    extract_notify_coordinator,
+    parse_submit_flag,
+    submit_flag_suffix,
+)
+from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
@@ -72,18 +88,114 @@ class ClaudeSolver:
 
         self._client: ClaudeSDKClient | None = None
         self._session_id: str | None = None
-        self._container_id: str = ""
         self._step_count = 0
         self._flag: str | None = None
         self._confirmed = False
+        self._accepted_flags: list[str] = []
         self._findings = ""
         self._cost_usd = 0.0
         self._bump_insights: str | None = None
 
+    @staticmethod
+    def _bash_timeout_s(tool_input: dict) -> int:
+        """Claude Bash may pass timeout in seconds or milliseconds."""
+        for key in ("timeout", "timeout_ms"):
+            raw = tool_input.get(key)
+            if raw is None:
+                continue
+            try:
+                val = int(raw)
+            except TypeError, ValueError:
+                continue
+            if val > 1000:  # treat as ms
+                return max(5, min(val // 1000, 900))
+            return max(5, min(val, 900))
+        return 120
+
+    def _host_cat_result(self, text: str, tool_input: dict) -> dict:
+        """Surface sandbox output via a host-side cat (PreToolUse runs on host)."""
+        fd, path = tempfile.mkstemp(prefix="ctf-claude-bash-", suffix=".txt")
+        try:
+            Path(path).write_text(text, encoding="utf-8", errors="replace")
+        finally:
+            import os
+
+            os.close(fd)
+        cmd = f"cat {shlex.quote(path)}; rm -f {shlex.quote(path)}"
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": {**tool_input, "command": cmd},
+            }
+        }
+
+    async def _handle_submit(self, flag_val: str) -> str:
+        flag_val = (flag_val or "").strip()
+        if not flag_val:
+            return "Empty flag — nothing to submit."
+        if self.submit_fn:
+            display, confirmed = await self.submit_fn(flag_val)
+        else:
+            from backend.flags import normalize_flags_required
+            from backend.tools.core import do_submit_flag
+
+            display, confirmed = await do_submit_flag(
+                self.meta.name,
+                flag_val,
+                already_accepted=list(self._accepted_flags),
+                required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+            )
+        if (
+            display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
+            and flag_val
+            and flag_val not in self._accepted_flags
+        ):
+            self._accepted_flags.append(flag_val)
+        if confirmed:
+            self._confirmed = True
+            self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag_val
+            self.tracer.event("flag_confirmed", flag=self._flag, step=self._step_count)
+        return display
+
+    def _build_solver_mcp(self):
+        solver = self
+
+        @tool(
+            "submit_flag",
+            "Submit a recovered CTF flag. ACCEPTED = more flags needed; CORRECT = done.",
+            {"flag": str},
+        )
+        async def submit_flag(args: dict) -> dict:
+            display = await solver._handle_submit(args.get("flag", ""))
+            return {"content": [{"type": "text", "text": display}]}
+
+        @tool(
+            "notify_coordinator",
+            "Send a short strategic note to the competition coordinator.",
+            {"message": str},
+        )
+        async def notify_coordinator(args: dict) -> dict:
+            msg = (args.get("message") or "").strip()
+            if solver.notify_coordinator and msg:
+                await solver.notify_coordinator(msg)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Message sent to coordinator." if msg else "Empty message.",
+                    }
+                ]
+            }
+
+        return create_sdk_mcp_server(
+            name="ctf",
+            version="1.0.0",
+            tools=[submit_flag, notify_coordinator],
+        )
+
     async def start(self) -> None:
         await self.sandbox.start()
-
-        self._container_id = self.sandbox.container_id
 
         arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
         container_arch = arch_result.stdout.strip() or "unknown"
@@ -95,12 +207,23 @@ class ClaudeSolver:
             "workspace at /challenge/workspace/. Do NOT use any paths outside /challenge/. "
             "All bash commands run inside the container via docker exec. "
             "Use bash for everything: cat/head to read files, tee/echo> to write, find/grep to search. "
-            "submit_flag 'FLAG' to submit. notify_coordinator 'MSG' to message the coordinator.\n\n"
+            "Prefer the submit_flag tool when you recover a flag "
+            "(ACCEPTED = more needed; CORRECT = done). "
+            "Bash `submit_flag 'FLAG'` also works (even after `cd … &&`). "
+            "Use notify_coordinator to message the coordinator.\n\n"
         )
+        # Claude MCP only exposes submit_flag / notify_coordinator — not view_image
+        # / webhook_*. Keep prompt honest (bash-oriented image/web hints).
         system_prompt = sandbox_preamble + build_prompt(
-            self.meta, distfile_names, container_arch=container_arch,
+            self.meta,
+            distfile_names,
+            container_arch=container_arch,
             has_named_tools=False,
         )
+
+        mcp_server = self._build_solver_mcp()
+        mcp_submit = "mcp__ctf__submit_flag"
+        mcp_notify = "mcp__ctf__notify_coordinator"
 
         # PreToolUse hook: rewrite Bash commands to run in the sandbox container.
         # Block Read/Write/Edit — model should use bash for file access.
@@ -121,39 +244,53 @@ class ClaudeSolver:
             # Step counting and loop detection for all tools
             self._step_count += 1
             self.tracer.tool_call(tool_name, tool_input, self._step_count)
+            live_json(
+                f"{self.agent_name} tool#{self._step_count} → {tool_name}",
+                tool_input,
+                limit=1500,
+            )
             loop_status = self.loop_detector.check(tool_name, str(tool_input)[:200])
             if loop_status == "break":
                 self.tracer.event("loop_break", tool=tool_name, step=self._step_count)
+                msg = "Loop detected — change arguments or tool flags before repeating."
+                _live(f"{self.agent_name} tool#{self._step_count} ✗ {tool_name}", msg)
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": "Loop detected — try a different approach.",
+                        "permissionDecisionReason": msg,
                     }
                 }
             warn_msg = ""
             if loop_status == "warn":
                 from backend.loop_detect import LOOP_WARNING_MESSAGE
+
                 warn_msg = LOOP_WARNING_MESSAGE
+
+            # MCP harness tools execute in-process — allow through.
+            if tool_name in (mcp_submit, mcp_notify):
+                return {"systemMessage": warn_msg} if warn_msg else {}
 
             if tool_name == "Bash":
                 command = tool_input.get("command", "")
 
-                # Intercept submit_flag commands — handle submission directly
-                flag_match = re.match(r"submit_flag\s+['\"]?(.+?)['\"]?\s*$", command.strip())
-                if flag_match:
-                    flag_val = flag_match.group(1).strip()
-                    if self.submit_fn:
-                        display, confirmed = await self.submit_fn(flag_val)
+                # Intercept submit_flag anywhere in a compound command
+                parsed_submit = parse_submit_flag(command)
+                if parsed_submit is not None:
+                    if parsed_submit.has_expansion:
+                        result_msg = SUBMIT_EXPANSION_ERROR
                     else:
-                        from backend.tools.core import do_submit_flag
-                        display, confirmed = await do_submit_flag(self.meta.name, flag_val)
-                    result_msg = display
-                    if confirmed:
-                        self._confirmed = True
-                        self._flag = flag_val
-                        self.tracer.event("flag_confirmed", flag=flag_val, step=self._step_count)
-                    # Rewrite to an echo so Bash returns the submission result
+                        result_msg = await self._handle_submit(parsed_submit.value)
+                        suffix = submit_flag_suffix(command, parsed_submit)
+                        if suffix:
+                            from backend.tools.core import do_bash
+
+                            more = await do_bash(
+                                self.sandbox,
+                                suffix,
+                                timeout_seconds=self._bash_timeout_s(tool_input),
+                            )
+                            result_msg = f"{result_msg}\n{more}"
                     return {
                         "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
@@ -165,33 +302,35 @@ class ClaudeSolver:
                         }
                     }
 
-                # Intercept notify_coordinator commands
-                notify_match = re.match(r"notify_coordinator\s+['\"]?(.+?)['\"]?\s*$", command.strip())
-                if notify_match and self.notify_coordinator:
-                    msg = notify_match.group(1).strip()
-                    await self.notify_coordinator(msg)
+                # Intercept notify_coordinator anywhere in a compound command
+                notify_msg = extract_notify_coordinator(command)
+                if notify_msg is not None and self.notify_coordinator:
+                    await self.notify_coordinator(notify_msg)
                     return {
                         "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
                             "permissionDecision": "allow",
-                            "updatedInput": {**tool_input, "command": "echo 'Message sent to coordinator.'"},
+                            "updatedInput": {
+                                **tool_input,
+                                "command": "echo 'Message sent to coordinator.'",
+                            },
                         }
                     }
 
-                # Rewrite command to run in the Docker container
-                escaped = shlex.quote(command)
-                rewritten = f"docker exec -i {self._container_id} bash -c {escaped}"
+                # Run through sandbox.exec (pack ensure, SOCKS wrap, harden).
+                from backend.tools.core import do_bash
 
-                result = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "allow",
-                        "updatedInput": {
-                            **tool_input,
-                            "command": rewritten,
-                        },
-                    }
-                }
+                out = await do_bash(
+                    self.sandbox,
+                    command,
+                    timeout_seconds=self._bash_timeout_s(tool_input),
+                )
+                fail_status = self.loop_detector.check_result("Bash", out)
+                if fail_status == "oom_break":
+                    from backend.loop_detect import OOM_STUCK_MESSAGE
+
+                    out = f"{out}\n\n{OOM_STUCK_MESSAGE}"
+                result = self._host_cat_result(out, tool_input)
                 if warn_msg:
                     result["systemMessage"] = warn_msg
                 return result
@@ -204,16 +343,22 @@ class ClaudeSolver:
             # The model should use find/grep/cat/tee via bash instead.
             redirect_hint = ""
             if tool_name in ("Glob", "Grep"):
-                redirect_hint = " Use `find` or `grep` via bash instead — those run in the container."
+                redirect_hint = (
+                    " Use `find` or `grep` via bash instead — those run in the container."
+                )
             elif tool_name in ("Read", "Write", "Edit", "NotebookEdit"):
                 redirect_hint = " Use cat/head/tail to read, and tee/cat>file to write via bash."
 
+            deny_reason = f"{tool_name} blocked — use bash for all operations inside the sandbox."
+            _live(f"{self.agent_name} tool#{self._step_count} ✗ {tool_name}", deny_reason)
             return {
-                "systemMessage": f"{tool_name} is not available — all work happens inside the Docker container.{redirect_hint}" if redirect_hint else "",
+                "systemMessage": f"{tool_name} is not available — all work happens inside the Docker container.{redirect_hint}"
+                if redirect_hint
+                else "",
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": f"{tool_name} blocked — use bash for all operations inside the sandbox.",
+                    "permissionDecisionReason": deny_reason,
                 },
             }
 
@@ -227,11 +372,18 @@ class ClaudeSolver:
         async def _trace_post_tool_inner(input_data, tool_use_id, context):
             if input_data.get("hook_event_name") != "PostToolUse":
                 return {}
-            response_str = str(input_data.get("tool_response", ""))[:2000]
-            self.tracer.tool_result(input_data.get("tool_name", "?"), response_str[:500], self._step_count)
+            tool_name = input_data.get("tool_name", "?")
+            response_str = str(input_data.get("tool_response", ""))
+            self.tracer.tool_result(tool_name, response_str[:500], self._step_count)
+            _live(
+                f"{self.agent_name} tool#{self._step_count} ← {tool_name}",
+                response_str,
+                limit=2000,
+            )
 
             if self._step_count % 5 == 0 and self.message_bus:
                 from backend.tools.core import do_check_findings
+
                 findings = await do_check_findings(self.message_bus, self.model_spec)
                 if findings and "No new findings" not in findings:
                     return {
@@ -243,6 +395,7 @@ class ClaudeSolver:
             return {}
 
         from backend.models import effort_from_spec
+
         effort = effort_from_spec(self.model_spec)
 
         options = ClaudeAgentOptions(
@@ -251,7 +404,14 @@ class ClaudeSolver:
             effort=effort,
             # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator
             env={"CLAUDECODE": ""},
-            allowed_tools=["Bash", "WebFetch", "WebSearch"],
+            mcp_servers={"ctf": mcp_server},
+            allowed_tools=[
+                "Bash",
+                "WebFetch",
+                "WebSearch",
+                mcp_submit,
+                mcp_notify,
+            ],
             permission_mode="bypassPermissions",
             output_format={"type": "json_schema", "schema": solver_output_json_schema()},
             hooks={
@@ -269,6 +429,15 @@ class ClaudeSolver:
         self.tracer.event("start", challenge=self.meta.name, model=self.model_id)
         logger.info(f"[{self.agent_name}] Claude SDK solver started")
 
+    def _finish_findings(self) -> str:
+        """Surface accepted flags + findings even when submit/race did not finish."""
+        parts: list[str] = []
+        if self._accepted_flags:
+            parts.append("Accepted flag(s): " + " | ".join(self._accepted_flags))
+        if self._findings:
+            parts.append(self._findings)
+        return "\n".join(parts)[:2000]
+
     async def run_until_done_or_gave_up(self) -> SolverResult:
         if not self._client:
             await self.start()
@@ -280,17 +449,21 @@ class ClaudeSolver:
 
         try:
             if self._bump_insights:
-                prompt = (
-                    "Your previous attempt did not find the flag. "
-                    f"Insights from other agents:\n\n{self._bump_insights}\n\n"
-                    "Try a different approach. Do NOT repeat what was tried."
+                prompt = build_continue_prompt(
+                    accepted_flags=self._accepted_flags,
+                    flags_required=getattr(self.meta, "flags_required", 1),
+                    bump_insights=self._bump_insights,
                 )
                 self._bump_insights = None
             elif self._session_id:
-                prompt = "Continue solving. Try a different approach."
+                prompt = build_continue_prompt(
+                    accepted_flags=self._accepted_flags,
+                    flags_required=getattr(self.meta, "flags_required", 1),
+                )
             else:
                 prompt = "Solve this CTF challenge."
 
+            _live(self.agent_name, "── turn start ──")
             await self._client.query(prompt)
 
             async for message in self._client.receive_response():
@@ -299,8 +472,15 @@ class ClaudeSolver:
 
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if isinstance(block, TextBlock):
+                        if isinstance(block, ThinkingBlock):
+                            think = (
+                                getattr(block, "thinking", None) or getattr(block, "text", "") or ""
+                            )
+                            if str(think).strip():
+                                _live(f"{self.agent_name} think", str(think))
+                        elif isinstance(block, TextBlock):
                             self._findings = block.text[:2000]
+                            _live(f"{self.agent_name} ai", block.text)
 
                 elif isinstance(message, ResultMessage):
                     self._session_id = message.session_id
@@ -310,22 +490,31 @@ class ClaudeSolver:
                     if not isinstance(msg_usage, dict):
                         msg_usage = vars(msg_usage) if hasattr(msg_usage, "__dict__") else {}
                     self.cost_tracker.record_tokens(
-                        self.agent_name, self.model_id,
+                        self.agent_name,
+                        self.model_id,
                         input_tokens=msg_usage.get("input_tokens", 0),
                         output_tokens=msg_usage.get("output_tokens", 0),
-                        cache_read_tokens=msg_usage.get("cache_read_input_tokens", msg_usage.get("cache_read_tokens", 0)),
+                        cache_read_tokens=msg_usage.get(
+                            "cache_read_input_tokens", msg_usage.get("cache_read_tokens", 0)
+                        ),
                         provider_spec="claude-sdk",
                         duration_seconds=time.monotonic() - t0,
                     )
 
                     output = getattr(message, "structured_output", None)
-                    if output:
-                        if output.get("type") == "flag_found":
-                            self._flag = output.get("flag")
-                            self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-                            # JSON alone does not confirm — only submit_flag does.
+                    if output and output.get("type") == "flag_found":
+                        self._flag = output.get("flag")
+                        self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
+                        # JSON alone does not confirm — only submit_flag does.
 
-            self.tracer.event("turn_complete", duration=round(time.monotonic() - t0, 1), cost=round(self._cost_usd, 4))
+                # tool_progress / other SDK noise — ignore silently
+
+            _live(self.agent_name, "── turn end ──")
+            self.tracer.event(
+                "turn_complete",
+                duration=round(time.monotonic() - t0, 1),
+                cost=round(self._cost_usd, 4),
+            )
 
             # Also check if flag was confirmed via submit_flag in bash
             if self._confirmed and self._flag:
@@ -342,7 +531,11 @@ class ClaudeSolver:
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
-            if "quota" in error_str.lower() or "rate" in error_str.lower() or "overloaded" in error_str.lower():
+            if (
+                "quota" in error_str.lower()
+                or "rate" in error_str.lower()
+                or "overloaded" in error_str.lower()
+            ):
                 return self._result(QUOTA_ERROR)
             return self._result(ERROR)
 
@@ -352,12 +545,23 @@ class ClaudeSolver:
         self.tracer.event("bump", insights=insights[:500])
         logger.info(f"[{self.agent_name}] Bumped with insights (session {self._session_id})")
 
-    def _result(self, status: str, run_steps: int | None = None, run_cost: float | None = None) -> SolverResult:
-        self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed, cost_usd=round(self._cost_usd, 4))
+    def _result(
+        self, status: str, run_steps: int | None = None, run_cost: float | None = None
+    ) -> SolverResult:
+        self.tracer.event(
+            "finish",
+            status=status,
+            flag=self._flag,
+            confirmed=self._confirmed,
+            cost_usd=round(self._cost_usd, 4),
+        )
         # Use per-run metrics if provided, so broken-solver detection works across bumps
         return SolverResult(
-            flag=self._flag, status=status,
-            findings_summary=self._findings[:2000],
+            flag=self._flag
+            if self._confirmed
+            else (" | ".join(self._accepted_flags) if self._accepted_flags else self._flag),
+            status=status,
+            findings_summary=self._finish_findings(),
             step_count=run_steps if run_steps is not None else self._step_count,
             cost_usd=run_cost if run_cost is not None else self._cost_usd,
             log_path=self.tracer.path,

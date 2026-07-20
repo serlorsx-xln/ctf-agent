@@ -16,6 +16,7 @@ from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from backend.cost_tracker import CostTracker
 from backend.deps import SolverDeps
+from backend.flags import is_complete_accept_message, normalize_flags_required
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import (
     model_id_from_spec,
@@ -27,7 +28,7 @@ from backend.models import (
 from backend.output_types import FlagFound
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
+from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tools.flag import submit_flag
 from backend.tools.sandbox import (
     bash,
@@ -55,7 +56,11 @@ class TracingToolset(WrapperToolset[SolverDeps]):
     step_counter: list[int] = field(repr=False)
 
     async def call_tool(
-        self, name: str, tool_args: dict[str, Any], ctx: RunContext[SolverDeps], tool: ToolsetTool[SolverDeps]
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[SolverDeps],
+        tool: ToolsetTool[SolverDeps],
     ) -> Any:
         self.step_counter[0] += 1
         step = self.step_counter[0]
@@ -86,12 +91,13 @@ class TracingToolset(WrapperToolset[SolverDeps]):
             self.tracer.event("resource_loop", tool=name, step=step)
             result = f"{result}\n\n{OOM_STUCK_MESSAGE}"
 
-        # Check for confirmed flag
-        if name == "submit_flag" and any(m in result_str for m in CORRECT_MARKERS):
+        # Check for confirmed flag (startswith — not substring "CORRECT")
+        if name == "submit_flag" and is_complete_accept_message(result_str):
             self.tracer.event("flag_confirmed", tool=name, step=step)
 
         if step % 5 == 0 and ctx.deps.message_bus and isinstance(result, str):
             from backend.tools.core import do_check_findings
+
             findings_text = await do_check_findings(ctx.deps.message_bus, ctx.deps.model_spec)
             if findings_text and "No new findings" not in findings_text:
                 result = f"{result}\n\n---\n{findings_text}"
@@ -102,8 +108,18 @@ class TracingToolset(WrapperToolset[SolverDeps]):
 
 def _build_toolset(deps: SolverDeps) -> FunctionToolset[SolverDeps]:
     """Build the raw toolset for a solver agent."""
-    tools = [bash, read_file, write_file, list_files, submit_flag, web_fetch,
-             webhook_create, webhook_get_requests, check_findings, notify_coordinator]
+    tools = [
+        bash,
+        read_file,
+        write_file,
+        list_files,
+        submit_flag,
+        web_fetch,
+        webhook_create,
+        webhook_get_requests,
+        check_findings,
+        notify_coordinator,
+    ]
     if deps.use_vision:
         tools.append(view_image)
     return FunctionToolset(tools=tools, max_retries=4)
@@ -132,7 +148,7 @@ class Solver:
         self.cancel_event = cancel_event or asyncio.Event()
         self._owns_sandbox = owns_sandbox if owns_sandbox is not None else (sandbox is None)
 
-        self.sandbox = sandbox or DockerSandbox(
+        self.sandbox: DockerSandbox | None = sandbox or DockerSandbox(
             image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
@@ -145,6 +161,7 @@ class Solver:
             workspace_dir="",
             use_vision=self.use_vision,
             cost_tracker=cost_tracker,
+            flags_required=normalize_flags_required(getattr(meta, "flags_required", 1)),
         )
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
@@ -158,6 +175,8 @@ class Solver:
 
     async def start(self) -> None:
         """Start the sandbox and build the agent."""
+        if self.sandbox is None:
+            raise RuntimeError("Solver sandbox is missing")
         if not self.sandbox._container:
             await self.sandbox.start()
         self.deps.workspace_dir = self.sandbox.workspace_dir
@@ -204,6 +223,7 @@ class Solver:
 
         try:
             from pydantic_ai.usage import UsageLimits
+
             result = await self._agent.run(
                 "Solve this CTF challenge." if not self._messages else "Continue solving.",
                 deps=self.deps,
@@ -212,17 +232,20 @@ class Solver:
             )
 
             duration = time.monotonic() - t0
-            usage = result.usage()
+            usage = result.usage
 
             self.cost_tracker.record(
-                self.agent_name, usage, self.model_id,
+                self.agent_name,
+                usage,
+                self.model_id,
                 provider_spec=provider_from_spec(self.model_spec),
                 duration_seconds=duration,
             )
 
             agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
             self.tracer.usage(
-                usage.input_tokens, usage.output_tokens,
+                usage.input_tokens,
+                usage.output_tokens,
                 usage.cache_read_tokens,
                 agent_usage.cost_usd if agent_usage else 0.0,
             )
@@ -231,13 +254,15 @@ class Solver:
 
             # Trace model responses from new messages
             from pydantic_ai.messages import ModelResponse, TextPart
+
             for msg in result.new_messages():
                 if isinstance(msg, ModelResponse):
                     text_parts = [p.content for p in msg.parts if isinstance(p, TextPart)]
                     text = " ".join(text_parts)
                     msg_usage = msg.usage
                     self.tracer.model_response(
-                        text[:500], self._step_count[0],
+                        text[:500],
+                        self._step_count[0],
                         input_tokens=msg_usage.input_tokens if msg_usage else 0,
                         output_tokens=msg_usage.output_tokens if msg_usage else 0,
                     )
@@ -265,28 +290,32 @@ class Solver:
 
     def bump(self, insights: str) -> None:
         """Inject insights from siblings and prepare to resume."""
-        bump_msg = ModelRequest(
-            parts=[
-                UserPromptPart(
-                    content=(
-                        "Your previous attempt did not find the flag. Here are insights "
-                        "from other agents working on the same challenge:\n\n"
-                        f"{insights}\n\n"
-                        "Use these insights to try a different approach. "
-                        "Do NOT repeat what has already been tried."
-                    )
-                )
-            ]
+        from backend.continue_prompt import build_continue_prompt
+
+        accepted = list(getattr(self.deps, "accepted_flags", []) or [])
+        content = build_continue_prompt(
+            accepted_flags=accepted,
+            flags_required=getattr(self.meta, "flags_required", 1),
+            bump_insights=insights,
         )
+        bump_msg = ModelRequest(parts=[UserPromptPart(content=content)])
         self._messages.append(bump_msg)
         self.loop_detector.reset()
         self.tracer.event("bump", insights=insights[:500])
         logger.info(f"[{self.agent_name}] Bumped with sibling insights")
 
-    def _result(self, status: str, run_steps: int | None = None, run_cost: float | None = None) -> SolverResult:
+    def _result(
+        self, status: str, run_steps: int | None = None, run_cost: float | None = None
+    ) -> SolverResult:
         agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
         cost = agent_usage.cost_usd if agent_usage else 0.0
-        self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed, cost_usd=round(cost, 4))
+        self.tracer.event(
+            "finish",
+            status=status,
+            flag=self._flag,
+            confirmed=self._confirmed,
+            cost_usd=round(cost, 4),
+        )
         return SolverResult(
             flag=self._flag,
             status=status,

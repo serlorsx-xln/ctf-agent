@@ -70,7 +70,9 @@ async def run_event_loop(
     """Run the shared coordinator event loop over local challenges/."""
 
     def _solved() -> set[str]:
-        return set(deps.results.keys())
+        from backend.agents.coordinator_core import _solved_names
+
+        return _solved_names(deps)
 
     poller = LocalChallengePoller(
         challenges_root=deps.challenges_root,
@@ -131,7 +133,9 @@ async def run_event_loop(
             # Detect finished swarms
             for name, task in list(deps.swarm_tasks.items()):
                 if task.done():
-                    parts.append(f"SOLVER FINISHED: Swarm for '{name}' completed. Check results or retry.")
+                    parts.append(
+                        f"SOLVER FINISHED: Swarm for '{name}' completed. Check results or retry."
+                    )
                     deps.swarm_tasks.pop(name, None)
 
             # Drain solver-to-coordinator messages
@@ -172,7 +176,7 @@ async def run_event_loop(
                 logger.info("Event -> coordinator: %s", msg[:200])
                 await turn_fn(msg)
 
-    except (KeyboardInterrupt, asyncio.CancelledError):
+    except KeyboardInterrupt, asyncio.CancelledError:
         logger.info("Coordinator shutting down...")
     except Exception as e:
         logger.error("Coordinator fatal: %s", e, exc_info=True)
@@ -205,6 +209,7 @@ async def _auto_spawn_one(deps: CoordinatorDeps, challenge_name: str) -> None:
         return
     try:
         from backend.agents.coordinator_core import do_spawn_swarm
+
         result = await do_spawn_swarm(deps, challenge_name)
         logger.info(f"Auto-spawn {challenge_name}: {result[:100]}")
     except Exception as e:
@@ -242,15 +247,21 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
                 try:
                     data = json.loads(body)
                     message = data.get("message", body.decode())
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except json.JSONDecodeError, UnicodeDecodeError:
                     message = body.decode("utf-8", errors="replace")
 
                 inbox.put_nowait(message)
                 resp = json.dumps({"ok": True, "queued": message[:200]})
-                writer.write(f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(resp)}\r\n\r\n{resp}".encode())
+                writer.write(
+                    f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(resp)}\r\n\r\n{resp}".encode()
+                )
             else:
-                resp = json.dumps({"error": "POST with JSON body required", "usage": "POST {\"message\": \"...\"}"})
-                writer.write(f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(resp)}\r\n\r\n{resp}".encode())
+                resp = json.dumps(
+                    {"error": "POST with JSON body required", "usage": 'POST {"message": "..."}'}
+                )
+                writer.write(
+                    f"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(resp)}\r\n\r\n{resp}".encode()
+                )
 
             await writer.drain()
         except Exception:

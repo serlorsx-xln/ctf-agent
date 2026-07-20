@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     sandbox_image_locked: bool = False
     detected_packs: list[str] = Field(default_factory=list)
     max_concurrent_challenges: int = 10
-    max_attempts_per_challenge: int = 3
     container_memory_limit: str = "16g"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

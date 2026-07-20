@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import boto3
 from pydantic_ai.models import Model
@@ -32,20 +32,6 @@ HARDER_MODELS: list[str] = [
     "claude-sdk/claude-opus-4-6",
     "codex/gpt-5.4",
 ]
-
-# Context window sizes (tokens)
-CONTEXT_WINDOWS: dict[str, int] = {
-    "us.anthropic.claude-opus-4-6-v1": 1_000_000,
-    "claude-opus-4-6": 1_000_000,
-    "gpt-5.4": 1_000_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.3-codex": 1_000_000,
-    "gpt-5.3-codex-spark": 128_000,
-    "gemini-3-flash-preview": 1_000_000,
-    "composer-2.5": 200_000,
-    "claude-4-sonnet": 200_000,
-    "auto": 200_000,
-}
 
 # Models that support vision
 VISION_MODELS: set[str] = {
@@ -130,10 +116,12 @@ def resolve_model_settings(spec: str) -> ModelSettings:
                 max_tokens=128_000,
             )
         case "google":
+            from google.genai.types import ThinkingLevel
+
             return GoogleModelSettings(
                 max_tokens=64_000,
                 google_thinking_config={
-                    "thinking_level": "high",
+                    "thinking_level": ThinkingLevel.HIGH,
                     "include_thoughts": True,
                 },
             )
@@ -152,19 +140,28 @@ def provider_from_spec(spec: str) -> str:
     return spec.split("/", 1)[0]
 
 
-def effort_from_spec(spec: str) -> str | None:
+EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+def effort_from_spec(spec: str) -> EffortLevel | None:
     """Extract effort level from a spec like 'claude-sdk/claude-opus-4-6/max'."""
     parts = spec.split("/")
-    if len(parts) >= 3 and parts[2] in ("low", "medium", "high", "max"):
-        return parts[2]
+    if len(parts) < 3:
+        return None
+    effort = parts[2]
+    if effort == "low":
+        return "low"
+    if effort == "medium":
+        return "medium"
+    if effort == "high":
+        return "high"
+    if effort == "xhigh":
+        return "xhigh"
+    if effort == "max":
+        return "max"
     return None
 
 
 def supports_vision(spec: str) -> bool:
     """Check if a model spec supports vision."""
     return model_id_from_spec(spec) in VISION_MODELS
-
-
-def context_window(spec: str) -> int:
-    """Get context window size for a model spec."""
-    return CONTEXT_WINDOWS.get(model_id_from_spec(spec), 200_000)

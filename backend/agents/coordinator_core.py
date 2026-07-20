@@ -8,10 +8,20 @@ import logging
 from pathlib import Path
 
 from backend.deps import CoordinatorDeps
-from backend.flags import accept_flag
+from backend.flags import accept_flag, is_counted_accept_message, normalize_flags_required
 from backend.solver_base import FLAG_FOUND
 
 logger = logging.getLogger(__name__)
+
+
+def _solved_names(deps: CoordinatorDeps) -> set[str]:
+    """Challenge names that are fully complete (not partial ACCEPTED progress)."""
+    solved: set[str] = set()
+    for name, entry in deps.results.items():
+        if isinstance(entry, dict) and entry.get("complete") is False:
+            continue
+        solved.add(name)
+    return solved
 
 
 def _scan_local_challenges(deps: CoordinatorDeps) -> list[dict]:
@@ -19,7 +29,7 @@ def _scan_local_challenges(deps: CoordinatorDeps) -> list[dict]:
     from backend.challenge import is_challenge_dir, load_challenge
 
     root = Path(deps.challenges_root)
-    solved = set(deps.results.keys())
+    solved = _solved_names(deps)
     result: list[dict] = []
     if not root.is_dir():
         return result
@@ -48,7 +58,7 @@ async def do_fetch_challenges(deps: CoordinatorDeps) -> str:
 
 
 async def do_get_solve_status(deps: CoordinatorDeps) -> str:
-    solved = sorted(deps.results.keys())
+    solved = sorted(_solved_names(deps))
     swarm_status = {name: swarm.get_status() for name, swarm in deps.swarms.items()}
     return json.dumps({"solved": solved, "active_swarms": swarm_status}, indent=2)
 
@@ -56,7 +66,8 @@ async def do_get_solve_status(deps: CoordinatorDeps) -> str:
 async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
     # Retire ALL finished swarms before checking capacity
     finished = [
-        name for name, swarm in deps.swarms.items()
+        name
+        for name, swarm in deps.swarms.items()
         if swarm.cancel_event.is_set()
         or (name in deps.swarm_tasks and deps.swarm_tasks[name].done())
     ]
@@ -115,6 +126,7 @@ async def do_spawn_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
             deps.results[challenge_name] = {
                 "flag": result.flag,
                 "submit": "accepted locally",
+                "complete": True,
             }
 
     task = asyncio.create_task(_run_and_cleanup(), name=f"swarm-{challenge_name}")
@@ -130,16 +142,48 @@ async def do_check_swarm_status(deps: CoordinatorDeps, challenge_name: str) -> s
 
 
 async def do_submit_flag(deps: CoordinatorDeps, challenge_name: str, flag: str) -> str:
-    display, confirmed = accept_flag(flag)
-    if confirmed:
+    """Coordinator flag submit. Only marks SOLVED when the challenge is complete.
+
+    When a swarm is running, go through ``try_submit_flag`` so lock/dedup/cooldown
+    match solver submits. Partial progress may be stored with ``complete: False``
+    (ignored by the poller); only ``complete: True`` counts as solved.
+    """
+    swarm = deps.swarms.get(challenge_name)
+    normalized = flag.strip()
+
+    if swarm:
+        display, complete = await swarm.try_submit_flag(flag, "coordinator")
+        accepted = list(swarm.confirmed_flags)
+        if complete:
+            flag_str = swarm.confirmed_flag or " | ".join(accepted) or normalized
+            deps.results[challenge_name] = {
+                "flag": flag_str,
+                "flags": accepted,
+                "submit": "accepted locally (coordinator)",
+                "complete": True,
+            }
+            if not swarm.cancel_event.is_set():
+                swarm.kill()
+        return display
+
+    meta = deps.challenge_metas.get(challenge_name)
+    required = normalize_flags_required(getattr(meta, "flags_required", 1) if meta else 1)
+    prior = deps.results.get(challenge_name) or {}
+    already = list(prior.get("flags") or [])
+    display, complete = accept_flag(
+        flag,
+        already_accepted=already,
+        required=required,
+    )
+    if complete or is_counted_accept_message(display):
+        if is_counted_accept_message(display) and normalized and normalized not in already:
+            already = [*already, normalized]
         deps.results[challenge_name] = {
-            "flag": flag.strip(),
+            "flag": " | ".join(already) if already else normalized,
+            "flags": already,
             "submit": "accepted locally (coordinator)",
+            "complete": complete,
         }
-        swarm = deps.swarms.get(challenge_name)
-        if swarm and not swarm.cancel_event.is_set():
-            swarm.confirmed_flag = flag.strip()
-            swarm.kill()
     return display
 
 
@@ -151,7 +195,9 @@ async def do_kill_swarm(deps: CoordinatorDeps, challenge_name: str) -> str:
     return f"Swarm for {challenge_name} cancelled"
 
 
-async def do_bump_agent(deps: CoordinatorDeps, challenge_name: str, model_spec: str, insights: str) -> str:
+async def do_bump_agent(
+    deps: CoordinatorDeps, challenge_name: str, model_spec: str, insights: str
+) -> str:
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
         return f"No swarm running for {challenge_name}"
@@ -162,7 +208,9 @@ async def do_bump_agent(deps: CoordinatorDeps, challenge_name: str, model_spec: 
     return f"Bumped {model_spec} on {challenge_name}"
 
 
-async def do_read_solver_trace(deps: CoordinatorDeps, challenge_name: str, model_spec: str, last_n: int = 20) -> str:
+async def do_read_solver_trace(
+    deps: CoordinatorDeps, challenge_name: str, model_spec: str, last_n: int = 20
+) -> str:
     """Read the last N trace events from a solver's JSONL log."""
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
@@ -184,14 +232,22 @@ async def do_read_solver_trace(deps: CoordinatorDeps, challenge_name: str, model
                 t = d.get("type", "?")
                 if t == "tool_call":
                     args_str = str(d.get("args", ""))[:100]
-                    summary.append(f"step {d.get('step','?')} CALL {d.get('tool','?')}: {args_str}")
+                    summary.append(
+                        f"step {d.get('step', '?')} CALL {d.get('tool', '?')}: {args_str}"
+                    )
                 elif t == "tool_result":
                     result_str = str(d.get("result", ""))[:100]
-                    summary.append(f"step {d.get('step','?')} RESULT {d.get('tool','?')}: {result_str}")
+                    summary.append(
+                        f"step {d.get('step', '?')} RESULT {d.get('tool', '?')}: {result_str}"
+                    )
                 elif t in ("finish", "error", "bump", "turn_failed"):
-                    summary.append(f"** {t}: {json.dumps({k:v for k,v in d.items() if k != 'ts'})}")
+                    summary.append(
+                        f"** {t}: {json.dumps({k: v for k, v in d.items() if k != 'ts'})}"
+                    )
                 elif t == "usage":
-                    summary.append(f"usage: in={d.get('input_tokens',0)} out={d.get('output_tokens',0)} cost=${d.get('cost_usd',0):.4f}")
+                    summary.append(
+                        f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)} cost=${d.get('cost_usd', 0):.4f}"
+                    )
                 else:
                     summary.append(f"{t}: {str(d)[:80]}")
             except Exception:

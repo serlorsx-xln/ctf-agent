@@ -1,0 +1,35 @@
+# Ghidra + PyGhidra donor (additive into L0).
+# Large (~500MB+ zip). Bind-mounted RO from host pack cache at ensure time.
+#
+# Build (from repo root):
+#   docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV LANG=C.UTF-8
+
+ARG GHIDRA_VERSION=12.1.2
+ARG GHIDRA_DATE=20260605
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl unzip \
+    openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Official PUBLIC release (Java — works on amd64 and aarch64 with JDK).
+RUN curl -fsSL -o /tmp/ghidra.zip \
+    "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip" \
+    && unzip -q /tmp/ghidra.zip -d /opt \
+    && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
+    && rm -f /tmp/ghidra.zip \
+    && test -x /opt/ghidra/support/analyzeHeadless \
+    && ln -sfn /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless
+
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+
+COPY sandbox/sandbox-tools-ghidra.txt /tools.txt
+
+WORKDIR /challenge
+CMD ["sleep", "infinity"]

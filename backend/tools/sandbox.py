@@ -65,7 +65,9 @@ async def notify_coordinator(ctx: RunContext[SolverDeps], message: str) -> str:
     return "No coordinator connected."
 
 
-async def web_fetch(ctx: RunContext[SolverDeps], url: str, method: str = "GET", body: str = "") -> str:
+async def web_fetch(
+    ctx: RunContext[SolverDeps], url: str, method: str = "GET", body: str = ""
+) -> str:
     """Fetch a URL from the host. Useful for web challenges.
 
     Prefer bash+curl inside the sandbox for cookies/sessions.
