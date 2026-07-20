@@ -539,6 +539,7 @@ class CodexSolver:
                     flag,
                     already_accepted=list(self._accepted_flags),
                     required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+                    challenge_dir=self.challenge_dir,
                 )
             if (
                 display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))

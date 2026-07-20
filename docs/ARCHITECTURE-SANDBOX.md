@@ -151,7 +151,7 @@ Agent **ไม่ต้องรู้** ว่าคำสั่งไป L1/L2
 |---------|------|-------------------------|
 | `pwn` | binary exploitation | qemu-user-static, gef/pwndbg, one_gadget, patchelf, seccomp-tools, ROPgadget, r2 (ถ้าไม่ได้อยู่ใน core) |
 | `crypto` | cryptography | sagemath หรือ sage-lite + fpylll / ที่จำเป็นต่อ LWE-CVP |
-| `web` | web | chromium/playwright deps, phpggc, sqlmap (optional), nikto เบาๆ |
+| `web` | web | nmap, sqlmap, flask, PyJWT (apt/pip pack — no heavy browser stack) |
 | `rev` | reverse engineering | ghidra headless หรือ rizin เต็ม, radare2 plugins |
 | `mobile` | Android/iOS CTF | jadx, apktool, uber-apk-signer, **blutter** (หรือ prebuilt ตาม Dart snapshot hash), frida-tools |
 | `forensics` | forensics / stego | binwalk, foremost, steghide, exiftool, tesseract, sleuthkit (เลือกย่อยได้) |
@@ -405,12 +405,12 @@ Lazy packs + optional Kali + optional cloud ชนะเพราะครบเ
 - [x] `crypto` (Sage donor + bind cache)
 - [x] `crypto-tools` (RsaCtfTool / cado-nfs / flatter / gmpy2 / fpylll)
 - [x] `steg` (steghide / stegseek / zsteg / media / OCR)
-- [x] `forensics` (sleuthkit / binwalk / volatility3 / carving)
-- [x] `web` (nmap / flask / PyJWT)
+- [x] `forensics` (sleuthkit / binwalk / volatility3 / tshark / scapy)
+- [x] `web` (nmap / sqlmap / flask / PyJWT)
 - [x] `ml` (torch CPU / keras)
 - [x] `containers` (podman / buildah — best-effort)
 - [x] `pwn` ขยาย angr + radare2
-- [x] `linux` (linpeas / pspy / ffuf / smbclient / sshpass / impacket)
+- [x] `linux` (linpeas / pspy / ffuf / smbclient / sshpass / impacket / ldap-utils / certipy-ad / bloodhound-python / NetExec)
 - [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev
 - [x] ขนาด cache + eviction (`CTF_PACK_CACHE_MAX_GB`, LRU via `.accessed`)
 - [x] RAM floor ต่อ pack + ลบ fat image / `Dockerfile.sage` ออกจาก tree

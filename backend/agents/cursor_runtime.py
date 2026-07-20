@@ -36,8 +36,12 @@ def _patch_sdk_auth_tokens() -> None:
     import cursor_sdk._store_callback as store_callback
     import cursor_sdk._tool_callback as tool_callback
 
-    tool_callback._new_auth_token = _safe_token  # type: ignore[attr-defined]
-    store_callback._new_auth_token = _safe_token  # type: ignore[attr-defined]
+    # Monkeypatch private SDK helpers (argv rejects tokens starting with "-").
+    def _install(mod: Any) -> None:
+        mod._new_auth_token = _safe_token
+
+    _install(tool_callback)
+    _install(store_callback)
     _token_patch_applied = True
 
 

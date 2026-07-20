@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from cursor_sdk import AsyncAgent, CustomTool, CustomToolContext, LocalAgentOptions
@@ -50,33 +51,33 @@ You will receive event messages. Respond with tool calls to manage the competiti
 
 
 def _build_coordinator_tools(deps: CoordinatorDeps) -> dict[str, CustomTool]:
-    async def fetch_challenges(_args: dict, _ctx: CustomToolContext) -> str:
+    async def fetch_challenges(_args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_fetch_challenges(deps)
 
-    async def get_solve_status(_args: dict, _ctx: CustomToolContext) -> str:
+    async def get_solve_status(_args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_get_solve_status(deps)
 
-    async def spawn_swarm(args: dict, _ctx: CustomToolContext) -> str:
+    async def spawn_swarm(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_spawn_swarm(deps, args["challenge_name"])
 
-    async def check_swarm_status(args: dict, _ctx: CustomToolContext) -> str:
+    async def check_swarm_status(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_check_swarm_status(deps, args["challenge_name"])
 
-    async def submit_flag(args: dict, _ctx: CustomToolContext) -> str:
+    async def submit_flag(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_submit_flag(deps, args["challenge_name"], args["flag"])
 
-    async def kill_swarm(args: dict, _ctx: CustomToolContext) -> str:
+    async def kill_swarm(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_kill_swarm(deps, args["challenge_name"])
 
-    async def bump_agent(args: dict, _ctx: CustomToolContext) -> str:
+    async def bump_agent(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_bump_agent(
             deps, args["challenge_name"], args["model_spec"], args["insights"]
         )
 
-    async def broadcast(args: dict, _ctx: CustomToolContext) -> str:
+    async def broadcast(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_broadcast(deps, args["challenge_name"], args["message"])
 
-    async def read_solver_trace(args: dict, _ctx: CustomToolContext) -> str:
+    async def read_solver_trace(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
         return await do_read_solver_trace(
             deps,
             args["challenge_name"],

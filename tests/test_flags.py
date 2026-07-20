@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from backend.flags import (
     accept_flag,
+    collect_artifact_flag_candidates,
     is_complete_accept_message,
     is_counted_accept_message,
+    is_decoy_flag,
+    is_filename_like_flag_token,
     parse_flags_required,
 )
 
@@ -73,6 +78,62 @@ def test_solved_names_ignores_incomplete_results() -> None:
         }
     )
     assert _solved_names(deps) == {"done", "legacy"}  # type: ignore[arg-type]
+
+
+def test_reject_flag_hex_filename_token() -> None:
+    leakme_name = "flag_166903c90eadca6ffac515cd8a6787f2"
+    assert is_filename_like_flag_token(leakme_name)
+    msg, done = accept_flag(leakme_name)
+    assert not done
+    assert msg.startswith("REJECTED")
+    assert "artifact" in msg.lower() or "does not look" in msg.lower()
+
+
+def test_reject_leakme_local_decoy_body() -> None:
+    assert is_decoy_flag("THIE_IS_TEST_FLAG")
+    msg, done = accept_flag("THIE_IS_TEST_FLAG")
+    assert not done
+    assert msg.startswith("REJECTED")
+
+
+def test_real_brace_flag_still_ok() -> None:
+    msg, done = accept_flag("ARCHA{s3cr37_sh0p_n07_s0_s3cr378144c2cb}")
+    assert done
+    assert msg.startswith("CORRECT")
+
+
+def test_local_test_in_brace_body_not_substring_decoy() -> None:
+    # Must not reject real/local brace flags that merely contain "test_flag" text
+    msg, done = accept_flag("BZHCTF{local_test_flag_please_find_me}")
+    assert done
+    assert msg.startswith("CORRECT")
+
+
+def test_dockerfile_env_flag_filename_rejected(tmp_path: Path) -> None:
+    (tmp_path / "Dockerfile").write_text(
+        "FROM ubuntu\nENV FLAG flag_166903c90eadca6ffac515cd8a6787f2\n",
+        encoding="utf-8",
+    )
+    arts = collect_artifact_flag_candidates(tmp_path)
+    assert "flag_166903c90eadca6ffac515cd8a6787f2" in arts
+    msg, done = accept_flag(
+        "flag_166903c90eadca6ffac515cd8a6787f2",
+        challenge_dir=tmp_path,
+    )
+    assert not done
+    assert msg.startswith("REJECTED")
+
+
+def test_dockerfile_env_brace_flag_not_artifact_blocked(tmp_path: Path) -> None:
+    (tmp_path / "Dockerfile").write_text(
+        'FROM ubuntu\nENV FLAG="CTF{intentional_local_ok}"\n',
+        encoding="utf-8",
+    )
+    arts = collect_artifact_flag_candidates(tmp_path)
+    assert "CTF{intentional_local_ok}" not in arts
+    msg, done = accept_flag("CTF{intentional_local_ok}", challenge_dir=tmp_path)
+    assert done
+    assert msg.startswith("CORRECT")
 
 
 def test_coordinator_no_swarm_multi_flag_progress() -> None:

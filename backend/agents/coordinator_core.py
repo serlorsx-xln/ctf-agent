@@ -174,6 +174,7 @@ async def do_submit_flag(deps: CoordinatorDeps, challenge_name: str, flag: str) 
         flag,
         already_accepted=already,
         required=required,
+        challenge_dir=deps.challenge_dirs.get(challenge_name),
     )
     if complete or is_counted_accept_message(display):
         if is_counted_accept_message(display) and normalized and normalized not in already:

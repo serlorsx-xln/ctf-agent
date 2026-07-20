@@ -121,11 +121,13 @@ async def do_submit_flag(
     *,
     already_accepted: list[str] | tuple[str, ...] = (),
     required: int = 1,
+    challenge_dir: str | None = None,
 ) -> tuple[str, bool]:
     """Accept a flag locally. Returns (display_message, challenge_complete).
 
     Plausible non-decoy flags count toward ``required`` (default 1).
     ``_challenge_name`` is kept for call-site compatibility / logging only.
+    ``challenge_dir`` enables rejecting Dockerfile ENV / filename artifacts.
     """
     from backend.flags import accept_flag, normalize_flags_required
 
@@ -133,6 +135,7 @@ async def do_submit_flag(
         flag,
         already_accepted=already_accepted,
         required=normalize_flags_required(required),
+        challenge_dir=challenge_dir,
     )
 
 

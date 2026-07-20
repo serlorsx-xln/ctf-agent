@@ -46,6 +46,8 @@ PACK_BOOTSTRAP_TIMEOUT_S: dict[str, int] = {
     "forensics": 600,
     "mobile": 600,
     "pwn": 600,
+    "linux": 1200,
+    "web": 600,
 }
 
 # Pack source images (artifact donors — not the running sandbox).
@@ -228,10 +230,20 @@ PACK_SPECS: dict[str, PackSpec] = {
             "nmap",
             "faketime",
             "krb5-user",
+            "ldap-utils",
             "ruby",
             "ruby-dev",
+            # NetExec (nxc) builds aardwolf from source — needs Rust + headers.
+            "rustc",
+            "cargo",
+            "python3-dev",
+            "git",
+            "libssl-dev",
+            "libffi-dev",
         ),
-        pip=("impacket", "certipy-ad"),
+        # bloodhound = bloodhound-python CLI. NetExec is NOT on PyPI as `netexec`
+        # (install from git in bootstrap_script — batched pip would abort bloodhound).
+        pip=("impacket", "certipy-ad", "bloodhound"),
         gems=("evil-winrm",),
         symlinks=(
             ("/usr/local/bin/ffuf", "/opt/linux-tools/bin/ffuf"),
@@ -250,13 +262,17 @@ PACK_SPECS: dict[str, PackSpec] = {
             "dcfldd",
             "testdisk",
             "xfsprogs",
+            # tshark pulls wireshark-common (editcap / mergecap / capinfos).
+            "tshark",
         ),
-        pip=("volatility3",),
+        pip=("volatility3", "scapy"),
     ),
     "web": PackSpec(
         image="ctf-sandbox-core",
         paths=(),
-        apt=("nmap",),
+        # ffuf lives in the linux donor (/opt/linux-tools); first `ffuf` use
+        # auto-ensures that pack. sqlmap covers SQLi without pulling AD stack.
+        apt=("nmap", "sqlmap"),
         pip=("flask", "PyJWT"),
     ),
     "ml": PackSpec(
@@ -348,8 +364,14 @@ TOOL_TO_PACK: dict[str, str] = {
     "vol": "forensics",
     "volatility": "forensics",
     "volatility3": "forensics",
+    "tshark": "forensics",
+    "editcap": "forensics",
+    "mergecap": "forensics",
+    "capinfos": "forensics",
+    "scapy": "forensics",
     # web
     "nmap": "web",
+    "sqlmap": "web",
     # linux box / light remote
     "linpeas": "linux",
     "linpeas.sh": "linux",
@@ -362,6 +384,13 @@ TOOL_TO_PACK: dict[str, str] = {
     "kinit": "linux",
     "certipy": "linux",
     "evil-winrm": "linux",
+    "ldapsearch": "linux",
+    "ldapadd": "linux",
+    "ldapwhoami": "linux",
+    "nxc": "linux",
+    "netexec": "linux",
+    "bloodhound-python": "linux",
+    "bloodhound": "linux",
     "impacket-smbclient": "linux",
     "impacket-psexec": "linux",
     "impacket-wmiexec": "linux",
@@ -405,8 +434,14 @@ _FORENSICS_SUFFIXES = {
     ".ewf",
     ".aff",
     ".aff4",
+    ".pcap",
+    ".pcapng",
+    ".cap",
 }
 _FORENSICS_NAMES = {"memory.dmp", "memdump.raw", "core.dump"}
+# Light web markers in distfiles (prefetch sqlmap/nmap — not the AD linux stack).
+# Intentionally omit .js (Node/misc challenges) to avoid noisy web prefetch.
+_WEB_SUFFIXES = {".php", ".html", ".htm", ".asp", ".aspx", ".jsp"}
 _ML_SUFFIXES = {".pt", ".pth", ".onnx", ".h5", ".keras", ".safetensors"}
 _CONTAINER_NAMES = {
     "dockerfile",
@@ -443,11 +478,13 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "pytesseract": "steg",
     "scipy": "steg",
     "volatility3": "forensics",
+    "scapy": "forensics",
     "flask": "web",
     "jwt": "web",
     "torch": "ml",
     "keras": "ml",
     "impacket": "linux",
+    "bloodhound": "linux",
 }
 
 
@@ -724,6 +761,9 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
         if suffix in _FORENSICS_SUFFIXES or name in _FORENSICS_NAMES:
             packs.add("forensics")
 
+        if suffix in _WEB_SUFFIXES:
+            packs.add("web")
+
         if suffix in _ML_SUFFIXES:
             packs.add("ml")
 
@@ -968,6 +1008,15 @@ def bootstrap_script(pack_id: str) -> str:
             "> /opt/linux-tools/bin/linpeas",
             "  chmod +x /opt/linux-tools/bin/linpeas",
             "fi",
+            # NetExec: install from git (PyPI has no `netexec` dist). Needs rustc/cargo
+            # from apt above. Best-effort — bloodhound/impacket still usable if this fails.
+            "if ! command -v nxc >/dev/null 2>&1; then",
+            "  PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+            "  $PIP3 install --no-cache-dir --break-system-packages "
+            "'git+https://github.com/Pennyw0rth/NetExec.git' "
+            "|| $PIP3 install --no-cache-dir "
+            "'git+https://github.com/Pennyw0rth/NetExec.git' || true",
+            "fi",
             # /etc/hosts is often a Docker bind-mount — sed -i fails.
             "cat > /usr/local/bin/ctf-hosts-add <<'EOF'",
             "#!/bin/bash",
@@ -1044,10 +1093,18 @@ def infer_pack_from_command(command: str) -> str | None:
         return "crypto-tools"
     if "pyghidra" in low_cmd or "analyzeheadless" in low_cmd or "ghidra" in low_cmd:
         return "ghidra"
-    if "volatility" in low_cmd or "binwalk" in low_cmd:
+    if (
+        "volatility" in low_cmd
+        or "binwalk" in low_cmd
+        or "tshark" in low_cmd
+        or "scapy" in low_cmd
+        or "editcap" in low_cmd
+    ):
         return "forensics"
     if "steghide" in low_cmd or "zsteg" in low_cmd or "tesseract" in low_cmd:
         return "steg"
+    if "sqlmap" in low_cmd:
+        return "web"
     if (
         "linpeas" in low_cmd
         or "pspy" in low_cmd
@@ -1058,6 +1115,9 @@ def infer_pack_from_command(command: str) -> str | None:
         or "certipy" in low_cmd
         or "faketime" in low_cmd
         or "gettgt" in low_cmd
+        or "ldapsearch" in low_cmd
+        or "netexec" in low_cmd
+        or "bloodhound" in low_cmd
     ):
         return "linux"
     if "import torch" in low_cmd or "import keras" in low_cmd:

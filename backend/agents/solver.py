@@ -14,6 +14,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
+from backend.config import Settings
 from backend.cost_tracker import CostTracker
 from backend.deps import SolverDeps
 from backend.flags import is_complete_accept_message, normalize_flags_required
@@ -134,7 +135,7 @@ class Solver:
         challenge_dir: str,
         meta: ChallengeMeta,
         cost_tracker: CostTracker,
-        settings: object,
+        settings: Settings,
         cancel_event: asyncio.Event | None = None,
         sandbox: DockerSandbox | None = None,
         owns_sandbox: bool | None = None,
@@ -149,9 +150,9 @@ class Solver:
         self._owns_sandbox = owns_sandbox if owns_sandbox is not None else (sandbox is None)
 
         self.sandbox: DockerSandbox | None = sandbox or DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
+            image=settings.sandbox_image,
             challenge_dir=challenge_dir,
-            memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            memory_limit=settings.container_memory_limit,
         )
         self.use_vision = supports_vision(model_spec)
         self.deps = SolverDeps(
@@ -166,7 +167,8 @@ class Solver:
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
-        self._agent: Agent[SolverDeps, FlagFound] | None = None
+        # pydantic-ai Agent output generic is not always inferred from output_type=
+        self._agent: Agent[SolverDeps, Any] | None = None
         self._messages: list = []
         self._step_count = [0]  # mutable ref shared with TracingToolset
         self._flag: str | None = None

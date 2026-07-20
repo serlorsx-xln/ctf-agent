@@ -9,12 +9,19 @@ nmap                 Port scan (container-hardened: -Pn -sT). Always set a timeo
 smbclient            SMB shares. smbclient -L //host -N
 ssh / sshpass        SSH client + non-interactive password helper
 ftp                  FTP client
+ldapsearch           LDAP queries (ldap-utils).
+                     ldapsearch -x -H ldap://DC -b 'DC=domain,DC=htb' '(objectClass=*)'
 impacket             Python AD/SMB/remote helpers. examples: psexec.py, smbclient.py,
                      getTGT.py, wmiexec.py, secretsdump.py
                      Flags before target+command: atexec.py -k -no-pass -dc-ip IP domain/user@host cmd
 certipy              AD CS abuse (certipy). Prefer Kerberos over NTLM when SMB returns
                      STATUS_NOT_SUPPORTED. Pass -dc-host and -target-ip <lab-IP> when
                      RPC/epmapper times out or returns an unreachable private IP.
+netexec / nxc        Network exec / enum (SMB, LDAP, WinRM, …).
+                     First ensure may compile deps (Rust) — can take several minutes.
+                     nxc smb TARGET -u user -p pass
+bloodhound-python    BloodHound collector (Python).
+                     bloodhound-python -d domain.htb -u user -p pass -ns DC_IP -c All
 evil-winrm           Windows WinRM shell (optional; needs reachable WinRM)
 faketime             Clock skew workaround (containers often cannot set system time).
                      Use full command paths under faketime. Example:
@@ -28,7 +35,8 @@ ctf-hosts-add        Add hostnames without sed -i on /etc/hosts (Docker bind-mou
 For remote labs (Linux or Windows/AD) when the host has no Kali.
 Assumed Breach / AD: NTLM may be blocked — use Kerberos (getTGT / kinit) and faketime
 when clock skew is large. Host SOCKS is TCP-only — prefer TCP Kerberos / tool flags
-that avoid UDP when traffic is wrapped. Full AD stacks are intentionally not included.
+that avoid UDP when traffic is wrapped. Full AD stacks / hashcat are intentionally
+not included (crack offline on the host if needed).
 Loaded on demand; re-read /challenge/TOOLS.txt after install.
 Exit 137 → shrink memory work. Exit 124 → often network/RPC; fix flags (e.g. -target-ip),
 not necessarily abandon the technique.

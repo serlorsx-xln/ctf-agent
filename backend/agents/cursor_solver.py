@@ -12,6 +12,7 @@ import json
 import logging
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -198,7 +199,7 @@ class CursorSolver:
         logger.info("[%s] Cursor solver started (agent=%s)", self.agent_name, self._agent.agent_id)
 
     def _build_custom_tools(self) -> dict[str, CustomTool]:
-        async def _wrap(name: str, args: dict[str, Any], runner) -> str:
+        async def _wrap(name: str, args: Mapping[str, Any], runner) -> str:
             self._step_count += 1
             self.tracer.tool_call(name, args, self._step_count)
             args_preview = json.dumps(args, ensure_ascii=False, default=str)
@@ -242,7 +243,7 @@ class CursorSolver:
                     text = f"{text}\n\n---\n{findings}"
             return text
 
-        async def bash(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def bash(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "bash",
                 args,
@@ -253,28 +254,28 @@ class CursorSolver:
                 ),
             )
 
-        async def read_file(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def read_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "read_file",
                 args,
                 lambda: do_read_file(self.sandbox, args.get("path", "")),
             )
 
-        async def write_file(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def write_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "write_file",
                 args,
                 lambda: do_write_file(self.sandbox, args.get("path", ""), args.get("content", "")),
             )
 
-        async def list_files(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def list_files(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "list_files",
                 args,
                 lambda: do_list_files(self.sandbox, args.get("path", "/challenge/distfiles")),
             )
 
-        async def submit_flag(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def submit_flag(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             async def _run() -> str:
                 flag = str(args.get("flag", "")).strip()
                 if self.submit_fn:
@@ -288,6 +289,7 @@ class CursorSolver:
                         flag,
                         already_accepted=list(self._accepted_flags),
                         required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+                        challenge_dir=self.challenge_dir,
                     )
                 if (
                     display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
@@ -313,17 +315,17 @@ class CursorSolver:
 
             return await _wrap("submit_flag", args, _run)
 
-        async def webhook_create(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def webhook_create(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap("webhook_create", args, do_webhook_create)
 
-        async def webhook_get_requests(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def webhook_get_requests(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "webhook_get_requests",
                 args,
                 lambda: do_webhook_get_requests(args.get("uuid", "")),
             )
 
-        async def view_image(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def view_image(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             return await _wrap(
                 "view_image",
                 args,
@@ -332,7 +334,7 @@ class CursorSolver:
                 ),
             )
 
-        async def notify_coordinator(args: dict[str, Any], _ctx: CustomToolContext) -> str:
+        async def notify_coordinator(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
             async def _run() -> str:
                 if self.notify_coordinator:
                     await self.notify_coordinator(args.get("message", ""))

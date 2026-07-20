@@ -25,8 +25,11 @@ from backend.tool_router import PACK_SPECS  # noqa: E402
 
 # pack_id -> shell probe that must exit 0 after ensure
 PROBES: dict[str, str] = {
-    "web": "command -v nmap && python3 -c 'import flask,jwt'",
-    "forensics": "command -v binwalk && command -v fls && python3 -c 'import volatility3'",
+    "web": "command -v nmap && command -v sqlmap && python3 -c 'import flask,jwt'",
+    "forensics": (
+        "command -v binwalk && command -v fls && command -v tshark "
+        "&& python3 -c 'import volatility3,scapy'"
+    ),
     "steg": (
         "command -v steghide && command -v stegseek && command -v zsteg "
         "&& command -v exiftool && command -v tesseract "
@@ -54,8 +57,9 @@ PROBES: dict[str, str] = {
     "mobile": "command -v jadx && command -v apktool",
     "linux": (
         "command -v ffuf && command -v pspy && command -v linpeas "
-        "&& command -v smbclient && command -v sshpass "
-        "&& python3 -c 'import impacket' "
+        "&& command -v smbclient && command -v sshpass && command -v ldapsearch "
+        "&& python3 -c 'import impacket,bloodhound' "
+        "&& (command -v nxc || command -v netexec) "
         "&& (command -v evil-winrm || gem list -i evil-winrm)"
     ),
 }

@@ -137,8 +137,10 @@ discarded from the final image).
 | **crypto-tools** | flatter, cado-nfs, RsaCtfTool, fpylll, gmpy2 |
 | **mobile** | jadx, apktool, blutter, frida-tools, androguard |
 | **steg** | steghide, stegseek, zsteg, exiftool, tesseract |
-| **linux** | linpeas, pspy, ffuf, smbclient, sshpass, impacket |
-| **forensics / web / ml / containers** | volatility3, nmap/flask/jwt, torch/keras, podman — as needed |
+| **linux** | linpeas, pspy, ffuf, smbclient, sshpass, impacket, ldap-utils, certipy-ad, bloodhound-python, NetExec (nxc) |
+| **forensics** | sleuthkit, binwalk, volatility3, tshark, scapy |
+| **web** | nmap, sqlmap, flask, PyJWT |
+| **ml / containers** | torch/keras, podman — as needed |
 
 Heavy packs raise the container memory floor automatically (e.g. crypto ≥12g).
 Host pack cache defaults to 25 GiB with LRU eviction (`CTF_PACK_CACHE_MAX_GB`).

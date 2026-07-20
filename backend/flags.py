@@ -8,12 +8,17 @@ flags are accepted does the run complete (CORRECT).
 Without a scoreboard this is a *plausibility* gate (stop the run), not proof of
 correctness. Agents should submit the exact string the challenge awards —
 do not wrap or rewrite formats just to satisfy the checker.
+
+Hardening (still not a scoreboard): reject common test decoys, filename-like
+``flag_<hex>`` tokens, and strings that only appear as Dockerfile ``ENV FLAG``
+values / attachment basenames under the challenge directory.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 _DECOY_MARKERS = (
     "fake_flag",
@@ -22,6 +27,21 @@ _DECOY_MARKERS = (
     "ctf{flag}",
     "flag{flag}",
     "default_flag",
+    # leakme-style local decoy file body (typo intentional)
+    "thie_is_test",
+)
+# Whole-string / body-only decoys (avoid substring hits on real flags)
+_DECOY_EXACT = frozenset(
+    {
+        "test_flag",
+        "this_is_test_flag",
+        "thie_is_test_flag",
+        "local_test_flag",
+        "example_flag",
+        "sample_flag",
+        "flag",
+        "the_flag",
+    }
 )
 
 # Classic CTF: PREFIX{body}
@@ -31,12 +51,54 @@ _FLAG_DASH = re.compile(r"^[A-Za-z]{2,16}-[A-Za-z0-9_-]{8,128}$")
 # Formatless secret token (no whitespace). Excludes short segmented PINs.
 _FLAG_TOKEN = re.compile(r"^[A-Za-z0-9_+\/=-]{16,200}$")
 _LICENSE_LIKE = re.compile(r"^(?:[A-Za-z0-9]{1,5}-){2,}[A-Za-z0-9]{1,5}$")
+# Dockerfile-style flag *filename* (leakme): ENV FLAG flag_<md5/sha>
+_FLAG_FILENAME_TOKEN = re.compile(r"^flag_[0-9a-f]{16,128}$", re.IGNORECASE)
+_ENV_FLAG_ASSIGN = re.compile(
+    r"^\s*(?:ENV|ARG)\s+FLAG(?:\s+|=)\s*[\"']?([^\s\"'#]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Optional in challenge.txt: flags_required: 2  (default 1 if omitted)
 _FLAGS_REQUIRED_LINE = re.compile(
     r"^flags_required\s*:\s*(\d+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+_ARTIFACT_TEXT_NAMES = frozenset(
+    {
+        "dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+        ".env",
+        ".env.example",
+        "challenge.txt",
+        "metadata.yml",
+        "metadata.yaml",
+        "readme.md",
+        "readme.txt",
+    }
+)
+_SKIP_BASENAME_REJECT = frozenset(
+    {
+        "challenge.txt",
+        "challenge.md",
+        "readme.md",
+        "readme.txt",
+        "dockerfile",
+        "metadata.yml",
+        "metadata.yaml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "flag.txt",
+        "flag",
+        ".gitkeep",
+        ".ds_store",
+    }
+)
+_MAX_ARTIFACT_FILE_BYTES = 256_000
+_MAX_ARTIFACT_WALK_FILES = 400
 
 
 def parse_flags_required(text: str) -> int:
@@ -85,16 +147,32 @@ def is_complete_accept_message(message: str) -> bool:
     return bool(message) and (message.startswith("CORRECT") or message.startswith("ALREADY SOLVED"))
 
 
+def _flag_body(flag_lower: str) -> str:
+    if "{" in flag_lower and flag_lower.endswith("}"):
+        return flag_lower[flag_lower.find("{") + 1 : -1]
+    return flag_lower
+
+
 def is_decoy_flag(flag: str) -> bool:
     f = (flag or "").strip().lower()
     if not f:
         return True
-    return any(m in f for m in _DECOY_MARKERS)
+    if any(m in f for m in _DECOY_MARKERS):
+        return True
+    body = _flag_body(f)
+    return f in _DECOY_EXACT or body in _DECOY_EXACT
+
+
+def is_filename_like_flag_token(flag: str) -> bool:
+    """True for bare ``flag_<hex>`` tokens (often Dockerfile ENV / on-disk names)."""
+    return bool(_FLAG_FILENAME_TOKEN.match((flag or "").strip()))
 
 
 def _looks_secret_token(f: str) -> bool:
-    """Compact formatless flag: mixed charset, not a license/PIN pattern."""
+    """Compact formatless flag: mixed charset, not a license/PIN/filename pattern."""
     if not _FLAG_TOKEN.match(f) or _LICENSE_LIKE.match(f):
+        return False
+    if is_filename_like_flag_token(f):
         return False
     classes = sum(
         (
@@ -106,9 +184,66 @@ def _looks_secret_token(f: str) -> bool:
     return classes >= 2
 
 
-def is_plausible_flag(flag: str) -> bool:
+def collect_artifact_flag_candidates(challenge_dir: str | Path | None) -> set[str]:
+    """Strings that look like packaging artifacts, not awarded flags.
+
+    Collects Dockerfile/compose ``ENV|ARG FLAG=...`` values and attachment
+    basenames that resemble flag filenames. Used to reject false CORRECT from
+    skimming distfiles (e.g. leakme ``ENV FLAG flag_<hex>``).
+    """
+    if not challenge_dir:
+        return set()
+    root = Path(challenge_dir)
+    if not root.is_dir():
+        return set()
+
+    out: set[str] = set()
+    seen_files = 0
+    for path in root.rglob("*"):
+        if seen_files >= _MAX_ARTIFACT_WALK_FILES:
+            break
+        if not path.is_file():
+            continue
+        seen_files += 1
+        name = path.name
+        lower = name.lower()
+        if lower not in _SKIP_BASENAME_REJECT and (
+            is_filename_like_flag_token(name) or _looks_secret_token(name)
+        ):
+            out.add(name)
+
+        if lower not in _ARTIFACT_TEXT_NAMES and not lower.startswith("dockerfile"):
+            continue
+        try:
+            if path.stat().st_size > _MAX_ARTIFACT_FILE_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for m in _ENV_FLAG_ASSIGN.finditer(text):
+            val = (m.group(1) or "").strip().strip("\"'")
+            if not val:
+                continue
+            # Keep PREFIX{...} ENV values out — those may be intentional local flags.
+            # Reject filename-like / formatless tokens commonly mistaken for flags.
+            if "{" in val or "}" in val:
+                continue
+            if is_filename_like_flag_token(val) or _looks_secret_token(val) or is_decoy_flag(val):
+                out.add(val)
+    return out
+
+
+def is_plausible_flag(
+    flag: str,
+    *,
+    artifact_flags: Sequence[str] | None = None,
+) -> bool:
     f = (flag or "").strip()
     if not f or is_decoy_flag(f):
+        return False
+    if is_filename_like_flag_token(f):
+        return False
+    if artifact_flags and f in set(artifact_flags):
         return False
     if _FLAG_BRACE.match(f) or _FLAG_DASH.match(f):
         return True
@@ -124,6 +259,8 @@ def accept_flag(
     *,
     already_accepted: Sequence[str] = (),
     required: int = 1,
+    challenge_dir: str | Path | None = None,
+    artifact_flags: Sequence[str] | None = None,
 ) -> tuple[str, bool]:
     """Validate and accept a flag locally.
 
@@ -134,6 +271,9 @@ def accept_flag(
     f = (flag or "").strip()
     req = normalize_flags_required(required)
     prior = [a.strip() for a in already_accepted if a and a.strip()]
+    artifacts = set(artifact_flags or ())
+    if challenge_dir is not None:
+        artifacts |= collect_artifact_flag_candidates(challenge_dir)
 
     if not f:
         return "Empty flag — nothing to submit.", False
@@ -142,7 +282,13 @@ def accept_flag(
             f'REJECTED decoy/placeholder "{f}". Recover the real flag from challenge logic.',
             False,
         )
-    if not is_plausible_flag(f):
+    if is_filename_like_flag_token(f) or f in artifacts:
+        return (
+            f'REJECTED "{f}" — looks like a packaging artifact (Dockerfile ENV / '
+            "filename), not the awarded flag. Recover the real flag from challenge logic.",
+            False,
+        )
+    if not is_plausible_flag(f, artifact_flags=list(artifacts)):
         return (
             f'REJECTED "{f}" — does not look like a CTF flag. '
             "Submit the exact awarded string (PREFIX{...}, PREFIX-..., "

@@ -237,6 +237,7 @@ class ChallengeSwarm:
                 flag,
                 already_accepted=list(self.confirmed_flags),
                 required=required,
+                challenge_dir=self.challenge_dir,
             )
             self._submitted_flags.add(normalized)
 

@@ -1,7 +1,12 @@
 == NETWORK / WEB HELPERS ==
 nmap                 Port / service scan. nmap -sV host
+sqlmap               Automated SQL injection. sqlmap -u 'http://HOST/?id=1' --batch
 flask                Quick HTTP listeners for callbacks
 PyJWT                JWT encode/decode. import jwt
+ffuf                 Content discovery — run `ffuf` and the sandbox will install
+                     it on first use if missing.
+                     ffuf -u http://HOST/FUZZ -w wordlist
 
 == NOTES ==
 Loaded on demand. curl / wget / nc / requests are already on the base image.
+Exit 124 → often network timeout; narrow scope before abandoning.

@@ -9,6 +9,14 @@ dcfldd               Forensic dd with hashing
 xfs_db / xfs_repair  XFS inspection
 volatility3          Memory forensics. vol -f memdump.raw windows.info
 
+== NETWORK CAPTURE ==
+tshark               CLI packet analysis (Wireshark engine).
+                     tshark -r file.pcap -Y 'http' -T fields -e http.host
+editcap / mergecap   Slice / combine pcaps (from wireshark-common)
+capinfos             Capture file summary. capinfos file.pcap
+scapy                Python packet crafting / pcap parse.
+                     from scapy.all import rdpcap, TCP, Raw
+
 == NOTES ==
-Loaded on demand when these commands are first used.
+Loaded on demand when these commands are first used (.pcap / .pcapng prefetch).
 Exit 137/124 → shrink dumps / use lighter plugins; re-read /challenge/TOOLS.txt.

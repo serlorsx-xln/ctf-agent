@@ -26,6 +26,7 @@ async def submit_flag(ctx: RunContext[SolverDeps], flag: str) -> str:
             flag,
             already_accepted=list(ctx.deps.accepted_flags),
             required=normalize_flags_required(ctx.deps.flags_required),
+            challenge_dir=ctx.deps.challenge_dir,
         )
     if is_counted_accept_message(display):
         normalized = flag.strip()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -24,7 +25,7 @@ class LoopDetector:
         self._recent = deque(maxlen=self.window)
         self._fail_classes = deque(maxlen=self.fail_window)
 
-    def check(self, tool_name: str, args: dict | str | None = None) -> str | None:
+    def check(self, tool_name: str, args: Mapping[str, object] | str | None = None) -> str | None:
         """Check if the agent is stuck in a loop.
 
         Returns:
@@ -33,7 +34,10 @@ class LoopDetector:
             "break": exceeded loop threshold, should force-break
         """
         if args:
-            raw = json.dumps(args, sort_keys=True) if isinstance(args, dict) else str(args)
+            if isinstance(args, Mapping):
+                raw = json.dumps(dict(args), sort_keys=True, default=str)
+            else:
+                raw = str(args)
             # Soften huge heredoc bodies so tiny edits still count as the same stuck cmd.
             raw = re.sub(r"<<['\"]?\w+['\"]?.*?^\w+$", "<<HEREDOC>>", raw, flags=re.S | re.M)
             sig = f"{tool_name}:{raw[:500]}"
