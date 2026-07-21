@@ -94,6 +94,7 @@ class ClaudeSolver:
         self._accepted_flags: list[str] = []
         self._findings = ""
         self._cost_usd = 0.0
+        self._cost_reported = False
         self._bump_insights: str | None = None
 
     @staticmethod
@@ -105,7 +106,7 @@ class ClaudeSolver:
                 continue
             try:
                 val = int(raw)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 continue
             if val > 1000:  # treat as ms
                 return max(5, min(val // 1000, 900))
@@ -146,6 +147,7 @@ class ClaudeSolver:
                 already_accepted=list(self._accepted_flags),
                 required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
                 challenge_dir=self.challenge_dir,
+                auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
             )
         if (
             display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
@@ -164,7 +166,8 @@ class ClaudeSolver:
 
         @tool(
             "submit_flag",
-            "Submit a recovered CTF flag. ACCEPTED = more flags needed; CORRECT = done.",
+            "Submit a recovered flag candidate (exact string). Human confirms; "
+            "ACCEPTED = more needed; CORRECT = done.",
             {"flag": str},
         )
         async def submit_flag(args: dict) -> dict:
@@ -208,8 +211,8 @@ class ClaudeSolver:
             "workspace at /challenge/workspace/. Do NOT use any paths outside /challenge/. "
             "All bash commands run inside the container via docker exec. "
             "Use bash for everything: cat/head to read files, tee/echo> to write, find/grep to search. "
-            "Prefer the submit_flag tool when you recover a flag "
-            "(ACCEPTED = more needed; CORRECT = done). "
+            "Prefer the submit_flag tool when you recover a candidate "
+            "(any format; human confirms; ACCEPTED = more needed; CORRECT = done). "
             "Bash `submit_flag 'FLAG'` also works (even after `cd … &&`). "
             "Use notify_coordinator to message the coordinator.\n\n"
         )
@@ -485,8 +488,10 @@ class ClaudeSolver:
 
                 elif isinstance(message, ResultMessage):
                     self._session_id = message.session_id
-                    turn_cost = getattr(message, "total_cost_usd", 0.0)
-                    self._cost_usd += turn_cost
+                    turn_cost = getattr(message, "total_cost_usd", None)
+                    if turn_cost is not None:
+                        self._cost_usd += float(turn_cost)
+                        self._cost_reported = True
                     msg_usage = getattr(message, "usage", None) or {}
                     if not isinstance(msg_usage, dict):
                         msg_usage = vars(msg_usage) if hasattr(msg_usage, "__dict__") else {}
@@ -500,6 +505,7 @@ class ClaudeSolver:
                         ),
                         provider_spec="claude-sdk",
                         duration_seconds=time.monotonic() - t0,
+                        reported_cost_usd=float(turn_cost) if turn_cost is not None else None,
                     )
 
                     output = getattr(message, "structured_output", None)
@@ -511,11 +517,10 @@ class ClaudeSolver:
                 # tool_progress / other SDK noise — ignore silently
 
             _live(self.agent_name, "── turn end ──")
-            self.tracer.event(
-                "turn_complete",
-                duration=round(time.monotonic() - t0, 1),
-                cost=round(self._cost_usd, 4),
-            )
+            turn_event: dict = {"duration": round(time.monotonic() - t0, 1)}
+            if self._cost_reported:
+                turn_event["cost_usd_reported"] = round(self._cost_usd, 4)
+            self.tracer.event("turn_complete", **turn_event)
 
             # Also check if flag was confirmed via submit_flag in bash
             if self._confirmed and self._flag:
@@ -549,13 +554,14 @@ class ClaudeSolver:
     def _result(
         self, status: str, run_steps: int | None = None, run_cost: float | None = None
     ) -> SolverResult:
-        self.tracer.event(
-            "finish",
-            status=status,
-            flag=self._flag,
-            confirmed=self._confirmed,
-            cost_usd=round(self._cost_usd, 4),
-        )
+        finish_kw: dict = {
+            "status": status,
+            "flag": self._flag,
+            "confirmed": self._confirmed,
+        }
+        if self._cost_reported:
+            finish_kw["cost_usd_reported"] = round(self._cost_usd, 4)
+        self.tracer.event("finish", **finish_kw)
         # Use per-run metrics if provided, so broken-solver detection works across bumps
         return SolverResult(
             flag=self._flag
@@ -564,6 +570,7 @@ class ClaudeSolver:
             status=status,
             findings_summary=self._finish_findings(),
             step_count=run_steps if run_steps is not None else self._step_count,
+            # Provider-reported USD only (Claude SDK); 0 means unknown/not reported.
             cost_usd=run_cost if run_cost is not None else self._cost_usd,
             log_path=self.tracer.path,
         )

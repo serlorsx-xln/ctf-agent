@@ -410,7 +410,7 @@ Lazy packs + optional Kali + optional cloud ชนะเพราะครบเ
 - [x] `ml` (torch CPU / keras)
 - [x] `containers` (podman / buildah — best-effort)
 - [x] `pwn` ขยาย angr + radare2
-- [x] `linux` (linpeas / pspy / ffuf / smbclient / sshpass / impacket / ldap-utils / certipy-ad / bloodhound-python / NetExec)
+- [x] `linux` (linpeas / pspy / ffuf / katana / smbclient / sshpass / impacket / ldap-utils / certipy-ad / bloodhound-python / NetExec)
 - [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev
 - [x] ขนาด cache + eviction (`CTF_PACK_CACHE_MAX_GB`, LRU via `.accessed`)
 - [x] RAM floor ต่อ pack + ลบ fat image / `Dockerfile.sage` ออกจาก tree

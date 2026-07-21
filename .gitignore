@@ -27,7 +27,14 @@ uv.lock
 # Local unpack / blutter test blobs (not part of the product)
 sandbox/fixtures/
 
+# Local challenge service state (flags, socat pid)
+challenges/*/.local-service/
+
 # Runtime
 workspace/
 codex-schema-*/
 .claude/scheduled_tasks.lock
+
+# Organizer/build trees — not agent handouts
+challenges/*/.service-src/
+challenges/*/Dockerfile.local

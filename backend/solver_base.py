@@ -11,6 +11,8 @@ GAVE_UP = "gave_up"
 CANCELLED = "cancelled"
 ERROR = "error"
 QUOTA_ERROR = "quota_error"
+# Transport / Cursor bridge failure — recoverable by recreating the agent session.
+INFRA_ERROR = "infra_error"
 
 
 @dataclass
@@ -19,6 +21,7 @@ class SolverResult:
     status: str
     findings_summary: str
     step_count: int
+    # Provider-reported USD only (e.g. Claude SDK). 0.0 means unknown / not reported.
     cost_usd: float
     log_path: str
 

@@ -164,7 +164,7 @@ async def run_event_loop(
                 unsolved_set = poller.known_challenges - solved_set
                 status_line = (
                     f"STATUS: {len(solved_set)} solved, {len(unsolved_set)} unsolved, "
-                    f"{len(active)} active swarms. Cost: ${cost_tracker.total_cost_usd:.2f}"
+                    f"{len(active)} active swarms. Usage: {cost_tracker.format_total()}"
                 )
                 if active or parts:
                     parts.append(status_line)
@@ -176,7 +176,7 @@ async def run_event_loop(
                 logger.info("Event -> coordinator: %s", msg[:200])
                 await turn_fn(msg)
 
-    except KeyboardInterrupt, asyncio.CancelledError:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Coordinator shutting down...")
     except Exception as e:
         logger.error("Coordinator fatal: %s", e, exc_info=True)
@@ -195,8 +195,11 @@ async def run_event_loop(
 
     return {
         "results": deps.results,
-        "total_cost_usd": cost_tracker.total_cost_usd,
+        "usage_summary": cost_tracker.format_total(),
         "total_tokens": cost_tracker.total_tokens,
+        # Provider-reported USD only (None when unknown). Kept for callers that still key on it.
+        "total_reported_cost_usd": cost_tracker.total_reported_cost_usd,
+        "total_cost_usd": cost_tracker.total_cost_usd,
     }
 
 
@@ -247,7 +250,7 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
                 try:
                     data = json.loads(body)
                     message = data.get("message", body.decode())
-                except json.JSONDecodeError, UnicodeDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     message = body.decode("utf-8", errors="replace")
 
                 inbox.put_nowait(message)

@@ -12,6 +12,7 @@ ENV LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget git file xxd bsdmainutils unzip zip jq \
+    ripgrep \
     netcat-openbsd socat \
     openssl \
     proxychains4 \

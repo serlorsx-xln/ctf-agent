@@ -1,7 +1,8 @@
-"""Regression tests for local flag acceptance (N-required)."""
+"""Regression tests for local flag acceptance (human-confirmed, N-required)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from backend.flags import (
@@ -15,16 +16,34 @@ from backend.flags import (
 )
 
 
-def test_default_one_flag_correct() -> None:
+def test_unconfirmed_is_candidate_not_correct() -> None:
     msg, done = accept_flag("CTF{hello_world_ok}")
+    assert not done
+    assert msg.startswith("CANDIDATE")
+    assert not is_complete_accept_message(msg)
+    assert not is_counted_accept_message(msg)
+
+
+def test_confirmed_one_flag_correct() -> None:
+    msg, done = accept_flag("CTF{hello_world_ok}", human_confirmed=True)
     assert done
     assert msg.startswith("CORRECT")
     assert is_complete_accept_message(msg)
     assert is_counted_accept_message(msg)
 
 
+def test_formatless_and_spaces_ok_when_confirmed() -> None:
+    msg, done = accept_flag("hello world", human_confirmed=True)
+    assert done
+    assert msg.startswith("CORRECT")
+    hex32 = "2475be69d40e815588a85fd89c7a439d"
+    msg2, done2 = accept_flag(hex32, human_confirmed=True)
+    assert done2
+    assert msg2.startswith("CORRECT")
+
+
 def test_multi_flag_partial_then_complete() -> None:
-    m1, d1 = accept_flag("CTF{user_aaaaaaaa}", required=2)
+    m1, d1 = accept_flag("CTF{user_aaaaaaaa}", required=2, human_confirmed=True)
     assert not d1
     assert m1.startswith("ACCEPTED")
     assert is_counted_accept_message(m1)
@@ -35,6 +54,7 @@ def test_multi_flag_partial_then_complete() -> None:
         "CTF{root_bbbbbbbb}",
         already_accepted=["CTF{user_aaaaaaaa}"],
         required=2,
+        human_confirmed=True,
     )
     assert d2
     assert m2.startswith("CORRECT")
@@ -59,7 +79,7 @@ def test_parse_flags_required() -> None:
 
 
 def test_accepted_message_does_not_substring_match_correct() -> None:
-    msg, done = accept_flag("CTF{user_aaaaaaaa}", required=2)
+    msg, done = accept_flag("CTF{user_aaaaaaaa}", required=2, human_confirmed=True)
     assert not done
     assert "CORRECT" not in msg
     assert not is_complete_accept_message(msg)
@@ -97,14 +117,20 @@ def test_reject_leakme_local_decoy_body() -> None:
 
 
 def test_real_brace_flag_still_ok() -> None:
-    msg, done = accept_flag("ARCHA{s3cr37_sh0p_n07_s0_s3cr378144c2cb}")
+    msg, done = accept_flag(
+        "ARCHA{s3cr37_sh0p_n07_s0_s3cr378144c2cb}",
+        human_confirmed=True,
+    )
     assert done
     assert msg.startswith("CORRECT")
 
 
 def test_local_test_in_brace_body_not_substring_decoy() -> None:
     # Must not reject real/local brace flags that merely contain "test_flag" text
-    msg, done = accept_flag("BZHCTF{local_test_flag_please_find_me}")
+    msg, done = accept_flag(
+        "BZHCTF{local_test_flag_please_find_me}",
+        human_confirmed=True,
+    )
     assert done
     assert msg.startswith("CORRECT")
 
@@ -131,13 +157,39 @@ def test_dockerfile_env_brace_flag_not_artifact_blocked(tmp_path: Path) -> None:
     )
     arts = collect_artifact_flag_candidates(tmp_path)
     assert "CTF{intentional_local_ok}" not in arts
-    msg, done = accept_flag("CTF{intentional_local_ok}", challenge_dir=tmp_path)
+    msg, done = accept_flag(
+        "CTF{intentional_local_ok}",
+        challenge_dir=tmp_path,
+        human_confirmed=True,
+    )
     assert done
     assert msg.startswith("CORRECT")
 
 
+def test_do_submit_flag_prompts_then_accepts() -> None:
+    from backend.tools.core import do_submit_flag
+
+    async def _run() -> None:
+        msg, done = await do_submit_flag(
+            "chal",
+            "hello world",
+            confirm_fn=lambda _f: True,
+        )
+        assert done
+        assert msg.startswith("CORRECT")
+
+        msg2, done2 = await do_submit_flag(
+            "chal",
+            "hello world",
+            confirm_fn=lambda _f: False,
+        )
+        assert not done2
+        assert msg2.startswith("REJECTED by operator")
+
+    asyncio.run(_run())
+
+
 def test_coordinator_no_swarm_multi_flag_progress() -> None:
-    import asyncio
     from types import SimpleNamespace
 
     from backend.agents.coordinator_core import _solved_names, do_submit_flag
@@ -146,7 +198,10 @@ def test_coordinator_no_swarm_multi_flag_progress() -> None:
     from backend.prompts import ChallengeMeta
 
     async def _run() -> None:
-        deps = CoordinatorDeps(cost_tracker=CostTracker(), settings=SimpleNamespace())
+        deps = CoordinatorDeps(
+            cost_tracker=CostTracker(),
+            settings=SimpleNamespace(auto_confirm_flags=True),
+        )
         deps.challenge_metas["ping"] = ChallengeMeta(name="ping", description="x", flags_required=2)
         msg = await do_submit_flag(deps, "ping", "CTF{user_aaaaaaaaaa}")
         assert msg.startswith("ACCEPTED")

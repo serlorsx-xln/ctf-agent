@@ -50,7 +50,7 @@ A **coordinator** LLM manages local challenges under `challenges/` while **solve
      +-----------------+  +----------------+
 ```
 
-Each solver runs in an isolated Docker container with CTF tools. Flags are accepted **locally** (plausible non-decoy strings) — there is no external scoreboard dependency. By default one accepted flag ends the run (`CORRECT`). Multi-flag challenges set `flags_required: N` in `challenge.txt` (nth distinct accept → `CORRECT`).
+Each solver runs in an isolated Docker container with CTF tools. Flag candidates are submitted **locally**; you confirm each one (`y/N`) — there is no external scoreboard. Confirmed flags count toward `CORRECT`. Multi-flag challenges set `flags_required: N` in `challenge.txt`. Use `--auto-confirm-flags` (or `CTF_AUTO_CONFIRM_FLAGS=1`) only for unattended/tests.
 
 ## Quick Start (Cursor API key)
 
@@ -137,7 +137,7 @@ discarded from the final image).
 | **crypto-tools** | flatter, cado-nfs, RsaCtfTool, fpylll, gmpy2 |
 | **mobile** | jadx, apktool, blutter, frida-tools, androguard |
 | **steg** | steghide, stegseek, zsteg, exiftool, tesseract |
-| **linux** | linpeas, pspy, ffuf, smbclient, sshpass, impacket, ldap-utils, certipy-ad, bloodhound-python, NetExec (nxc) |
+| **linux** | linpeas, pspy, ffuf, katana, smbclient, sshpass, impacket, ldap-utils, certipy-ad, bloodhound-python, NetExec (nxc) |
 | **forensics** | sleuthkit, binwalk, volatility3, tshark, scapy |
 | **web** | nmap, sqlmap, flask, PyJWT |
 | **ml / containers** | torch/keras, podman — as needed |

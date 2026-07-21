@@ -27,7 +27,14 @@ from cursor_sdk import (
     SDKToolUseMessage,
 )
 
-from backend.agents.cursor_runtime import acquire_client, release_client, resolve_api_key
+from backend.agents.cursor_runtime import (
+    acquire_client,
+    current_client,
+    force_recreate_client,
+    is_infra_error_message,
+    release_client,
+    resolve_api_key,
+)
 from backend.agents.live_log import live as _live
 from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker
@@ -36,7 +43,15 @@ from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import (
+    CANCELLED,
+    ERROR,
+    FLAG_FOUND,
+    GAVE_UP,
+    INFRA_ERROR,
+    QUOTA_ERROR,
+    SolverResult,
+)
 from backend.tools.core import (
     do_bash,
     do_list_files,
@@ -60,7 +75,7 @@ operation — do NOT use the built-in Shell, Read, Write, Edit, Glob, or Grep to
 Available tools:
 - bash — run a command in the sandbox
 - read_file / write_file / list_files — file I/O in the sandbox
-- submit_flag — submit a recovered flag (ACCEPTED = more needed; CORRECT = done)
+- submit_flag — submit a recovered flag (operator confirms; CORRECT = done)
 - webhook_create / webhook_get_requests — out-of-band HTTP callbacks
 - view_image — inspect an image file in the sandbox
 - notify_coordinator — send a strategic note to the coordinator
@@ -76,8 +91,14 @@ otherwise `cat /challenge/TOOLS.txt`, then inspect challenge files and solve.
 Prefer installed tools over guessing. Do not search writeups.
 Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.
 
-When you recover a real flag, call submit_flag. CORRECT ends the run
-(ACCEPTED means more distinct flags are still required).
+Long-running bash (factoring, scans, compiles, remote loops): always set
+timeout_seconds explicitly (300–900+) and print progress so the session stays
+healthy. Prefer writing a script to /challenge/workspace and running it once
+over many interactive one-liners.
+
+When you recover a candidate answer, call submit_flag with the exact string
+(any format the challenge awards — do not rewrite to fit a pattern).
+A human confirms; CORRECT ends the run (ACCEPTED = more flags still required).
 Ignore decoys (*fake_flag*, CTF{flag}, CTF{placeholder}, TRYHARDER).
 
 """
@@ -128,8 +149,8 @@ class CursorSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._cost_usd = 0.0
         self._bump_insights: str | None = None
+        self._infra_recovery = False
         self._started = False
         self._api_key = ""
 
@@ -178,18 +199,7 @@ class CursorSolver:
 
         self._client = await acquire_client(workspace=str(workdir))
         try:
-            custom_tools = self._build_custom_tools()
-            self._agent = await AsyncAgent.create(
-                client=self._client,
-                model=self.model_id,
-                api_key=self._api_key,
-                name=f"ctf-solver-{self.meta.name}-{self.model_id}",
-                local=LocalAgentOptions(
-                    cwd=str(workdir),
-                    setting_sources=[],
-                    custom_tools=custom_tools,
-                ),
-            )
+            self._agent = await self._create_agent()
         except Exception:
             await release_client()
             self._client = None
@@ -197,6 +207,66 @@ class CursorSolver:
         self._started = True
         self.tracer.event("start", challenge=self.meta.name, model=self.model_id)
         logger.info("[%s] Cursor solver started (agent=%s)", self.agent_name, self._agent.agent_id)
+
+    async def _create_agent(self) -> AsyncAgent:
+        assert self._client is not None
+        assert self._workdir is not None
+        workdir = Path(self._workdir.name)
+        custom_tools = self._build_custom_tools()
+        return await AsyncAgent.create(
+            client=self._client,
+            model=self.model_id,
+            api_key=self._api_key,
+            name=f"ctf-solver-{self.meta.name}-{self.model_id}",
+            local=LocalAgentOptions(
+                cwd=str(workdir),
+                setting_sources=[],
+                custom_tools=custom_tools,
+            ),
+        )
+
+    async def recover_session(self, insights: str | None = None) -> None:
+        """Replace a poisoned Cursor agent; keep sandbox + workspace files."""
+        if self._workdir is None:
+            raise RuntimeError("Cannot recover session before start()")
+
+        logger.warning("[%s] Recovering Cursor agent session after infra error", self.agent_name)
+        if self._agent is not None:
+            try:
+                await self._agent.close()
+            except Exception:
+                pass
+            self._agent = None
+
+        workdir = str(self._workdir.name)
+        try:
+            # Prefer the live shared view (sibling may have force-recreated).
+            live = await current_client()
+            if live is not None:
+                self._client = live
+            elif self._client is None:
+                self._client = await acquire_client(workspace=workdir)
+            self._agent = await self._create_agent()
+        except Exception as e:
+            logger.warning(
+                "[%s] Agent recreate failed (%s) — force-relaunching bridge",
+                self.agent_name,
+                e,
+            )
+            # Keep our ref count; replace the underlying shared bridge process.
+            self._client = await force_recreate_client(workspace=workdir)
+            self._agent = await self._create_agent()
+
+        self._infra_recovery = True
+        self.loop_detector.reset()
+        if insights:
+            self._bump_insights = insights
+        self.tracer.event("infra_recover", insights=(insights or "")[:500])
+        logger.info(
+            "[%s] Cursor agent recovered (agent=%s)",
+            self.agent_name,
+            self._agent.agent_id,
+        )
 
     def _build_custom_tools(self) -> dict[str, CustomTool]:
         async def _wrap(name: str, args: Mapping[str, Any], runner) -> str:
@@ -250,7 +320,7 @@ class CursorSolver:
                 lambda: do_bash(
                     self.sandbox,
                     args.get("command", ""),
-                    int(args.get("timeout_seconds", 60) or 60),
+                    int(args.get("timeout_seconds", 300) or 300),
                 ),
             )
 
@@ -290,6 +360,9 @@ class CursorSolver:
                         already_accepted=list(self._accepted_flags),
                         required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
                         challenge_dir=self.challenge_dir,
+                        auto_confirm=bool(
+                            getattr(self.settings, "auto_confirm_flags", False)
+                        ),
                     )
                 if (
                     display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
@@ -350,7 +423,14 @@ class CursorSolver:
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "default": 60},
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "default": 300,
+                            "description": (
+                                "Seconds before the sandbox kills the command. "
+                                "Use 300–900+ for factoring, scans, and long remotes."
+                            ),
+                        },
                     },
                     "required": ["command"],
                 },
@@ -392,9 +472,9 @@ class CursorSolver:
             ),
             "submit_flag": CustomTool(
                 description=(
-                    "Submit a recovered flag. Returns ACCEPTED (n/m) if more flags "
-                    "are needed, CORRECT when all required flags are accepted, or "
-                    "REJECTED. Do not submit decoys."
+                    "Submit a recovered flag candidate (exact string from the challenge). "
+                    "A human confirms. Returns ACCEPTED (n/m), CORRECT when done, "
+                    "or REJECTED. Do not submit decoys."
                 ),
                 input_schema={
                     "type": "object",
@@ -444,16 +524,25 @@ class CursorSolver:
 
         t0 = time.monotonic()
         steps_before = self._step_count
-        cost_before = self._cost_usd
 
         if self._bump_insights:
             cont = build_continue_prompt(
                 accepted_flags=self._accepted_flags,
                 flags_required=getattr(self.meta, "flags_required", 1),
                 bump_insights=self._bump_insights,
+                infra_recovery=self._infra_recovery,
             )
             prompt = f"{self._system_prompt}\n\n{cont}"
             self._bump_insights = None
+            self._infra_recovery = False
+        elif self._infra_recovery:
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+                flags_required=getattr(self.meta, "flags_required", 1),
+                infra_recovery=True,
+            )
+            prompt = f"{self._system_prompt}\n\n{cont}"
+            self._infra_recovery = False
         elif self._step_count == 0:
             prompt = f"{self._system_prompt}\n\nSolve this CTF challenge."
         else:
@@ -514,8 +603,11 @@ class CursorSolver:
                     provider_spec="cursor",
                     duration_seconds=duration,
                 )
-                agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
-                self._cost_usd = agent_usage.cost_usd if agent_usage else self._cost_usd
+                self.tracer.usage(
+                    result.usage.input_tokens,
+                    result.usage.output_tokens,
+                    result.usage.cache_read_tokens,
+                )
 
             if result.result:
                 self._findings = (result.result or self._findings)[:2000]
@@ -523,18 +615,21 @@ class CursorSolver:
 
             status = str(result.status)
             if status == "error":
-                err = (result.result or "run error").lower()
-                self.tracer.event("error", error=result.result or status)
-                if any(k in err for k in ("quota", "rate", "capacity", "usage", "billing")):
+                err = (result.result or "run error")
+                self.tracer.event("error", error=err)
+                err_l = err.lower()
+                if any(k in err_l for k in ("quota", "rate", "capacity", "usage", "billing")):
                     return self._result(QUOTA_ERROR)
+                if is_infra_error_message(err):
+                    self._findings = f"Infra: {err}"
+                    return self._result(INFRA_ERROR)
                 return self._result(ERROR)
 
             if self._confirmed and self._flag:
                 return self._result(FLAG_FOUND)
 
             run_steps = self._step_count - steps_before
-            run_cost = self._cost_usd - cost_before
-            return self._result(GAVE_UP, run_steps=run_steps, run_cost=run_cost)
+            return self._result(GAVE_UP, run_steps=run_steps)
 
         except asyncio.CancelledError:
             return self._result(CANCELLED)
@@ -545,6 +640,8 @@ class CursorSolver:
             self.tracer.event("error", error=error_str)
             if any(k in error_str.lower() for k in ("quota", "rate", "401", "403", "billing")):
                 return self._result(QUOTA_ERROR)
+            if is_infra_error_message(error_str) or getattr(e, "is_retryable", False):
+                return self._result(INFRA_ERROR)
             return self._result(ERROR)
         except Exception as e:
             error_str = str(e)
@@ -553,6 +650,8 @@ class CursorSolver:
             self.tracer.event("error", error=error_str)
             if any(k in error_str.lower() for k in ("quota", "rate", "overloaded")):
                 return self._result(QUOTA_ERROR)
+            if is_infra_error_message(error_str):
+                return self._result(INFRA_ERROR)
             return self._result(ERROR)
 
     def _maybe_parse_flag_json(self, text: str) -> None:
@@ -566,7 +665,7 @@ class CursorSolver:
             stripped = stripped[start : end + 1]
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError, ValueError:
+        except (json.JSONDecodeError, ValueError):
             return
         if isinstance(parsed, dict) and parsed.get("type") == "flag_found":
             flag = parsed.get("flag")
@@ -589,21 +688,20 @@ class CursorSolver:
         self,
         status: str,
         run_steps: int | None = None,
-        run_cost: float | None = None,
     ) -> SolverResult:
         self.tracer.event(
             "finish",
             status=status,
             flag=self._flag,
             confirmed=self._confirmed,
-            cost_usd=round(self._cost_usd, 4),
         )
         return SolverResult(
             flag=self._flag,
             status=status,
             findings_summary=self._findings[:2000],
             step_count=run_steps if run_steps is not None else self._step_count,
-            cost_usd=run_cost if run_cost is not None else self._cost_usd,
+            # Cursor does not report USD; leave unknown.
+            cost_usd=0.0,
             log_path=self.tracer.path,
         )
 

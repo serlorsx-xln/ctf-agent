@@ -191,6 +191,9 @@ def parse_challenge_network_hints(text: str) -> tuple[list[str], list[int]]:
             return
         if h in {"localhost", "example.com", "example.org"}:
             return
+        # Docker Desktop / Colima gateway — not a remote VPN lab.
+        if h == "host.docker.internal" or h.endswith(".docker.internal"):
+            return
         seen_h.add(h)
         hosts.append(h)
 
@@ -499,7 +502,7 @@ class DockerSandbox:
             if s.endswith("m"):
                 return int(s[:-1]) * 1024 * 1024
             return int(s)
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             logger.warning("Invalid memory_limit %r, defaulting to 4GB", self.memory_limit)
             return 4 * 1024 * 1024 * 1024
 
@@ -590,9 +593,23 @@ class DockerSandbox:
 
             self.image = await self._resolve_l0_image(self.image)
 
-            from backend.host_proxy import acquire_host_proxy, release_host_proxy
+            from backend.host_proxy import (
+                acquire_host_proxy,
+                host_proxy_mode,
+                release_host_proxy,
+            )
 
-            self._host_proxy_port = await acquire_host_proxy()
+            # Skip SOCKS entirely for offline / localhost challenges — avoids
+            # noisy proxy logs and useless calibration when the lab is on the host.
+            probe_hosts, _ = parse_challenge_network_hints(self._challenge_text())
+            force_proxy = host_proxy_mode() in ("1", "true", "yes", "on")
+            if probe_hosts or force_proxy:
+                self._host_proxy_port = await acquire_host_proxy()
+            else:
+                self._host_proxy_port = None
+                logger.info(
+                    "Host VPN routing: DIRECT (no remote lab hosts; skipping SOCKS)"
+                )
             self._host_proxy_wrap = False
             try:
                 await self._create_and_start(self.image)
@@ -604,6 +621,11 @@ class DockerSandbox:
                 # Bootstrap prefetched packs (bind-mounted trees skip the copy).
                 try:
                     for pack in prefetch:
+                        logger.info(
+                            "Prefetch bootstrap pack=%s (apt/pip may take 1–2 min "
+                            "on a fresh container)…",
+                            pack,
+                        )
                         msg = await self.ensure_pack(pack)
                         logger.info("Prefetch pack %s: %s", pack, msg)
                 except Exception as e:

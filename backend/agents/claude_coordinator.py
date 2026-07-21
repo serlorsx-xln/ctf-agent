@@ -207,11 +207,22 @@ async def run_claude_coordinator(
                 msg_type = type(message).__name__
                 logger.debug(f"Coordinator received: {msg_type}")
                 if isinstance(message, ResultMessage):
-                    cost = getattr(message, "total_cost_usd", 0)
+                    cost = getattr(message, "total_cost_usd", None)
                     session = getattr(message, "session_id", None)
-                    logger.info(
-                        f"Claude coordinator turn done (messages={msg_count}, cost=${cost:.4f}, session={session})"
-                    )
+                    if cost is not None:
+                        logger.info(
+                            "Claude coordinator turn done "
+                            "(messages=%s, cost=$%.4f reported, session=%s)",
+                            msg_count,
+                            float(cost),
+                            session,
+                        )
+                    else:
+                        logger.info(
+                            "Claude coordinator turn done (messages=%s, session=%s)",
+                            msg_count,
+                            session,
+                        )
             if msg_count == 0:
                 logger.warning("Coordinator turn produced no messages!")
 

@@ -244,12 +244,11 @@ class Solver:
                 duration_seconds=duration,
             )
 
-            agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
+            # No local USD estimate — pydantic-ai does not report billing.
             self.tracer.usage(
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_read_tokens,
-                agent_usage.cost_usd if agent_usage else 0.0,
             )
 
             self._messages = result.all_messages()
@@ -310,20 +309,25 @@ class Solver:
         self, status: str, run_steps: int | None = None, run_cost: float | None = None
     ) -> SolverResult:
         agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
-        cost = agent_usage.cost_usd if agent_usage else 0.0
-        self.tracer.event(
-            "finish",
-            status=status,
-            flag=self._flag,
-            confirmed=self._confirmed,
-            cost_usd=round(cost, 4),
+        reported = (
+            agent_usage.reported_cost_usd
+            if agent_usage and agent_usage.has_reported_cost
+            else None
         )
+        finish_kw: dict = {
+            "status": status,
+            "flag": self._flag,
+            "confirmed": self._confirmed,
+        }
+        if reported is not None:
+            finish_kw["cost_usd_reported"] = round(reported, 4)
+        self.tracer.event("finish", **finish_kw)
         return SolverResult(
             flag=self._flag,
             status=status,
             findings_summary=self._findings[:2000],
             step_count=run_steps if run_steps is not None else self._step_count[0],
-            cost_usd=run_cost if run_cost is not None else cost,
+            cost_usd=run_cost if run_cost is not None else (reported or 0.0),
             log_path=self.tracer.path,
         )
 

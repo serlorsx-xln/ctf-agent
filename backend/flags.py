@@ -1,23 +1,21 @@
-"""Local flag acceptance — no external scoreboard required.
+"""Local flag submission with human confirmation — no external scoreboard.
 
-A submitted flag is accepted when it looks like a real CTF flag and is not a
-known decoy/placeholder. Challenges may require multiple distinct flags via
-``flags_required: N`` in challenge text (default **1**). Only when N distinct
-flags are accepted does the run complete (CORRECT).
+Agents may submit any non-empty candidate. Obvious decoys / packaging artifacts
+are rejected automatically. Everything else becomes a **CANDIDATE** until a
+human confirms it. Only confirmed flags count toward ``flags_required: N``
+and ``CORRECT``.
 
-Without a scoreboard this is a *plausibility* gate (stop the run), not proof of
-correctness. Agents should submit the exact string the challenge awards —
-do not wrap or rewrite formats just to satisfy the checker.
-
-Hardening (still not a scoreboard): reject common test decoys, filename-like
-``flag_<hex>`` tokens, and strings that only appear as Dockerfile ``ENV FLAG``
-values / attachment basenames under the challenge directory.
+Without a scoreboard, the operator is the oracle — format heuristics must not
+auto-complete a run.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
-from collections.abc import Sequence
+import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 _DECOY_MARKERS = (
@@ -44,11 +42,11 @@ _DECOY_EXACT = frozenset(
     }
 )
 
-# Classic CTF: PREFIX{body}
+# Classic CTF: PREFIX{body} — kept for optional tooling / docs, not as an oracle
 _FLAG_BRACE = re.compile(r"^[A-Za-z0-9_-]{2,32}\{[^}]{4,256}\}$")
-# Dash style: FLAG-..., NSEC-..., etc. (prefix letters, long body)
+# Dash style: FLAG-..., NSEC-..., etc.
 _FLAG_DASH = re.compile(r"^[A-Za-z]{2,16}-[A-Za-z0-9_-]{8,128}$")
-# Formatless secret token (no whitespace). Excludes short segmented PINs.
+# Formatless secret token (no whitespace)
 _FLAG_TOKEN = re.compile(r"^[A-Za-z0-9_+\/=-]{16,200}$")
 _LICENSE_LIKE = re.compile(r"^(?:[A-Za-z0-9]{1,5}-){2,}[A-Za-z0-9]{1,5}$")
 # Dockerfile-style flag *filename* (leakme): ENV FLAG flag_<md5/sha>
@@ -100,6 +98,8 @@ _SKIP_BASENAME_REJECT = frozenset(
 _MAX_ARTIFACT_FILE_BYTES = 256_000
 _MAX_ARTIFACT_WALK_FILES = 400
 
+ConfirmFn = Callable[[str], bool]
+
 
 def parse_flags_required(text: str) -> int:
     """How many distinct flags this challenge needs. Default 1.
@@ -121,7 +121,7 @@ def normalize_flags_required(value: int | None) -> int:
         return 1
     try:
         return max(1, int(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 1
 
 
@@ -188,7 +188,7 @@ def collect_artifact_flag_candidates(challenge_dir: str | Path | None) -> set[st
     """Strings that look like packaging artifacts, not awarded flags.
 
     Collects Dockerfile/compose ``ENV|ARG FLAG=...`` values and attachment
-    basenames that resemble flag filenames. Used to reject false CORRECT from
+    basenames that resemble flag filenames. Used to reject false accepts from
     skimming distfiles (e.g. leakme ``ENV FLAG flag_<hex>``).
     """
     if not challenge_dir:
@@ -238,6 +238,11 @@ def is_plausible_flag(
     *,
     artifact_flags: Sequence[str] | None = None,
 ) -> bool:
+    """Legacy shape check — not used as an accept oracle anymore.
+
+    Kept for callers/tests that still inspect format. Human confirmation decides
+    correctness; any non-decoy non-artifact string may be submitted.
+    """
     f = (flag or "").strip()
     if not f or is_decoy_flag(f):
         return False
@@ -247,11 +252,115 @@ def is_plausible_flag(
         return False
     if _FLAG_BRACE.match(f) or _FLAG_DASH.match(f):
         return True
-    # Odd brace layouts (spaces inside, unusual prefixes)
     if "{" in f and "}" in f and len(f) >= 10:
         return True
-    # Challenges with no published format — secret-like single token only
     return bool(_looks_secret_token(f))
+
+
+def env_auto_confirm_flags() -> bool:
+    """True when CTF_AUTO_CONFIRM_FLAGS is set (tests / unattended runs)."""
+    return os.environ.get("CTF_AUTO_CONFIRM_FLAGS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+    )
+
+
+# While True, solver live-logs / INFO should stay quiet so the prompt is visible.
+_confirm_active = False
+_confirm_filter_installed = False
+
+
+class _QuietDuringConfirmFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _confirm_active
+
+
+def confirm_in_progress() -> bool:
+    """True while the operator is being asked to confirm a flag."""
+    return _confirm_active
+
+
+def _install_confirm_log_filter() -> None:
+    global _confirm_filter_installed
+    if _confirm_filter_installed:
+        return
+    filt = _QuietDuringConfirmFilter()
+    root = logging.getLogger()
+    if root.handlers:
+        for h in root.handlers:
+            h.addFilter(filt)
+    else:
+        root.addFilter(filt)
+    # Also quiet common noisy loggers used by solvers.
+    for name in ("backend", "backend.agents", "httpx", "httpcore"):
+        logging.getLogger(name).addFilter(filt)
+    _confirm_filter_installed = True
+
+
+def _emit_confirm_banner(flag: str) -> None:
+    """Print a hard-to-miss banner on stdout and stderr (logging often floods stderr)."""
+    bar = "=" * 72
+    body = (
+        f"\n\n{bar}\n"
+        f"  FLAG CANDIDATE — answer below (y/N + Enter)\n"
+        f"{bar}\n"
+        f"  {flag}\n"
+        f"{bar}\n"
+    )
+    for stream in (sys.stderr, sys.stdout):
+        try:
+            print(body, file=stream, flush=True)
+        except OSError:
+            pass
+
+
+def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
+    """Ask the operator whether ``flag`` is correct.
+
+    Returns True only on explicit yes, or when auto-confirm is enabled.
+    Non-TTY / EOF → False (safe default: do not complete the run).
+
+    Quiets INFO logging while waiting so parallel tool output does not bury
+    the prompt (Cursor may run bash alongside submit_flag).
+    """
+    global _confirm_active
+
+    f = (flag or "").strip()
+    _install_confirm_log_filter()
+    _confirm_active = True
+    try:
+        _emit_confirm_banner(f)
+        if auto_confirm or env_auto_confirm_flags():
+            msg = "Auto-confirm enabled — accepting candidate.\n"
+            for stream in (sys.stderr, sys.stdout):
+                print(msg, file=stream, flush=True)
+            return True
+        if not sys.stdin.isatty():
+            msg = (
+                "No TTY for confirmation — rejecting candidate "
+                "(set CTF_AUTO_CONFIRM_FLAGS=1 or pass --auto-confirm-flags).\n"
+            )
+            for stream in (sys.stderr, sys.stdout):
+                print(msg, file=stream, flush=True)
+            return False
+        try:
+            # input() always writes the prompt to stdout — keep it simple and loud.
+            ans = input(">>> Confirm this flag as correct? [y/N]: ").strip().lower()
+        except EOFError:
+            return False
+        ok = ans in ("y", "yes")
+        result = (
+            ">>> Confirmed — counting this flag.\n"
+            if ok
+            else ">>> Rejected by operator — not counting.\n"
+        )
+        for stream in (sys.stderr, sys.stdout):
+            print(result, file=stream, flush=True)
+        return ok
+    finally:
+        _confirm_active = False
 
 
 def accept_flag(
@@ -261,12 +370,13 @@ def accept_flag(
     required: int = 1,
     challenge_dir: str | Path | None = None,
     artifact_flags: Sequence[str] | None = None,
+    human_confirmed: bool = False,
 ) -> tuple[str, bool]:
-    """Validate and accept a flag locally.
+    """Validate a submission; count it only when ``human_confirmed`` is True.
 
     Returns (display_message, challenge_complete).
+    Unconfirmed valid submissions return ``CANDIDATE`` and False.
     ``challenge_complete`` is True only when ``required`` distinct flags are in.
-    Partial accepts return ACCEPTED (n/m) and False so solvers continue.
     """
     f = (flag or "").strip()
     req = normalize_flags_required(required)
@@ -288,13 +398,6 @@ def accept_flag(
             "filename), not the awarded flag. Recover the real flag from challenge logic.",
             False,
         )
-    if not is_plausible_flag(f, artifact_flags=list(artifacts)):
-        return (
-            f'REJECTED "{f}" — does not look like a CTF flag. '
-            "Submit the exact awarded string (PREFIX{...}, PREFIX-..., "
-            "or a compact secret). Do not wrap/rewrite just to pass checks.",
-            False,
-        )
 
     # Already complete — do not accept additional distinct flags.
     if len(prior) >= req:
@@ -309,6 +412,13 @@ def accept_flag(
         return (
             f"Already accepted this flag ({n}/{req}). "
             "Continue and submit the remaining distinct flag(s).",
+            False,
+        )
+
+    if not human_confirmed:
+        return (
+            f'CANDIDATE "{f}" — awaiting human confirmation. '
+            "Do not assume this is correct; keep solving until CORRECT.",
             False,
         )
 

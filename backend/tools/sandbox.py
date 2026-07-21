@@ -15,13 +15,14 @@ from backend.tools.core import (
 )
 
 
-async def bash(ctx: RunContext[SolverDeps], command: str, timeout_seconds: int = 60) -> str:
+async def bash(ctx: RunContext[SolverDeps], command: str, timeout_seconds: int = 300) -> str:
     """Execute a bash command inside the sandboxed Docker container.
 
     Distfiles are at /challenge/distfiles/ (read-only).
     Write generated/repaired files to /challenge/workspace/ (writable).
     Challenge services are reachable via host.docker.internal.
     Run `cat /tools.txt` to see all installed tools.
+    For long jobs (factoring, scans), pass timeout_seconds=300–900+.
     """
     return await do_bash(ctx.deps.sandbox, command, timeout_seconds)
 

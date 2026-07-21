@@ -130,7 +130,7 @@ def build_prompt(
             "For XSS/SSRF: use `webhook_create`."
         )
         submit = "call `submit_flag`"
-        submit_hint = "**Verify every candidate with `submit_flag`** before reporting."
+        submit_hint = "**Submit every candidate with `submit_flag`** (human confirms)."
     else:
         image_hint = "**Images: use `exiftool`, `steghide`, `zsteg`, `strings`, `xxd` via bash.**"
         web_hint = (
@@ -139,17 +139,19 @@ def build_prompt(
         )
         submit = "run `submit_flag '<flag>'`"
         submit_hint = (
-            "**Verify every candidate with `submit_flag '<flag>'`** (bash command) "
-            "before reporting."
+            "**Submit every candidate with `submit_flag '<flag>'`** (bash; human confirms)."
         )
 
     req = normalize_flags_required(getattr(meta, "flags_required", 1))
     if req <= 1:
-        flag_note = f"- When you have a real flag, {submit}. CORRECT ends the run."
+        flag_note = (
+            f"- When you have a candidate answer, {submit} with the exact string. "
+            "A human confirms; CORRECT ends the run."
+        )
     else:
         flag_note = (
             f"- This challenge needs {req} distinct flags. When you find each one, {submit}. "
-            "ACCEPTED (n/m) means continue; only CORRECT (all accepted) ends the run."
+            "A human confirms each. ACCEPTED (n/m) means continue; only CORRECT ends the run."
         )
 
     lines += [
@@ -159,9 +161,10 @@ def build_prompt(
         "- Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.",
         "- Solve from local files and/or any live service. Do not search writeups.",
         "- Ignore decoys (`CTF{flag}`, `CTF{placeholder}`, `*fake_flag*`, `TRYHARDER`).",
+        "- Submit the exact awarded string (any format). Do not rewrite to look like `…{…}`.",
         flag_note,
-        "- Before finishing a turn without CORRECT: briefly state flags found (if any), "
-        "confidence, and the top blocker — even if submit failed.",
+        "- Before finishing a turn without CORRECT: briefly state candidates (if any), "
+        "confidence, and the top blocker — even if submit was rejected.",
         "",
         "## Instructions",
         "**Use tools immediately. Do not describe — execute.**",

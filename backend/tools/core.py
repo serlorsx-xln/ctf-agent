@@ -1,7 +1,11 @@
 """SDK-agnostic tool logic — pure async functions, no Pydantic AI types."""
 
+from __future__ import annotations
+
+import asyncio
 import json
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -17,7 +21,7 @@ def _truncate(text: str, limit: int = MAX_OUTPUT) -> str:
     return head[:limit] + f"\n... [truncated — {len(text)} total chars, {len(lines)} lines]"
 
 
-async def do_bash(sandbox, command: str, timeout_seconds: int = 60) -> str:
+async def do_bash(sandbox, command: str, timeout_seconds: int = 300) -> str:
     from backend.tool_router import (
         infer_pack_from_failure,
         parse_ensure_pack_command,
@@ -122,20 +126,50 @@ async def do_submit_flag(
     already_accepted: list[str] | tuple[str, ...] = (),
     required: int = 1,
     challenge_dir: str | None = None,
+    auto_confirm: bool = False,
+    confirm_fn: Callable[[str], bool] | None = None,
 ) -> tuple[str, bool]:
-    """Accept a flag locally. Returns (display_message, challenge_complete).
+    """Submit a flag locally with human confirmation.
 
-    Plausible non-decoy flags count toward ``required`` (default 1).
+    Returns (display_message, challenge_complete). Hard rejects (empty/decoy/
+    artifact) skip the prompt. Other candidates ask the operator (or
+    ``confirm_fn`` / auto-confirm) before counting toward ``required``.
     ``_challenge_name`` is kept for call-site compatibility / logging only.
-    ``challenge_dir`` enables rejecting Dockerfile ENV / filename artifacts.
     """
-    from backend.flags import accept_flag, normalize_flags_required
+    from backend.flags import (
+        accept_flag,
+        normalize_flags_required,
+        prompt_flag_confirmation,
+    )
 
+    req = normalize_flags_required(required)
+    prior = list(already_accepted)
+    preview, done = accept_flag(
+        flag,
+        already_accepted=prior,
+        required=req,
+        challenge_dir=challenge_dir,
+        human_confirmed=False,
+    )
+    if not preview.startswith("CANDIDATE"):
+        return preview, done
+
+    confirm = confirm_fn or (
+        lambda f: prompt_flag_confirmation(f, auto_confirm=auto_confirm)
+    )
+    ok = await asyncio.to_thread(confirm, (flag or "").strip())
+    if not ok:
+        f = (flag or "").strip()
+        return (
+            f'REJECTED by operator — "{f}" not confirmed. Continue hunting.',
+            False,
+        )
     return accept_flag(
         flag,
-        already_accepted=already_accepted,
-        required=normalize_flags_required(required),
+        already_accepted=prior,
+        required=req,
         challenge_dir=challenge_dir,
+        human_confirmed=True,
     )
 
 
@@ -152,7 +186,7 @@ def _is_internal_url(url: str) -> bool:
             second_octet = int(host.split(".")[1])
             if 16 <= second_octet <= 31:
                 return True
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             pass
     return False
 

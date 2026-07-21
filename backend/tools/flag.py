@@ -8,11 +8,10 @@ from backend.tools.core import do_submit_flag
 
 
 async def submit_flag(ctx: RunContext[SolverDeps], flag: str) -> str:
-    """Submit a recovered flag. Always call this when you have the real flag.
+    """Submit a recovered flag candidate. Always call this when you have one.
 
-    Submit the exact string the challenge awards (PREFIX{...}, FLAG-..., or a
-    compact formatless secret). Do not wrap or rewrite formats just to pass
-    the checker.
+    Submit the exact string the challenge awards — any format. Do not wrap or
+    rewrite just to look like a typical CTF flag. A human confirms correctness.
 
     Returns ACCEPTED (n/m) if more flags are needed, CORRECT when complete,
     or REJECTED. When a swarm already finished, may return ALREADY SOLVED.
@@ -27,6 +26,7 @@ async def submit_flag(ctx: RunContext[SolverDeps], flag: str) -> str:
             already_accepted=list(ctx.deps.accepted_flags),
             required=normalize_flags_required(ctx.deps.flags_required),
             challenge_dir=ctx.deps.challenge_dir,
+            auto_confirm=bool(getattr(ctx.deps, "auto_confirm_flags", False)),
         )
     if is_counted_accept_message(display):
         normalized = flag.strip()

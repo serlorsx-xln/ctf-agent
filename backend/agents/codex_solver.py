@@ -98,7 +98,7 @@ SANDBOX_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Submit a recovered flag. Returns ACCEPTED (n/m) if more needed, CORRECT when complete, or REJECTED.",
+        "description": "Submit a recovered flag candidate (exact string). Human confirms. Returns ACCEPTED (n/m), CORRECT when done, or REJECTED.",
         "inputSchema": {
             "type": "object",
             "properties": {"flag": {"type": "string"}},
@@ -196,7 +196,6 @@ class CodexSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._cost_usd = 0.0
         self._bump_insights: str | None = None
         self._structured_output: dict | None = None
         self._turn_error: str | None = None
@@ -350,7 +349,7 @@ class CodexSolver:
                                 parsed = json.loads(text)
                                 if isinstance(parsed, dict) and "type" in parsed:
                                     self._structured_output = parsed
-                            except json.JSONDecodeError, ValueError:
+                            except (json.JSONDecodeError, ValueError):
                                 pass
                 elif item_type in ("reasoning", "thought", "agentReasoning"):
                     text = item.get("text") or item.get("content") or item.get("summary") or ""
@@ -435,13 +434,11 @@ class CodexSolver:
                     cache_read_tokens=last.get("cachedInputTokens", 0),
                     provider_spec="codex",
                 )
-                agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
-                self._cost_usd = agent_usage.cost_usd if agent_usage else 0.0
+                # Codex reports tokens only — no USD billing field.
                 self.tracer.usage(
                     total.get("inputTokens", 0),
                     total.get("outputTokens", 0),
                     total.get("cachedInputTokens", 0),
-                    self._cost_usd,
                 )
 
     async def _handle_tool_call(self, request_id: int, params: dict) -> None:
@@ -540,6 +537,7 @@ class CodexSolver:
                     already_accepted=list(self._accepted_flags),
                     required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
                     challenge_dir=self.challenge_dir,
+                    auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
                 )
             if (
                 display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
@@ -653,7 +651,8 @@ class CodexSolver:
             status=status,
             findings_summary=self._findings[:2000],
             step_count=self._step_count,
-            cost_usd=self._cost_usd,
+            # Codex does not report USD; leave unknown.
+            cost_usd=0.0,
             log_path=self.tracer.path,
         )
 
@@ -664,7 +663,7 @@ class CodexSolver:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except asyncio.CancelledError, Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._proc:
             try:

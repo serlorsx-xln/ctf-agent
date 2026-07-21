@@ -18,6 +18,7 @@ from backend.solver_base import (
     ERROR,
     FLAG_FOUND,
     GAVE_UP,
+    INFRA_ERROR,
     QUOTA_ERROR,
     SolverProtocol,
     SolverResult,
@@ -28,6 +29,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+# After this many bridge recoveries in one challenge, stop (avoid infinite spin).
+MAX_INFRA_RECOVERIES = 20
+# Short cooldown before recreating a poisoned Cursor agent.
+INFRA_RECOVERY_COOLDOWN_S = 5
 
 # Quota fallback: map subscription-backed providers to API-backed equivalents
 QUOTA_FALLBACK: dict[str, str] = {
@@ -232,12 +238,14 @@ class ChallengeSwarm:
 
             from backend.tools.core import do_submit_flag
 
+            auto = bool(getattr(self.settings, "auto_confirm_flags", False))
             display, is_complete = await do_submit_flag(
                 self.meta.name,
                 flag,
                 already_accepted=list(self.confirmed_flags),
                 required=required,
                 challenge_dir=self.challenge_dir,
+                auto_confirm=auto,
             )
             self._submitted_flags.add(normalized)
 
@@ -279,6 +287,7 @@ class ChallengeSwarm:
         """Inner loop: start → run → bump → run → ..."""
         bump_count = 0
         consecutive_errors = 0
+        infra_recoveries = 0
         result = SolverResult(
             flag=None,
             status=CANCELLED,
@@ -294,10 +303,10 @@ class ChallengeSwarm:
 
             # Only broadcast useful findings — skip errors and broken solvers
             if (
-                result.status not in (ERROR, QUOTA_ERROR)
-                and not (result.step_count == 0 and result.cost_usd == 0)
+                result.status not in (ERROR, QUOTA_ERROR, INFRA_ERROR)
+                and result.step_count > 0
                 and result.findings_summary
-                and not result.findings_summary.startswith(("Error:", "Turn failed:"))
+                and not result.findings_summary.startswith(("Error:", "Turn failed:", "Infra:"))
             ):
                 self.findings[model_spec] = result.findings_summary
                 await self.message_bus.post(model_spec, result.findings_summary[:500])
@@ -365,14 +374,67 @@ class ChallengeSwarm:
                 # No fallback available, treat as error
                 break
 
-            if result.status in (GAVE_UP, ERROR):
-                if result.step_count == 0 and result.cost_usd == 0:
+            # Cursor bridge / transport failures: recreate agent, do not count
+            # toward the consecutive-ERROR give-up limit (session is poisoned).
+            if result.status == INFRA_ERROR:
+                infra_recoveries += 1
+                consecutive_errors = 0
+                if infra_recoveries > MAX_INFRA_RECOVERIES:
                     logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Broken (0 steps, $0) — not bumping"
+                        "[%s/%s] %s infra recoveries — giving up",
+                        self.meta.name,
+                        model_spec,
+                        infra_recoveries,
+                    )
+                    break
+                if result.step_count == 0 and infra_recoveries >= 3:
+                    logger.warning(
+                        "[%s/%s] Infra errors before any progress — giving up",
+                        self.meta.name,
+                        model_spec,
+                    )
+                    break
+                logger.warning(
+                    "[%s/%s] Infra error (%s/%s): %s — recovering session",
+                    self.meta.name,
+                    model_spec,
+                    infra_recoveries,
+                    MAX_INFRA_RECOVERIES,
+                    (result.findings_summary or "")[:160],
+                )
+                try:
+                    await asyncio.wait_for(
+                        self.cancel_event.wait(),
+                        timeout=INFRA_RECOVERY_COOLDOWN_S,
+                    )
+                    break
+                except TimeoutError:
+                    pass
+                insights = self._gather_sibling_insights(model_spec)
+                if hasattr(solver, "recover_session"):
+                    try:
+                        await solver.recover_session(insights)
+                    except Exception as e:
+                        logger.error(
+                            "[%s/%s] Session recover failed: %s",
+                            self.meta.name,
+                            model_spec,
+                            e,
+                            exc_info=True,
+                        )
+                        break
+                else:
+                    solver.bump(insights)
+                continue
+
+            if result.status in (GAVE_UP, ERROR):
+                if result.step_count == 0:
+                    logger.warning(
+                        f"[{self.meta.name}/{model_spec}] Broken (0 steps) — not bumping"
                     )
                     break
 
-                # Track consecutive errors — stop after 3 in a row
+                # Track consecutive non-infra errors — stop after 3 in a row
                 if result.status == ERROR:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:

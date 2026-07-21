@@ -67,17 +67,22 @@ class SolverTracer:
         )
 
     def usage(
-        self, input_tokens: int, output_tokens: int, cache_read: int, cost_usd: float
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read: int,
+        cost_usd: float | None = None,
     ) -> None:
-        self._write(
-            {
-                "type": "usage",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read,
-                "cost_usd": round(cost_usd, 6),
-            }
-        )
+        payload: dict = {
+            "type": "usage",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read,
+        }
+        # Only persist provider-reported USD; omit when unknown.
+        if cost_usd is not None:
+            payload["cost_usd"] = round(cost_usd, 6)
+        self._write(payload)
 
     def event(self, kind: str, **kwargs) -> None:
         self._write({"type": kind, **kwargs})

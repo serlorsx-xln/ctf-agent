@@ -1,0 +1,66 @@
+[
+  {
+    "slug": "chainedrsa",
+    "cat": "crypto",
+    "handout": ["banner_fail", "service", "service.conf", "wrapper"],
+    "image": "archiveooo/pub:chainedrsa",
+    "port": "5003:5000"
+  },
+  {
+    "slug": "barb-metal",
+    "cat": "pwn",
+    "image": "archiveooo/pub:barb-metal",
+    "port": "7828"
+  },
+  {
+    "slug": "pinboooll",
+    "cat": "reversing",
+    "image": "archiveooo/pub:pinboooll",
+    "port": "2003"
+  },
+  {
+    "slug": "nooode",
+    "cat": "web",
+    "image": "nooode-local",
+    "port": "4017",
+    "note": "build from challenges/nooode/Dockerfile.local; flag via spawn-nooode.sh"
+  },
+  {
+    "slug": "shooow-your-shell",
+    "cat": "shellcoding",
+    "image": "archiveooo/pub:shooow-your-shell",
+    "port": "9090"
+  },
+  {
+    "slug": "rorschach",
+    "cat": "ml",
+    "image": "archiveooo/pub:rorschach",
+    "port": "5002:5000"
+  },
+  {
+    "slug": "keml",
+    "cat": "kernel",
+    "image": "archiveooo/pub:keml",
+    "port": "5000"
+  },
+  {
+    "slug": "VeryAndroidoso",
+    "cat": "android",
+    "image": null,
+    "port": null,
+    "note": "offline APK"
+  },
+  {
+    "slug": "bytecoooding",
+    "cat": "golf",
+    "image": "archiveooo/pub:bytecoooding",
+    "port": "5001:5000"
+  },
+  {
+    "slug": "casinooo-life",
+    "cat": "game",
+    "image": "casinooo-life-local",
+    "port": "4080:80",
+    "note": "build from distfiles/bjgame"
+  }
+]

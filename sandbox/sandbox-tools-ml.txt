@@ -1,9 +1,13 @@
 == ML (CPU) ==
+tensorflow           TensorFlow CPU. import tensorflow as tf
+                     Also: import tensorflow.keras as keras
 torch                PyTorch CPU. import torch
-keras                Keras with torch backend.
-                     KERAS_BACKEND=torch is set in the environment after load.
-                     Example: KERAS_BACKEND=torch python3 -c 'import keras'
+keras                Keras 3 (default KERAS_BACKEND=tensorflow after load).
+                     For torch backend: KERAS_BACKEND=torch python3 -c 'import keras'
+tqdm                 Progress bars. import tqdm
+imageio              Image I/O (adversarial / vision CTFs). import imageio
 
 == NOTES ==
-Large download on first use. Prefer CPU wheels; Exit 137 → smaller batch / unload.
+Large download on first use (TensorFlow + torch). Prefer CPU wheels.
+Exit 137 → smaller batch / raise CONTAINER_MEMORY_LIMIT (ml floor is 8g).
 Re-read /challenge/TOOLS.txt after install.

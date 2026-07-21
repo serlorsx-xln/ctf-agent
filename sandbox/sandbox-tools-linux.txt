@@ -2,7 +2,12 @@
 linpeas              Linux privilege-escalation enumerator.
                      linpeas   or   bash /opt/linux-tools/bin/linpeas.sh
 pspy                 Process spy without root. pspy
-ffuf                 Web content discovery. ffuf -u http://HOST/FUZZ -w wordlist
+ffuf                 Web content discovery (wordlist fuzz).
+                     ffuf -u http://HOST/FUZZ -w wordlist
+katana               Web crawler / spider (links from HTML/JS; not headless).
+                     Prefer shallow crawls; write URLs to a file, then head/grep.
+                     katana -u http://HOST/ -d 2 -silent -o /challenge/workspace/urls.txt
+                     head -n 80 /challenge/workspace/urls.txt
 nmap                 Port scan (container-hardened: -Pn -sT). Always set a timeout.
                      Prefer common ports before -p- (filtered labs miss services).
                      nmap -p 22,80,88,135,139,389,443,445,464,593,636,3268,5985 TARGET

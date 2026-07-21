@@ -53,10 +53,14 @@ PROBES: dict[str, str] = {
         "|| ls /opt/RsaCtfTool >/dev/null)"
     ),
     "containers": "command -v podman || command -v buildah",
-    "ml": "KERAS_BACKEND=torch python3 -c 'import torch; import keras; print(torch.__version__)'",
+    "ml": (
+        "python3 -c '"
+        "import tensorflow as tf; import torch; import tqdm; import imageio; import keras; "
+        "print(tf.__version__, torch.__version__)'"
+    ),
     "mobile": "command -v jadx && command -v apktool",
     "linux": (
-        "command -v ffuf && command -v pspy && command -v linpeas "
+        "command -v ffuf && command -v katana && command -v pspy && command -v linpeas "
         "&& command -v smbclient && command -v sshpass && command -v ldapsearch "
         "&& python3 -c 'import impacket,bloodhound' "
         "&& (command -v nxc || command -v netexec) "

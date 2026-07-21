@@ -52,6 +52,11 @@ def _setup_logging(verbose: bool = False) -> None:
 )
 @click.option("--max-challenges", default=10, type=int, help="Max challenges solved concurrently")
 @click.option("--msg-port", default=9400, type=int, help="Operator message port (default 9400)")
+@click.option(
+    "--auto-confirm-flags",
+    is_flag=True,
+    help="Skip interactive flag confirmation (also: CTF_AUTO_CONFIRM_FLAGS=1)",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
     image: str | None,
@@ -62,12 +67,14 @@ def main(
     coordinator: str,
     max_challenges: int,
     msg_port: int,
+    auto_confirm_flags: bool,
     verbose: bool,
 ) -> None:
     """CTF Agent — multi-model solver swarm.
 
-    Flags are accepted locally (no external scoreboard). Run without --challenge
-    to start the full coordinator over challenges/ (Ctrl+C to stop).
+    Flag candidates are confirmed by you locally (no external scoreboard).
+    Run without --challenge to start the full coordinator over challenges/
+    (Ctrl+C to stop).
     """
     _setup_logging(verbose)
 
@@ -78,6 +85,7 @@ def main(
     else:
         settings.sandbox_image_locked = False
     settings.max_concurrent_challenges = max_challenges
+    settings.auto_confirm_flags = auto_confirm_flags or settings.auto_confirm_flags
 
     model_specs = list(models) if models else list(DEFAULT_MODELS)
 
@@ -99,7 +107,10 @@ def main(
             f"  Image: L0 default={settings.sandbox_image} (packs loaded additively per challenge)"
         )
     console.print(f"  Max challenges: {max_challenges}")
-    console.print("  Flag submit: local accept (no external scoreboard)")
+    if settings.auto_confirm_flags:
+        console.print("  Flag submit: local + auto-confirm (no human prompt)")
+    else:
+        console.print("  Flag submit: local + human confirm (y/N on each candidate)")
     console.print()
 
     if challenge:
@@ -178,10 +189,10 @@ async def _run_single(
     if swarm.confirmed_flags and not (result and result.status == FLAG_FOUND):
         console.print(f"[dim]Accepted this run: {' | '.join(swarm.confirmed_flags)}[/dim]")
 
-    console.print("\n[bold]Cost Summary:[/bold]")
+    console.print("\n[bold]Usage Summary:[/bold]")
     for agent_name in cost_tracker.by_agent:
         console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
-    console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
+    console.print(f"  [bold]Total: {cost_tracker.format_total()}[/bold]")
 
 
 async def _run_coordinator(
@@ -235,7 +246,7 @@ async def _run_coordinator(
     console.print("\n[bold]Final Results:[/bold]")
     for challenge, data in results.get("results", {}).items():
         console.print(f"  {challenge}: {data.get('flag', 'no flag')}")
-    console.print(f"\n[bold]Total cost: ${results.get('total_cost_usd', 0):.2f}[/bold]")
+    console.print(f"\n[bold]Total usage: {results.get('usage_summary', 'n/a')}[/bold]")
 
 
 @click.command()

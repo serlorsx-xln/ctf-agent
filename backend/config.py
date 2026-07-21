@@ -27,5 +27,8 @@ class Settings(BaseSettings):
     detected_packs: list[str] = Field(default_factory=list)
     max_concurrent_challenges: int = 10
     container_memory_limit: str = "16g"
+    # When True, skip interactive flag confirmation (tests / unattended).
+    # Also honored via env CTF_AUTO_CONFIRM_FLAGS=1.
+    auto_confirm_flags: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

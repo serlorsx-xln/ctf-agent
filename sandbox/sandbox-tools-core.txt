@@ -10,6 +10,7 @@ bash / curl / wget / git / openssl
 python3 + pwntools + requests + pyelftools + pycryptodome + sympy + z3 + numpy
                        from z3 import *; s=Solver(); s.add(...); s.check()
 file / strings / xxd / binutils (objdump, readelf, nm)
+rg (ripgrep)           Fast recursive search. rg PATTERN [PATH]
 gdb / strace / ltrace
 nc / socat / jq / unzip
 gf128-roots            GF(2^128) poly roots (NIST field used by AES-GCM)

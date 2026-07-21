@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 from backend.deps import CoordinatorDeps
-from backend.flags import accept_flag, is_counted_accept_message, normalize_flags_required
+from backend.flags import is_counted_accept_message, normalize_flags_required
 from backend.solver_base import FLAG_FOUND
 
 logger = logging.getLogger(__name__)
@@ -166,15 +166,20 @@ async def do_submit_flag(deps: CoordinatorDeps, challenge_name: str, flag: str) 
                 swarm.kill()
         return display
 
+    from backend.tools.core import do_submit_flag as local_submit
+
     meta = deps.challenge_metas.get(challenge_name)
     required = normalize_flags_required(getattr(meta, "flags_required", 1) if meta else 1)
     prior = deps.results.get(challenge_name) or {}
     already = list(prior.get("flags") or [])
-    display, complete = accept_flag(
+    auto = bool(getattr(deps.settings, "auto_confirm_flags", False))
+    display, complete = await local_submit(
+        challenge_name,
         flag,
         already_accepted=already,
         required=required,
         challenge_dir=deps.challenge_dirs.get(challenge_name),
+        auto_confirm=auto,
     )
     if complete or is_counted_accept_message(display):
         if is_counted_accept_message(display) and normalized and normalized not in already:
@@ -246,9 +251,12 @@ async def do_read_solver_trace(
                         f"** {t}: {json.dumps({k: v for k, v in d.items() if k != 'ts'})}"
                     )
                 elif t == "usage":
-                    summary.append(
-                        f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)} cost=${d.get('cost_usd', 0):.4f}"
+                    line = (
+                        f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)}"
                     )
+                    if d.get("cost_usd") is not None:
+                        line += f" cost=${d['cost_usd']:.4f} reported"
+                    summary.append(line)
                 else:
                     summary.append(f"{t}: {str(d)[:80]}")
             except Exception:

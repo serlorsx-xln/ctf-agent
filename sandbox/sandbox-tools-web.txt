@@ -3,9 +3,11 @@ nmap                 Port / service scan. nmap -sV host
 sqlmap               Automated SQL injection. sqlmap -u 'http://HOST/?id=1' --batch
 flask                Quick HTTP listeners for callbacks
 PyJWT                JWT encode/decode. import jwt
-ffuf                 Content discovery — run `ffuf` and the sandbox will install
-                     it on first use if missing.
+ffuf                 Content discovery (wordlist) — first use pulls the linux pack.
                      ffuf -u http://HOST/FUZZ -w wordlist
+katana               Web crawler / spider — first use pulls the linux pack.
+                     katana -u http://HOST/ -d 2 -silent -o /challenge/workspace/urls.txt
+                     Prefer shallow depth; inspect the file (do not dump huge lists).
 
 == NOTES ==
 Loaded on demand. curl / wget / nc / requests are already on the base image.

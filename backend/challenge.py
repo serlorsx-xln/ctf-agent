@@ -123,16 +123,33 @@ def list_attachment_names(challenge_dir: str | Path) -> list[str]:
     return sorted(names)
 
 
+# Hosts that appear in challenge writeups / archive pages but are not the service.
+_DOC_HOST_FRAGMENTS = (
+    "archive.ooo",
+    "ctftime.org",
+    "github.com",
+    "githubusercontent.com",
+    "gitlab.com",
+    "defcon.org",
+    "scoreboard",
+    "oooverflow.io",
+    "hub.docker.com",
+    "docker.io",
+    "amazonaws.com",
+    "web.archive.org",
+)
+
+
+def _is_doc_url(url: str) -> bool:
+    low = url.lower()
+    return any(h in low for h in _DOC_HOST_FRAGMENTS)
+
+
 def guess_connection(text: str) -> str:
     """Extract an endpoint mention from pasted text — no site-specific assumptions."""
     if not text:
         return ""
-    m = _HTTP_URL.search(text)
-    if m:
-        url = m.group(0).rstrip(".,;)")
-        # Scope lines like https://lab.example/* → base URL
-        url = re.sub(r"/\*$", "", url)
-        return url
+    # Prefer explicit connect/nc lines over incidental Source:/writeup URLs.
     m = _NC_LINE.search(text)
     if m:
         return f"nc {m.group(1)} {m.group(2)}"
@@ -140,6 +157,13 @@ def guess_connection(text: str) -> str:
     if m:
         # Protocol undecided — agent chooses from context.
         return f"{m.group(1)}:{m.group(2)}"
+    for m in _HTTP_URL.finditer(text):
+        url = m.group(0).rstrip(".,;)")
+        # Scope lines like https://lab.example/* → base URL
+        url = re.sub(r"/\*$", "", url)
+        if _is_doc_url(url):
+            continue
+        return url
     return ""
 
 

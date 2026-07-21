@@ -247,6 +247,7 @@ PACK_SPECS: dict[str, PackSpec] = {
         gems=("evil-winrm",),
         symlinks=(
             ("/usr/local/bin/ffuf", "/opt/linux-tools/bin/ffuf"),
+            ("/usr/local/bin/katana", "/opt/linux-tools/bin/katana"),
             ("/usr/local/bin/pspy", "/opt/linux-tools/bin/pspy"),
             ("/usr/local/bin/linpeas", "/opt/linux-tools/bin/linpeas"),
         ),
@@ -270,7 +271,7 @@ PACK_SPECS: dict[str, PackSpec] = {
     "web": PackSpec(
         image="ctf-sandbox-core",
         paths=(),
-        # ffuf lives in the linux donor (/opt/linux-tools); first `ffuf` use
+        # ffuf/katana live in the linux donor (/opt/linux-tools); first use
         # auto-ensures that pack. sqlmap covers SQLi without pulling AD stack.
         apt=("nmap", "sqlmap"),
         pip=("flask", "PyJWT"),
@@ -278,7 +279,7 @@ PACK_SPECS: dict[str, PackSpec] = {
     "ml": PackSpec(
         image="ctf-sandbox-core",
         paths=(),
-        # torch/keras installed in bootstrap_script (CPU index URL).
+        # torch + tensorflow + keras/tqdm/imageio via bootstrap_script.
         pip=(),
     ),
     "containers": PackSpec(
@@ -377,6 +378,7 @@ TOOL_TO_PACK: dict[str, str] = {
     "linpeas.sh": "linux",
     "pspy": "linux",
     "ffuf": "linux",
+    "katana": "linux",
     "smbclient": "linux",
     "sshpass": "linux",
     "ssh": "linux",
@@ -422,7 +424,8 @@ _PACK_PRIORITY = (
 )
 
 _MOBILE_SUFFIXES = {".apk", ".aab", ".ipa", ".xapk"}
-_MOBILE_NAMES = {"libapp.so", "libflutter.so", "classes.dex", "androidmanifest.xml"}
+# Omit AndroidManifest.xml alone — vendored trees (e.g. Golly) false-positive often.
+_MOBILE_NAMES = {"libapp.so", "libflutter.so", "classes.dex"}
 _CRYPTO_SUFFIXES = {".sage"}
 _CRYPTO_NAMES: set[str] = set()
 _FORENSICS_SUFFIXES = {
@@ -483,6 +486,9 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "jwt": "web",
     "torch": "ml",
     "keras": "ml",
+    "tensorflow": "ml",
+    "tqdm": "ml",
+    "imageio": "ml",
     "impacket": "linux",
     "bloodhound": "linux",
 }
@@ -523,7 +529,7 @@ def parse_memory_bytes(limit: str) -> int:
         if s.endswith("k"):
             return int(float(s[:-1]) * 1024)
         return int(s)
-    except ValueError, IndexError:
+    except (ValueError, IndexError):
         return 0
 
 
@@ -737,6 +743,33 @@ def _wants_linux_remote_pack(text: str) -> bool:
     return has_ip and has_flags and has_creds
 
 
+_ML_IMPORT_RE = re.compile(
+    r"^\s*(?:from|import)\s+(tensorflow|torch|keras|sklearn)(?:\.|\s|$)",
+    re.MULTILINE,
+)
+_ML_TEXT_RE = re.compile(
+    r"\b(tensorflow|pytorch|\btorch\b|keras|neural\s+net|"
+    r"machine\s+learning|adversarial\s+neural)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_ml_pack(challenge_dir: Path, text: str, files: list[Path]) -> bool:
+    """Prefetch ML when challenge text or Python imports need TF/torch/keras."""
+    if text and _ML_TEXT_RE.search(text):
+        return True
+    for path in files:
+        if path.suffix.lower() != ".py":
+            continue
+        try:
+            sample = path.read_text(encoding="utf-8", errors="replace")[:200_000]
+        except OSError:
+            continue
+        if _ML_IMPORT_RE.search(sample):
+            return True
+    return False
+
+
 def detect_packs(challenge_dir: str | Path) -> list[str]:
     """Heuristic pack detection from challenge files (prefetch).
 
@@ -745,8 +778,9 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
     """
     root = Path(challenge_dir)
     packs: set[str] = set()
+    files = _iter_challenge_files(root)
 
-    for path in _iter_challenge_files(root):
+    for path in files:
         name = path.name.lower()
         suffix = path.suffix.lower()
 
@@ -768,7 +802,11 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
             packs.add("ml")
 
         if name in _CONTAINER_NAMES:
-            packs.add("containers")
+            # Many CTF repos ship service/Dockerfile; only prefetch the
+            # containers pack for top-level compose/Dockerfile (DinD-style).
+            rel_parts = path.relative_to(root).parts
+            if len(rel_parts) <= 2:
+                packs.add("containers")
 
         if (
             (_looks_like_elf(path) and name not in _MOBILE_NAMES and suffix not in {".so"})
@@ -778,8 +816,37 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
             packs.add("pwn")
             packs.add("ghidra")
 
-    if _wants_linux_remote_pack(_challenge_text(root)):
+    text = _challenge_text(root)
+    if _wants_linux_remote_pack(text):
         packs.add("linux")
+    if _wants_ml_pack(root, text, files):
+        packs.add("ml")
+    # Explicit Tags: line in challenge.txt (low noise).
+    tag_line = re.search(r"(?im)^\s*tags\s*:\s*(.+)$", text or "")
+    tags: set[str] = set()
+    if tag_line:
+        tags = {t.strip().lower() for t in re.split(r"[,/|]", tag_line.group(1))}
+        if "crypto" in tags:
+            packs.add("crypto")
+        if "ml" in tags or "machine-learning" in tags:
+            packs.add("ml")
+        if "web" in tags:
+            packs.add("web")
+        if "android" in tags or "mobile" in tags:
+            packs.add("mobile")
+        if "pwn" in tags or "shellcoding" in tags:
+            packs.add("pwn")
+
+    # ELF handouts always suggest ghidra; do not also force-prefetch the heavy
+    # pwn apt/pip stack for crypto/rev-tagged challenges (angr/qemu still load
+    # on demand when the agent actually needs them).
+    if (
+        "pwn" in packs
+        and "crypto" in tags
+        and "pwn" not in tags
+        and "shellcoding" not in tags
+    ):
+        packs.discard("pwn")
 
     return [p for p in _PACK_PRIORITY if p in packs]
 
@@ -876,14 +943,24 @@ def bootstrap_script(pack_id: str) -> str:
     ]
     if spec.apt:
         pkgs = " ".join(shlex.quote(p) for p in spec.apt)
+        # Skip apt-get update when every package is already installed — the slow
+        # path on Mac/amd64 emulation is usually "apt-get update", not install.
+        dpkg_ok = " && ".join(
+            f"dpkg -s {shlex.quote(p)} >/dev/null 2>&1" for p in spec.apt
+        )
         lines += [
-            "apt-get update -qq || true",
-            f"apt-get install -y --no-install-recommends {pkgs} || true",
+            f"if {dpkg_ok}; then",
+            "  echo 'apt packages already present; skipping apt-get'",
+            "else",
+            "  apt-get update -qq || true",
+            f"  apt-get install -y --no-install-recommends {pkgs} || true",
+            "fi",
         ]
     if spec.pip:
         pkgs = " ".join(shlex.quote(p) for p in spec.pip)
         lines += [
             "PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+            # Prefer a no-op when satisfied — still cheap vs apt-get update.
             f"$PIP3 install --no-cache-dir --break-system-packages {pkgs} "
             f"|| $PIP3 install --no-cache-dir {pkgs} || true",
         ]
@@ -985,18 +1062,25 @@ def bootstrap_script(pack_id: str) -> str:
     if pack_id == "ml":
         lines += [
             "PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+            # PyTorch CPU (existing path).
             "$PIP3 install --no-cache-dir --break-system-packages "
             "--ignore-installed sympy "
             "torch --index-url https://download.pytorch.org/whl/cpu "
             "|| $PIP3 install --no-cache-dir torch "
             "--index-url https://download.pytorch.org/whl/cpu || true",
+            # TensorFlow + common CTF/ML helpers (ANC / adversarial / notebooks).
+            "$PIP3 install --no-cache-dir --break-system-packages "
+            "tensorflow tqdm imageio "
+            "|| $PIP3 install --no-cache-dir tensorflow tqdm imageio || true",
             "$PIP3 install --no-cache-dir --break-system-packages keras "
             "|| $PIP3 install --no-cache-dir keras || true",
-            # Keras 3 defaults to TensorFlow; we ship torch only.
-            "printf '%s\\n' 'export KERAS_BACKEND=torch' "
+            # Prefer TF for `import keras` (matches many DEF CON / archive challenges).
+            # Torch remains available via `import torch`; override with KERAS_BACKEND=torch.
+            "printf '%s\\n' 'export KERAS_BACKEND=tensorflow' "
             "> /etc/profile.d/ctf-keras-backend.sh || true",
-            "grep -q KERAS_BACKEND /etc/environment 2>/dev/null || "
-            "echo KERAS_BACKEND=torch >> /etc/environment || true",
+            "if grep -q '^KERAS_BACKEND=' /etc/environment 2>/dev/null; then "
+            "sed -i 's/^KERAS_BACKEND=.*/KERAS_BACKEND=tensorflow/' /etc/environment; "
+            "else echo KERAS_BACKEND=tensorflow >> /etc/environment; fi || true",
         ]
     if pack_id == "linux":
         lines += [
@@ -1109,6 +1193,7 @@ def infer_pack_from_command(command: str) -> str | None:
         "linpeas" in low_cmd
         or "pspy" in low_cmd
         or "ffuf" in low_cmd
+        or "katana" in low_cmd
         or "impacket" in low_cmd
         or "evil-winrm" in low_cmd
         or "smbclient" in low_cmd
@@ -1120,7 +1205,13 @@ def infer_pack_from_command(command: str) -> str | None:
         or "bloodhound" in low_cmd
     ):
         return "linux"
-    if "import torch" in low_cmd or "import keras" in low_cmd:
+    if (
+        "import torch" in low_cmd
+        or "import keras" in low_cmd
+        or "import tensorflow" in low_cmd
+        or "import tqdm" in low_cmd
+        or "import imageio" in low_cmd
+    ):
         return "ml"
     if "podman" in low_cmd or "buildah" in low_cmd:
         return "containers"

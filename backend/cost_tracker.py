@@ -1,4 +1,8 @@
-"""Per-agent cost tracking using genai-prices."""
+"""Per-agent token usage tracking.
+
+USD is recorded only when a provider/SDK reports it (e.g. Claude Agent SDK
+``total_cost_usd``). There is no local price table and no estimated billing.
+"""
 
 from __future__ import annotations
 
@@ -6,107 +10,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from genai_prices import calc_price
 from pydantic_ai.usage import RunUsage
 
 logger = logging.getLogger(__name__)
-
-# Provider ID mapping for genai-prices
-PROVIDER_MAP: dict[str, str] = {
-    "bedrock": "anthropic",
-    "claude-sdk": "anthropic",
-    "azure": "openai",
-    "zen": "openai",
-    "codex": "openai",
-    "google": "google",
-    "cursor": "cursor",
-}
-
-# Fallback pricing for models not in genai-prices (per 1M tokens, USD)
-FALLBACK_PRICING: dict[str, dict[str, float]] = {
-    "us.anthropic.claude-opus-4-6-v1": {
-        "input": 5.00,
-        "cached_input": 0.50,
-        "output": 25.00,
-    },
-    "claude-opus-4-6": {
-        "input": 5.00,
-        "cached_input": 0.50,
-        "output": 25.00,
-    },
-    "gpt-5.4-mini": {
-        "input": 0.75,
-        "cached_input": 0.075,
-        "output": 4.50,
-    },
-    "gpt-5.4": {
-        "input": 2.50,
-        "cached_input": 0.25,
-        "output": 15.00,
-    },
-    "gpt-5.3-codex": {
-        "input": 1.75,
-        "cached_input": 0.175,
-        "output": 14.00,
-    },
-    "gpt-5.3-codex-spark": {
-        "input": 0.50,
-        "cached_input": 0.05,
-        "output": 2.00,
-    },
-    "gemini-3-flash-preview": {
-        "input": 0.15,
-        "cached_input": 0.02,
-        "output": 0.60,
-    },
-    # Cursor usage is billed via Cursor; keep a rough estimate for local tallies.
-    "composer-2.5": {
-        "input": 1.25,
-        "cached_input": 0.125,
-        "output": 10.00,
-    },
-    "auto": {
-        "input": 1.25,
-        "cached_input": 0.125,
-        "output": 10.00,
-    },
-}
-
-
-def _calc_fallback_cost(usage: RunUsage, model: str) -> float | None:
-    pricing = FALLBACK_PRICING.get(model)
-    if not pricing:
-        return None
-    input_rate = pricing.get("input", 0)
-    cached_rate = pricing.get("cached_input", input_rate)
-    output_rate = pricing.get("output", 0)
-    uncached = max(0, usage.input_tokens - usage.cache_read_tokens)
-    return (
-        (uncached * input_rate) / 1_000_000
-        + (usage.cache_read_tokens * cached_rate) / 1_000_000
-        + (usage.output_tokens * output_rate) / 1_000_000
-    )
-
-
-def calc_cost(usage: RunUsage, model_name: str, provider_spec: str = "") -> float:
-    """Calculate cost using genai-prices with fallback."""
-    if not usage.has_values():
-        return 0.0
-
-    provider_id = PROVIDER_MAP.get(provider_spec, "unknown")
-
-    try:
-        price = calc_price(usage, model_name, provider_id=provider_id)
-        return float(price.total_price)
-    except Exception:
-        pass
-
-    fallback = _calc_fallback_cost(usage, model_name)
-    if fallback is not None:
-        return fallback
-
-    logger.warning(f"Could not calculate cost for {model_name}")
-    return 0.0
 
 
 def _fmt_tokens(n: int) -> str:
@@ -118,7 +24,6 @@ def _fmt_tokens(n: int) -> str:
 
 
 def _cache_rate(usage: RunUsage) -> str:
-    """Compute cache hit rate as a percentage string."""
     if usage.input_tokens == 0:
         return "n/a"
     rate = (usage.cache_read_tokens / usage.input_tokens) * 100
@@ -131,7 +36,17 @@ class AgentUsage:
     model_name: str = ""
     provider_spec: str = ""
     duration_seconds: float = 0.0
-    cost_usd: float = 0.0
+    # Sum of provider-reported USD only. None until a provider reports a value.
+    reported_cost_usd: float | None = None
+
+    @property
+    def cost_usd(self) -> float:
+        """Provider-reported USD, or 0.0 when none was reported."""
+        return self.reported_cost_usd if self.reported_cost_usd is not None else 0.0
+
+    @property
+    def has_reported_cost(self) -> bool:
+        return self.reported_cost_usd is not None
 
 
 @dataclass
@@ -147,14 +62,22 @@ class CostTracker:
         cache_read_tokens: int = 0,
         provider_spec: str = "",
         duration_seconds: float = 0.0,
+        reported_cost_usd: float | None = None,
     ) -> None:
-        """Record token usage without requiring pydantic_ai.RunUsage."""
+        """Record token usage; optionally attach provider-reported USD."""
         usage = RunUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
         )
-        self.record(agent_name, usage, model_name, provider_spec, duration_seconds)
+        self.record(
+            agent_name,
+            usage,
+            model_name,
+            provider_spec=provider_spec,
+            duration_seconds=duration_seconds,
+            reported_cost_usd=reported_cost_usd,
+        )
 
     def record(
         self,
@@ -163,9 +86,8 @@ class CostTracker:
         model_name: str,
         provider_spec: str = "",
         duration_seconds: float = 0.0,
+        reported_cost_usd: float | None = None,
     ) -> None:
-        cost = calc_cost(usage, model_name, provider_spec)
-
         if agent_name not in self.by_agent:
             self.by_agent[agent_name] = AgentUsage(
                 model_name=model_name, provider_spec=provider_spec
@@ -174,18 +96,37 @@ class CostTracker:
         agent = self.by_agent[agent_name]
         agent.usage += usage
         agent.duration_seconds += duration_seconds
-        agent.cost_usd += cost
+        if reported_cost_usd is not None:
+            prev = agent.reported_cost_usd or 0.0
+            agent.reported_cost_usd = prev + float(reported_cost_usd)
 
-        # Log per-step with cache rate (f-string avoids Rich handler % formatting issues)
+        cost_note = (
+            f" | ${reported_cost_usd:.4f} reported"
+            if reported_cost_usd is not None
+            else ""
+        )
         logger.debug(
             f"{agent_name}: {_fmt_tokens(usage.input_tokens)} in / "
             f"{_fmt_tokens(usage.cache_read_tokens)} cached ({_cache_rate(usage)} hit) / "
-            f"{_fmt_tokens(usage.output_tokens)} out | ${cost:.4f} | {duration_seconds:.1f}s"
+            f"{_fmt_tokens(usage.output_tokens)} out | {duration_seconds:.1f}s{cost_note}"
         )
 
     @property
+    def total_reported_cost_usd(self) -> float | None:
+        """Sum of provider-reported USD, or None if no provider reported cost."""
+        total = 0.0
+        any_reported = False
+        for agent in self.by_agent.values():
+            if agent.reported_cost_usd is not None:
+                total += agent.reported_cost_usd
+                any_reported = True
+        return total if any_reported else None
+
+    @property
     def total_cost_usd(self) -> float:
-        return sum(a.cost_usd for a in self.by_agent.values())
+        """Backward-compatible: reported USD sum, else 0.0 (unknown ≠ free)."""
+        reported = self.total_reported_cost_usd
+        return reported if reported is not None else 0.0
 
     @property
     def total_tokens(self) -> int:
@@ -194,30 +135,57 @@ class CostTracker:
             total += a.usage
         return total.total_tokens
 
+    @property
+    def total_duration_seconds(self) -> float:
+        return sum(a.duration_seconds for a in self.by_agent.values())
+
     def format_usage(self, agent_name: str) -> str:
-        """Format: '45k in / 32k cached (71% hit) / 2.1k out | $0.05 | 28.3s'"""
+        """Format: '45k in / 32k cached (71% hit) / 2.1k out | 28.3s' (+ reported $)."""
         agent = self.by_agent.get(agent_name)
         if not agent:
             return ""
         u = agent.usage
-        return (
+        parts = [
             f"{_fmt_tokens(u.input_tokens)} in / "
             f"{_fmt_tokens(u.cache_read_tokens)} cached ({_cache_rate(u)} hit) / "
-            f"{_fmt_tokens(u.output_tokens)} out | "
-            f"${agent.cost_usd:.2f} | "
-            f"{agent.duration_seconds:.1f}s"
-        )
+            f"{_fmt_tokens(u.output_tokens)} out",
+            f"{agent.duration_seconds:.1f}s",
+        ]
+        if agent.has_reported_cost:
+            parts.append(f"${agent.cost_usd:.2f} reported")
+        return " | ".join(parts)
+
+    def format_total(self) -> str:
+        """One-line total for CLI / coordinator status."""
+        parts = [
+            f"{_fmt_tokens(self.total_tokens)} tokens",
+            f"{self.total_duration_seconds:.1f}s",
+        ]
+        reported = self.total_reported_cost_usd
+        if reported is not None:
+            parts.append(f"${reported:.2f} reported")
+        return " | ".join(parts)
 
     def get_usage_by_model(self) -> dict[str, dict[str, Any]]:
         by_model: dict[str, dict[str, Any]] = {}
         for agent in self.by_agent.values():
             model = agent.model_name
             if model not in by_model:
-                by_model[model] = {"cost": 0.0, "input": 0, "cached": 0, "output": 0}
-            by_model[model]["cost"] += agent.cost_usd
-            by_model[model]["input"] += agent.usage.input_tokens
-            by_model[model]["cached"] += agent.usage.cache_read_tokens
-            by_model[model]["output"] += agent.usage.output_tokens
+                by_model[model] = {
+                    "input": 0,
+                    "cached": 0,
+                    "output": 0,
+                    "duration": 0.0,
+                    "reported_cost": None,
+                }
+            row = by_model[model]
+            row["input"] += agent.usage.input_tokens
+            row["cached"] += agent.usage.cache_read_tokens
+            row["output"] += agent.usage.output_tokens
+            row["duration"] += agent.duration_seconds
+            if agent.reported_cost_usd is not None:
+                prev = row["reported_cost"] or 0.0
+                row["reported_cost"] = prev + agent.reported_cost_usd
         return by_model
 
     def log_summary(self) -> None:
@@ -225,21 +193,26 @@ class CostTracker:
         by_model = self.get_usage_by_model()
         for model, s in by_model.items():
             hit_rate = f"{(s['cached'] / s['input'] * 100):.0f}%" if s["input"] > 0 else "n/a"
+            cost_note = (
+                f" | ${s['reported_cost']:.2f} reported"
+                if s["reported_cost"] is not None
+                else ""
+            )
             logger.info(
-                "  %s: $%.2f | %s in / %s cached (%s hit) / %s out",
+                "  %s: %s in / %s cached (%s hit) / %s out | %.1fs%s",
                 model,
-                s["cost"],
                 _fmt_tokens(s["input"]),
                 _fmt_tokens(s["cached"]),
                 hit_rate,
                 _fmt_tokens(s["output"]),
+                s["duration"],
+                cost_note,
             )
         total = sum(s["input"] for s in by_model.values())
         total_cached = sum(s["cached"] for s in by_model.values())
         overall_hit = f"{(total_cached / total * 100):.0f}%" if total > 0 else "n/a"
         logger.info(
-            "  Total: $%.2f | %s tokens | %s overall cache hit rate",
-            self.total_cost_usd,
-            _fmt_tokens(self.total_tokens),
+            "  Total: %s | %s overall cache hit rate",
+            self.format_total(),
             overall_hit,
         )
