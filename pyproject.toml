@@ -1,7 +1,7 @@
 [project]
-name = "ctf-agent-two"
+name = "artemis"
 version = "0.1.0"
-description = "CTF agent v2 — multi-model solver swarm"
+description = "Artemis — multi-model CTF solver swarm"
 requires-python = ">=3.14"
 dependencies = [
     "pydantic-ai[bedrock,openai,google]",
@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
+artemis = "backend.cli:main"
 ctf-solve = "backend.cli:main"
 ctf-msg = "backend.cli:msg"
 

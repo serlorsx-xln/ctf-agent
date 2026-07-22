@@ -109,7 +109,7 @@ def main(
     eval_strict_packs: bool,
     verbose: bool,
 ) -> None:
-    """CTF Agent — multi-model solver swarm.
+    """Artemis — multi-model CTF solver swarm.
 
     Flag candidates are confirmed by you locally (no external scoreboard).
     Run without --challenge to start the full coordinator over challenges/
@@ -142,7 +142,7 @@ def main(
 
         model_specs = expand_model_cli_args(list(models))
 
-    console.print("[bold]CTF Agent[/bold]")
+    console.print("[bold]Artemis[/bold]")
     console.print(f"  Models: {', '.join(model_specs)}")
     if image:
         console.print(f"  Image: {settings.sandbox_image} (forced via --image)")

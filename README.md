@@ -1,16 +1,16 @@
-# CTF Agent
+# Artemis
 
-Autonomous CTF (Capture The Flag) solver that races multiple AI models against challenges in parallel. Built in a weekend, we used it to solve all 52/52 challenges and win **1st place at BSidesSF 2026 CTF**.
+Multi-model CTF solver swarm: race several AI models against a challenge in parallel, each in an isolated Docker sandbox with CTF tooling.
 
-Built by [Veria Labs](https://verialabs.com), founded by members of [.;,;.](https://ctftime.org/team/222911) (smiley), the [#1 US CTF team on CTFTime in 2024 and 2025](https://ctftime.org/stats/2024/US). We build AI agents that find and exploit real security vulnerabilities for large enterprises.
+Forked from [Veria Labs](https://verialabs.com) [CTF Agent](https://github.com/verialabs/ctf-agent) (BSidesSF 2026: 52/52, 1st place). Artemis keeps the race harness and extends it (Cursor backend, lazy packs, local flag confirm / sealed eval).
 
-## Results
+## Results (upstream Veria)
 
 | Competition | Challenges Solved | Result |
 |-------------|:-:|--------|
 | **BSidesSF 2026** | 52/52 (100%) | **1st place ($1,500)** |
 
-The agent solves challenges across all categories — pwn, rev, crypto, forensics, web, and misc.
+Solves across pwn, rev, crypto, forensics, web, and misc.
 
 ## How It Works
 
@@ -77,10 +77,11 @@ cp .env.example .env
 # Drop a challenge folder, then solve:
 #   challenges/my-chal/challenge.txt   ← paste from the CTF page
 #   challenges/my-chal/...files...     ← attachments (or under distfiles/)
-uv run ctf-solve --challenge ./challenges/my-chal --models cursor/composer-2.5 -v
+uv run artemis --challenge ./challenges/my-chal --models cursor/composer-2.5 -v
+# alias: uv run ctf-solve …
 
 # Harder challenges (same key / other backends):
-# uv run ctf-solve --challenge ./challenges/my-chal --models cursor/claude-4-sonnet -v
+# uv run artemis --challenge ./challenges/my-chal --models cursor/claude-4-sonnet -v
 ```
 
 L0 includes common helpers (see `/challenge/TOOLS.txt`). Packs load additively
@@ -92,20 +93,20 @@ playbook.
 Coordinator over all local challenges:
 
 ```bash
-uv run ctf-solve --challenges-dir challenges --max-challenges 10 -v
+uv run artemis --challenges-dir challenges --max-challenges 10 -v
 ```
 
 ## Coordinator Backends
 
 ```bash
 # Cursor SDK coordinator (default) — uses CURSOR_API_KEY
-uv run ctf-solve --coordinator cursor --coordinator-model composer-2.5 ...
+uv run artemis --coordinator cursor --coordinator-model composer-2.5 ...
 
 # Claude SDK coordinator
-uv run ctf-solve --coordinator claude ...
+uv run artemis --coordinator claude ...
 
 # Codex coordinator (GPT-5.4 via JSON-RPC)
-uv run ctf-solve --coordinator codex ...
+uv run artemis --coordinator codex ...
 ```
 
 ## Solver Models
