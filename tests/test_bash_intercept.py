@@ -1,9 +1,12 @@
 """Unit tests for Claude bash harness verb extraction."""
 
 from backend.bash_intercept import (
+    SUBMIT_EXPANSION_ERROR,
+    SUBMIT_UNPARSED_ERROR,
     extract_notify_coordinator,
     extract_submit_flag,
     parse_submit_flag,
+    submit_flag_attempted,
     submit_flag_suffix,
 )
 
@@ -28,6 +31,7 @@ def test_submit_flag_after_semicolon():
 def test_submit_flag_not_present():
     assert extract_submit_flag("echo submit_flag is a tool") is None
     assert extract_submit_flag("ls /challenge") is None
+    assert not submit_flag_attempted("echo submit_flag is a tool")
 
 
 def test_submit_flag_shell_expansion_not_literal():
@@ -36,6 +40,40 @@ def test_submit_flag_shell_expansion_not_literal():
     assert parsed is not None and parsed.has_expansion
     parsed2 = parse_submit_flag("submit_flag $(cat /tmp/f)")
     assert parsed2 is not None and parsed2.has_expansion
+
+
+def test_submit_flag_dollar_var_is_expansion():
+    parsed = parse_submit_flag('submit_flag "$f"')
+    assert parsed is not None
+    assert parsed.has_expansion
+    assert extract_submit_flag('submit_flag "$f"') is None
+    assert SUBMIT_EXPANSION_ERROR.startswith("ERROR:")
+
+
+def test_submit_flag_with_redirect_and_pipe():
+    cmd = (
+        'cd /challenge/workspace && for f in "v1t{abc}" "70aa"; do '
+        'echo "trying: $f"; submit_flag "$f" 2>&1 | head -2; done'
+    )
+    parsed = parse_submit_flag(cmd)
+    assert parsed is not None
+    assert parsed.has_expansion
+    assert parsed.value == "$f"
+
+
+def test_submit_flag_literal_with_redirect():
+    cmd = 'submit_flag "v1t{real_flag_here}" 2>&1 | head -2'
+    assert extract_submit_flag(cmd) == "v1t{real_flag_here}"
+    parsed = parse_submit_flag(cmd)
+    assert parsed is not None
+    assert submit_flag_suffix(cmd, parsed) == ""
+
+
+def test_submit_flag_attempted_unparsed_loop_without_arg():
+    # bare submit_flag with no args still counts as an attempt
+    assert submit_flag_attempted("submit_flag")
+    assert parse_submit_flag("submit_flag") is None
+    assert SUBMIT_UNPARSED_ERROR.startswith("ERROR:")
 
 
 def test_submit_flag_suffix_kept():

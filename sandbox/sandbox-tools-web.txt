@@ -3,6 +3,13 @@ nmap                 Port / service scan. nmap -sV host
 sqlmap               Automated SQL injection. sqlmap -u 'http://HOST/?id=1' --batch
 flask                Quick HTTP listeners for callbacks
 PyJWT                JWT encode/decode. import jwt
+nodejs / npm         Run JS harnesses (Emscripten glue, local servers, WASM drivers).
+                     node script.mjs
+                     npm install <pkg>   # only if needed in workspace
+wabt                 WebAssembly Binary Toolkit.
+                     wasm2wat vault.wasm -o vault.wat
+                     wasm-decompile vault.wasm -o vault.dcmp
+                     wasm-objdump -x vault.wasm
 ffuf                 Content discovery (wordlist) — first use pulls the linux pack.
                      ffuf -u http://HOST/FUZZ -w wordlist
 katana               Web crawler / spider — first use pulls the linux pack.

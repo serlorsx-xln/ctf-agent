@@ -14,7 +14,7 @@
 | 3 L2 Kali | ยังไม่ |
 | 4 L3 cloud | ยังไม่ |
 
-โค้ดหลัก: `backend/tool_router.py`, `backend/sandbox.py` (`ensure_pack`), `sandbox/Dockerfile.core`  
+โค้ดหลัก: `backend/tool_router.py`, `backend/sandbox/` (`ensure_pack`, governor, packs), `sandbox/Dockerfile.core`  
 Cache: `~/.cache/ctf-agent/packs/` (หรือ `CTF_PACK_CACHE`)
 
 นี่คือทางที่ **ดีกว่านี้ไม่ได้ภายใต้ข้อจำกัดผลิตภัณฑ์ปัจจุบัน**  
@@ -149,13 +149,15 @@ Agent **ไม่ต้องรู้** ว่าคำสั่งไป L1/L2
 
 | Pack ID | หมวด | เนื้อหาหลัก (ตัวอย่าง) |
 |---------|------|-------------------------|
-| `pwn` | binary exploitation | qemu-user-static, gef/pwndbg, one_gadget, patchelf, seccomp-tools, ROPgadget, r2 (ถ้าไม่ได้อยู่ใน core) |
-| `crypto` | cryptography | sagemath หรือ sage-lite + fpylll / ที่จำเป็นต่อ LWE-CVP |
-| `web` | web | nmap, sqlmap, flask, PyJWT (apt/pip pack — no heavy browser stack) |
-| `rev` | reverse engineering | ghidra headless หรือ rizin เต็ม, radare2 plugins |
-| `mobile` | Android/iOS CTF | jadx, apktool, uber-apk-signer, **blutter** (หรือ prebuilt ตาม Dart snapshot hash), frida-tools |
-| `forensics` | forensics / stego | binwalk, foremost, steghide, exiftool, tesseract, sleuthkit (เลือกย่อยได้) |
-| `osint` | misc/osint | เครื่องมือเบาเฉพาะทาง (optional) |
+| `pwn` | binary exploitation | qemu-user-static, gef, one_gadget, patchelf, seccomp-tools, ROPgadget, r2 |
+| `crypto` | cryptography | SageMath donor + L0 crypto helpers |
+| `web` | web | nmap, sqlmap, flask, PyJWT, nodejs/wabt (apt/pip on L0 — no heavy browser stack) |
+| `ghidra` | reverse engineering | Ghidra headless / PyGhidra donor |
+| `mobile` | Android/iOS CTF | jadx, apktool, blutter, frida-tools |
+| `steg` | steganography / media | steghide, stegseek donor, zsteg, exiftool, tesseract |
+| `forensics` | forensics / DFIR | binwalk, sleuthkit, volatility3, tshark, scapy (apt/pip on L0) |
+| `linux` | Linux AD / box helpers | ffuf, katana, linpeas, impacket, NetExec, … |
+| `osint` | misc/osint | **not implemented** — use `steg`/`web` + host `curl`; optional future pack |
 
 Pack แยกได้ละเอียดกว่านี้ในอนาคต (เช่น `mobile-flutter` แยกจาก `mobile-java`) แต่ตอนแรกชุดด้านบนพอ
 
@@ -344,10 +346,13 @@ KALI_BIN_PREFIX=/usr  # ถ้า mount Kali root แบบระมัดระ
       (B) Standard — ไม่มี Kali  → L0 + pack registry
       (A) I have Kali            → L0 + L2 bridge
       (C) Cloud worker           → L0 local + L3 (อนาคต)
-[3] pull L0 image (เล็ก, เร็ว)
-[4] (optional) prefetch packs ยอดนิยมที่เลือก: pwn, web, …
+[3] pull / bake L0 + donor images ที่โปรไฟล์เลือก (ครั้งเดียวตอนติดตั้ง)
+[4] (optional) prefetch packs ยอดนิยมเข้า host cache: pwn, web, …
 [5] พร้อมรัน ctf-solve
 ```
+
+ลูกค้า**ไม่** bake ตอนเปิด challenge — bake/pull อยู่ในขั้นติดตั้งเท่านั้น  
+(ตอนนี้ operator ใช้ `docker build` ตาม README; อนาคต = CLI setup ดู Phase 5)
 
 ### 8.2 รายวัน
 
@@ -411,7 +416,7 @@ Lazy packs + optional Kali + optional cloud ชนะเพราะครบเ
 - [x] `containers` (podman / buildah — best-effort)
 - [x] `pwn` ขยาย angr + radare2
 - [x] `linux` (linpeas / pspy / ffuf / katana / smbclient / sshpass / impacket / ldap-utils / certipy-ad / bloodhound-python / NetExec)
-- [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev
+- [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev (local: bake `pwn`/`ghidra` แล้ว; CI + CLI setup → Phase 5)
 - [x] ขนาด cache + eviction (`CTF_PACK_CACHE_MAX_GB`, LRU via `.accessed`)
 - [x] RAM floor ต่อ pack + ลบ fat image / `Dockerfile.sage` ออกจาก tree
 
@@ -424,6 +429,20 @@ Lazy packs + optional Kali + optional cloud ชนะเพราะครบเ
 - [ ] Worker protocol เข้ากับ bash API เดิม
 - [ ] Ephemeral storage + zero retention
 - [ ] Hand / billing hooks (แยกบริการ)
+
+### Phase 5 — Customer CLI setup / bake (อนาคต)
+เป้าหมาย: ลูกค้าไม่ต้องจำ `docker build -f …` — คำสั่งติดตั้งครั้งเดียวจบ
+
+- [ ] CLI setup ใหม่ (เช่น `uv run ctf-setup` หรือ `ctf-solve --setup`) แยกจาก solve loop
+- [ ] ตรวจ Docker / Colima + แนะนำ `DOCKER_HOST` บน Mac
+- [ ] Bake หรือ pull ตามโปรไฟล์:
+      - ขั้นต่ำ: `ctf-sandbox-core` (L0)
+      - Standard: + donors ที่ใช้บ่อย (`pwn`, `ghidra`, `mobile`, …)
+      - Full (optional): + `crypto` / `crypto-tools` / `steg` / `linux` (ใหญ่ / ช้า)
+- [ ] Progress ชัด + idempotent (มี image แล้ว skip; อัปเดตเมื่อ digest เปลี่ยน)
+- [ ] Lock ข้าม process ตอน bake/pull pack เดียวกัน (สอง CLI setup พร้อมกัน → ตัวหนึ่งทำ อีกตัวรอ) — ต่อจาก flock ของ pack cache ที่มีอยู่
+- [ ] ไม่ bake ตอน `ctf-solve` รายวัน — solve ใช้ image/cache ที่พร้อมแล้วเท่านั้น (missing donor = warning + fail-soft เหมือนปัจจุบัน จนกว่า setup จะบังคับ)
+- [ ] เอกสาร onboarding ลูกค้าชี้ไป CLI setup แทนรายการ `docker build` ใน README (README คงไว้เป็น fallback / CI)
 
 ---
 
@@ -558,6 +577,10 @@ Agent logic เดิม (บาง)
 |--------|-------------------|
 | Repo | `/Users/serlorsx/Downloads/ctf` (branch Cursor backend) |
 | Sandbox ปัจจุบัน | L0 `Dockerfile.core`; packs `Dockerfile.pwn` / `crypto` / `crypto-tools` / `steg` / `linux` / `mobile`; apt/pip packs: forensics / web / ml / containers |
+| Sandbox package | `backend/sandbox/` — `container` / `packs` / `proxy` / `harden` / `governor` / `docker_client`; public facade `from backend.sandbox import DockerSandbox` |
+| Pack preflight | `backend/pack_preflight.py` — `force_packs` CLI `--pack` wins; else `detected_packs` / `detect_packs`; timings `preflight_ms`; `--eval-strict-packs` fail-closed |
+| Resource governor | `backend/sandbox/governor.py` — memory floors via `recommended_memory_limit`; live `docker update`; CPU `NanoCpus` default 2e9 override `CTF_SANDBOX_NANO_CPUS` |
+| Eval harness | `backend/eval_run.py` + CLI `--eval-out` / `--eval-max-wall-s` / `--eval-max-usd`; JSON `agent_failed` excludes infra-only deaths |
 | Fat / sage alias | **Removed** — use core + packs only |
 | Cache | `~/.cache/ctf-agent/packs` + `CTF_PACK_CACHE_MAX_GB` (default 25) LRU eviction; `scripts/evict_pack_cache.py`, `scripts/prune_docker.sh` |
 | Host VPN (Mac) | `backend/host_proxy.py` — auto SOCKS5 + proxychains in sandbox (`CTF_HOST_PROXY=auto`) so lab VPNs work without pf/routes |

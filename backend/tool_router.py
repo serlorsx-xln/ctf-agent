@@ -50,26 +50,16 @@ PACK_BOOTSTRAP_TIMEOUT_S: dict[str, int] = {
     "web": 600,
 }
 
-# Pack source images (artifact donors — not the running sandbox).
-# Apt/pip-only packs reuse L0 (`ctf-sandbox-core`) as a dummy donor.
-PACK_IMAGES: dict[str, str] = {
-    "mobile": "ctf-sandbox-mobile",
-    "pwn": "ctf-sandbox-pwn",
-    "ghidra": "ctf-sandbox-ghidra",
-    "crypto": "ctf-sandbox-crypto",
-    "crypto-tools": "ctf-sandbox-crypto-tools",
-    "steg": "ctf-sandbox-steg",
-    "linux": "ctf-sandbox-linux",
-    "forensics": "ctf-sandbox-core",
-    "web": "ctf-sandbox-core",
-    "ml": "ctf-sandbox-core",
-    "containers": "ctf-sandbox-core",
-}
-
 
 @dataclass(frozen=True)
 class PackSpec:
-    """How to materialize a pack into the live L0 container."""
+    """How to materialize a pack into the live L0 container.
+
+    Two consistent shapes:
+    - Apt/pip/gem only: ``image="ctf-sandbox-core"``, ``paths=()``.
+    - Donor trees: ``image="ctf-sandbox-<pack>"``, non-empty ``paths`` (required;
+      ensure fails loudly if that image is missing — never mark ready without trees).
+    """
 
     image: str
     # Absolute paths inside the pack image to extract into the host cache.
@@ -90,6 +80,11 @@ class PackSpec:
 
     def paths_to_bind(self) -> tuple[str, ...]:
         return self.bind_paths if self.bind_paths is not None else self.paths
+
+    @property
+    def requires_donor(self) -> bool:
+        """True when ensure must copy trees from ``image`` (not apt/pip-only)."""
+        return bool(self.paths)
 
 
 PACK_SPECS: dict[str, PackSpec] = {
@@ -132,10 +127,15 @@ PACK_SPECS: dict[str, PackSpec] = {
             "binfmt-support",
             "libc6-amd64-cross",
             "libc6-i386-cross",
+            # On aarch64 hosts, native objdump cannot disassemble x86_64 ELFs
+            # ("architecture UNKNOWN"). Cross-binutils fixes `objdump -d`.
+            "binutils-x86-64-linux-gnu",
             "patchelf",
             "ruby",
             "ruby-dev",
             "gdb",
+            # Cross-arch debug under qemu (native gdb on aarch64 cannot target amd64).
+            "gdb-multiarch",
             "radare2",
         ),
         pip=(
@@ -151,11 +151,12 @@ PACK_SPECS: dict[str, PackSpec] = {
     ),
     "ghidra": PackSpec(
         # Full Ghidra tree + PyGhidra (Veria-parity decompiler). Heavy — bind RO.
+        # dnfile + monodis cover .NET / managed RE when Ghidra alone is awkward.
         image="ctf-sandbox-ghidra",
         paths=("/opt/ghidra",),
         bind_paths=("/opt/ghidra",),
-        apt=("openjdk-21-jdk-headless",),
-        pip=("pyghidra",),
+        apt=("openjdk-21-jdk-headless", "mono-utils"),
+        pip=("pyghidra", "dnfile"),
         symlinks=(("/usr/local/bin/analyzeHeadless", "/opt/ghidra/support/analyzeHeadless"),),
         path_dirs=("/opt/ghidra/support",),
     ),
@@ -200,6 +201,7 @@ PACK_SPECS: dict[str, PackSpec] = {
         path_dirs=("/opt/flatter/bin", "/opt/cado-nfs/bin"),
     ),
     "steg": PackSpec(
+        # Donor carries stegseek only; apt/pip/gems install on L0 (same shape as pwn).
         image="ctf-sandbox-steg",
         paths=("/opt/stegseek",),
         apt=(
@@ -265,15 +267,25 @@ PACK_SPECS: dict[str, PackSpec] = {
             "xfsprogs",
             # tshark pulls wireshark-common (editcap / mergecap / capinfos).
             "tshark",
+            # Firmware rootfs (squash) + SQLite artifacts (leases/trust DBs).
+            "squashfs-tools",
+            "sqlite3",
+            # Run armhf device binaries from firmware images (static/dynamic).
+            "qemu-user-static",
+            "libc6-armhf-cross",
         ),
-        pip=("volatility3", "scapy"),
+        # Upgrade capstone: apt binwalk expects CS_ARCH_ARM64; an older pip
+        # capstone (often pulled by pwntools) breaks `import binwalk`.
+        # oletools/openpyxl: Office macros + XLSM/XLSX color/style CTFs.
+        pip=("volatility3", "scapy", "capstone>=5", "oletools", "openpyxl"),
     ),
     "web": PackSpec(
         image="ctf-sandbox-core",
         paths=(),
         # ffuf/katana live in the linux donor (/opt/linux-tools); first use
         # auto-ensures that pack. sqlmap covers SQLi without pulling AD stack.
-        apt=("nmap", "sqlmap"),
+        # nodejs: run Emscripten glue / WASM harnesses; wabt: wasm2wat etc.
+        apt=("nmap", "sqlmap", "nodejs", "npm", "wabt"),
         pip=("flask", "PyJWT"),
     ),
     "ml": PackSpec(
@@ -320,6 +332,7 @@ TOOL_TO_PACK: dict[str, str] = {
     "q32": "pwn",
     "qemu-x86_64-static": "pwn",
     "qemu-i386-static": "pwn",
+    "gdb-multiarch": "pwn",
     "r2": "pwn",
     "radare2": "pwn",
     "rabin2": "pwn",
@@ -329,6 +342,9 @@ TOOL_TO_PACK: dict[str, str] = {
     "analyzeHeadless": "ghidra",
     "ghidraRun": "ghidra",
     "ghidra": "ghidra",
+    "monodis": "ghidra",
+    "ilspycmd": "ghidra",
+    "dnfile": "ghidra",
     # crypto (sage)
     "sage": "crypto",
     "sagemath": "crypto",
@@ -370,9 +386,31 @@ TOOL_TO_PACK: dict[str, str] = {
     "mergecap": "forensics",
     "capinfos": "forensics",
     "scapy": "forensics",
+    "olevba": "forensics",
+    "oleid": "forensics",
+    "oledir": "forensics",
+    "olemeta": "forensics",
+    "olefile": "forensics",
+    "unsquashfs": "forensics",
+    "mksquashfs": "forensics",
+    "sqlite3": "forensics",
+    "qemu-arm-static": "forensics",
+    "qemu-arm": "forensics",
+    "qarm": "forensics",
     # web
     "nmap": "web",
     "sqlmap": "web",
+    "node": "web",
+    "nodejs": "web",
+    "npm": "web",
+    "npx": "web",
+    "wasm2wat": "web",
+    "wat2wasm": "web",
+    "wasm-decompile": "web",
+    "wasm-objdump": "web",
+    "wasm-interp": "web",
+    "wasm-strip": "web",
+    "wasm-validate": "web",
     # linux box / light remote
     "linpeas": "linux",
     "linpeas.sh": "linux",
@@ -440,11 +478,36 @@ _FORENSICS_SUFFIXES = {
     ".pcap",
     ".pcapng",
     ".cap",
+    ".har",
+    # Office / Excel macro CTFs (XLM, Name Manager, cell colors).
+    ".xlsm",
+    ".xlsx",
+    ".xls",
+    ".xlsb",
+    ".docm",
+    ".docx",
+    # Firmware / disk images (squashfs, custom camera imgs, dd dumps).
+    ".img",
+    ".squashfs",
+    ".ubifs",
 }
 _FORENSICS_NAMES = {"memory.dmp", "memdump.raw", "core.dump"}
 # Light web markers in distfiles (prefetch sqlmap/nmap — not the AD linux stack).
-# Intentionally omit .js (Node/misc challenges) to avoid noisy web prefetch.
-_WEB_SUFFIXES = {".php", ".html", ".htm", ".asp", ".aspx", ".jsp"}
+# Intentionally omit .js alone (Node/misc challenges) to avoid noisy web prefetch;
+# .wasm is a strong signal for browser/WASM challenges (needs nodejs/wabt).
+_WEB_SUFFIXES = {".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".wasm"}
+# Image handouts usually mean stego / OCR — prefetch even if Tags: say crypto.
+_STEG_SUFFIXES = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".webp",
+    ".tiff",
+    ".tif",
+}
+_DOTNET_HINT_SUFFIXES = {".runtimeconfig.json", ".deps.json"}
 _ML_SUFFIXES = {".pt", ".pth", ".onnx", ".h5", ".keras", ".safetensors"}
 _CONTAINER_NAMES = {
     "dockerfile",
@@ -472,6 +535,7 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "capstone": "pwn",
     "unicorn": "pwn",
     "pyghidra": "ghidra",
+    "dnfile": "ghidra",
     "galois": "crypto",
     "gmpy2": "crypto-tools",
     "fpylll": "crypto-tools",
@@ -482,6 +546,9 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "scipy": "steg",
     "volatility3": "forensics",
     "scapy": "forensics",
+    "oletools": "forensics",
+    "olefile": "forensics",
+    "openpyxl": "forensics",
     "flask": "web",
     "jwt": "web",
     "torch": "ml",
@@ -529,7 +596,7 @@ def parse_memory_bytes(limit: str) -> int:
         if s.endswith("k"):
             return int(float(s[:-1]) * 1024)
         return int(s)
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return 0
 
 
@@ -672,8 +739,25 @@ def pack_cache_item(cache: Path, container_path: str) -> Path:
 
 
 def pack_marker_path(pack_id: str) -> str:
-    """Opaque in-container marker (no pack id in the path)."""
-    digest = hashlib.sha256(pack_id.encode("utf-8")).hexdigest()[:16]
+    """Opaque in-container marker (no pack id in the path).
+
+    Fingerprint includes apt/pip/gems so growing a pack's recipe invalidates
+    the old marker and re-runs bootstrap (otherwise stale containers keep
+    missing newly added tools like qemu-arm-static / sqlite3).
+    """
+    spec = PACK_SPECS.get(pack_id)
+    if spec is None:
+        payload = pack_id
+    else:
+        payload = "|".join(
+            (
+                pack_id,
+                ",".join(spec.apt),
+                ",".join(spec.pip),
+                ",".join(spec.gems),
+            )
+        )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"/var/lib/ctf/.ready-{digest}"
 
 
@@ -701,6 +785,26 @@ def _looks_like_elf(path: Path) -> bool:
             return f.read(4) == b"\x7fELF"
     except OSError:
         return False
+
+
+def _looks_like_pe(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
+def _looks_like_dotnet(path: Path) -> bool:
+    """True for managed PE (CLI) — BSJB metadata signature somewhere in the image."""
+    if not _looks_like_pe(path):
+        return False
+    try:
+        # Small assemblies keep the CLI metadata near the start; cap the scan.
+        data = path.read_bytes()[: min(path.stat().st_size, 2_000_000)]
+    except OSError:
+        return False
+    return b"BSJB" in data
 
 
 def _challenge_text(challenge_dir: Path) -> str:
@@ -798,6 +902,14 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
         if suffix in _WEB_SUFFIXES:
             packs.add("web")
 
+        if suffix in _STEG_SUFFIXES:
+            packs.add("steg")
+
+        if any(name.endswith(s) for s in _DOTNET_HINT_SUFFIXES) or (
+            suffix in {".dll", ".exe"} and _looks_like_dotnet(path)
+        ):
+            packs.add("ghidra")
+
         if suffix in _ML_SUFFIXES:
             packs.add("ml")
 
@@ -836,16 +948,17 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
             packs.add("mobile")
         if "pwn" in tags or "shellcoding" in tags:
             packs.add("pwn")
+        if tags & {"forensics", "forensic", "dfir", "network", "netsec"}:
+            packs.add("forensics")
+        if tags & {"steg", "stego", "steganography"}:
+            packs.add("steg")
+        if tags & {"rev", "reverse", "re"}:
+            packs.add("ghidra")
 
     # ELF handouts always suggest ghidra; do not also force-prefetch the heavy
     # pwn apt/pip stack for crypto/rev-tagged challenges (angr/qemu still load
     # on demand when the agent actually needs them).
-    if (
-        "pwn" in packs
-        and "crypto" in tags
-        and "pwn" not in tags
-        and "shellcoding" not in tags
-    ):
+    if "pwn" in packs and "crypto" in tags and "pwn" not in tags and "shellcoding" not in tags:
         packs.discard("pwn")
 
     return [p for p in _PACK_PRIORITY if p in packs]
@@ -874,15 +987,8 @@ def apply_router_to_settings(settings, challenge_dir: str | Path):
         return settings.sandbox_image, packs
 
     image = getattr(settings, "sandbox_image", None) or "ctf-sandbox-core"
-    donor_only = {
-        "ctf-sandbox-mobile",
-        "ctf-sandbox-pwn",
-        "ctf-sandbox-ghidra",
-        "ctf-sandbox-crypto",
-        "ctf-sandbox-crypto-tools",
-        "ctf-sandbox-steg",
-        "ctf-sandbox-linux",
-    }
+    # Any pack donor image — never use these as the live L0 runtime.
+    donor_only = {spec.image for spec in PACK_SPECS.values() if spec.image != "ctf-sandbox-core"}
     if image in donor_only:
         logger.warning(
             "sandbox_image=%s looks like a pack donor; preferring L0 core",
@@ -945,9 +1051,7 @@ def bootstrap_script(pack_id: str) -> str:
         pkgs = " ".join(shlex.quote(p) for p in spec.apt)
         # Skip apt-get update when every package is already installed — the slow
         # path on Mac/amd64 emulation is usually "apt-get update", not install.
-        dpkg_ok = " && ".join(
-            f"dpkg -s {shlex.quote(p)} >/dev/null 2>&1" for p in spec.apt
-        )
+        dpkg_ok = " && ".join(f"dpkg -s {shlex.quote(p)} >/dev/null 2>&1" for p in spec.apt)
         lines += [
             f"if {dpkg_ok}; then",
             "  echo 'apt packages already present; skipping apt-get'",
@@ -1026,6 +1130,22 @@ def bootstrap_script(pack_id: str) -> str:
             "  ln -sfn /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless || true",
             "fi",
         ]
+    if pack_id == "forensics":
+        lines += [
+            "mkdir -p /usr/local/bin",
+            # armhf guest libs for dynamic firmware ELFs under qemu-user.
+            "printf '%s\\n' '#!/bin/bash' "
+            "'PREFIX=\"${QEMU_LD_PREFIX:-/usr/arm-linux-gnueabihf}\"' "
+            '\'for a in "$@"; do case "$a" in -L) '
+            'exec /usr/bin/qemu-arm-static "$@";; esac; done\' '
+            '\'if [ -d "$PREFIX/lib" ] || [ -d "$PREFIX" ]; then '
+            'exec /usr/bin/qemu-arm-static -L "$PREFIX" "$@"; fi\' '
+            "'exec /usr/bin/qemu-arm-static \"$@\"' "
+            "> /usr/local/bin/qemu-arm-static",
+            "printf '%s\\n' '#!/bin/bash' 'exec qemu-arm-static \"$@\"' > /usr/local/bin/qarm",
+            "printf '%s\\n' '#!/bin/bash' 'exec qemu-arm-static \"$@\"' > /usr/local/bin/qemu-arm",
+            "chmod +x /usr/local/bin/qemu-arm-static /usr/local/bin/qarm /usr/local/bin/qemu-arm",
+        ]
     if pack_id == "pwn":
         lines += [
             "mkdir -p /usr/local/bin",
@@ -1035,8 +1155,22 @@ def bootstrap_script(pack_id: str) -> str:
             "    ln -sfn /usr/x86_64-linux-gnu/lib/ld-linux-x86-64.so.2 "
             "/lib64/ld-linux-x86-64.so.2 || true",
             "  fi",
+            "  # Prefer x86_64 cross-objdump for CTF bins (PATH: /usr/local/bin).",
+            "  if command -v x86_64-linux-gnu-objdump >/dev/null 2>&1; then",
+            '    ln -sfn "$(command -v x86_64-linux-gnu-objdump)" /usr/local/bin/objdump || true',
+            "  fi",
+            "  # Guest libc path agents often guess wrongly as /lib/libc.so.6.",
+            "  if [ -e /usr/x86_64-linux-gnu/lib/libc.so.6 ] "
+            "&& [ ! -e /lib/x86_64-linux-gnu/libc.so.6 ]; then",
+            "    mkdir -p /lib/x86_64-linux-gnu",
+            "    ln -sfn /usr/x86_64-linux-gnu/lib/libc.so.6 "
+            "/lib/x86_64-linux-gnu/libc.so.6 || true",
+            "  fi",
             "  ;;",
             "esac",
+            "if command -v gdb-multiarch >/dev/null 2>&1; then",
+            '  ln -sfn "$(command -v gdb-multiarch)" /usr/local/bin/gdb-multiarch || true',
+            "fi",
             "printf '%s\\n' '#!/bin/bash' "
             "'PREFIX=\"${QEMU_LD_PREFIX:-/usr/x86_64-linux-gnu}\"' "
             '\'for a in "$@"; do case "$a" in -L) '

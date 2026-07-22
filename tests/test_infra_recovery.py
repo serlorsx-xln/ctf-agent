@@ -13,9 +13,18 @@ def test_is_infra_error_bridge_timeout():
     assert is_infra_error_message("Infra: Bridge request timed out: ReadTimeout: ")
 
 
+def test_is_infra_error_opaque_cursor_status():
+    assert is_infra_error_message("error")
+    assert is_infra_error_message("Error")
+    assert is_infra_error_message("run error")
+    assert is_infra_error_message("  FAILED  ")
+    assert is_infra_error_message("unknown error")
+
+
 def test_is_infra_error_rejects_normal():
     assert not is_infra_error_message("invalid flag")
     assert not is_infra_error_message("Loop detected")
+    assert not is_infra_error_message("segmentation fault in exploit")
     assert not is_infra_error_message("")
     assert not is_infra_error_message(None)
 

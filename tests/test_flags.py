@@ -116,6 +116,36 @@ def test_reject_leakme_local_decoy_body() -> None:
     assert msg.startswith("REJECTED")
 
 
+def test_reject_decoy_body_wrap() -> None:
+    msg, done = accept_flag("v1t{fake_flag}")
+    assert not done
+    assert msg.startswith("REJECTED")
+    assert "decoy" in msg.lower() or "placeholder" in msg.lower()
+
+
+def test_reject_artifact_wrap(tmp_path: Path) -> None:
+    (tmp_path / "Dockerfile").write_text(
+        "FROM ubuntu\nENV FLAG flag_166903c90eadca6ffac515cd8a6787f2\n",
+        encoding="utf-8",
+    )
+    msg, done = accept_flag(
+        "v1t{flag_166903c90eadca6ffac515cd8a6787f2}",
+        challenge_dir=tmp_path,
+    )
+    assert not done
+    assert msg.startswith("REJECTED")
+
+
+def test_rewrap_of_tried_token() -> None:
+    from backend.flags import is_rewrap_of_tried
+
+    assert is_rewrap_of_tried("v1t{70aa2d5aeeb7d45d}", ["70aa2d5aeeb7d45d"]) == "70aa2d5aeeb7d45d"
+    assert is_rewrap_of_tried("70aa2d5aeeb7d45d", ["v1t{70aa2d5aeeb7d45d}"]) == (
+        "v1t{70aa2d5aeeb7d45d}"
+    )
+    assert is_rewrap_of_tried("v1t{totally_new}", ["70aa2d5aeeb7d45d"]) is None
+
+
 def test_real_brace_flag_still_ok() -> None:
     msg, done = accept_flag(
         "ARCHA{s3cr37_sh0p_n07_s0_s3cr378144c2cb}",

@@ -5,6 +5,7 @@ The stock wrapper pipes ``rf(flag, payload.bin)`` into qemu stdio, then keeps
 relaying the TCP client. A bare ``cat flag payload | qemu`` closes stdin after
 the payload → boot reaches barbOS> but later commands get EOF / no replies.
 """
+
 from __future__ import annotations
 
 import os

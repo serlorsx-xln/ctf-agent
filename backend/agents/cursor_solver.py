@@ -31,17 +31,24 @@ from backend.agents.cursor_runtime import (
     acquire_client,
     current_client,
     force_recreate_client,
-    is_infra_error_message,
     release_client,
     resolve_api_key,
 )
 from backend.agents.live_log import live as _live
+from backend.bash_intercept import (
+    SUBMIT_EXPANSION_ERROR,
+    SUBMIT_UNPARSED_ERROR,
+    extract_notify_coordinator,
+    parse_submit_flag,
+    submit_flag_attempted,
+    submit_flag_suffix,
+)
 from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker
 from backend.flags import is_decoy_flag
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
-from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
+from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
 from backend.solver_base import (
     CANCELLED,
@@ -64,6 +71,26 @@ from backend.tools.core import (
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
+
+
+def _image_tool_result(image_bytes: bytes, mime_type: str, *, label: str = "") -> dict:
+    """MCP-style content so the Cursor bridge can surface the image to the model."""
+    import base64
+
+    note = label or f"Image ({mime_type}, {len(image_bytes)} bytes)."
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": (f"{note} Inspect visually; also use sandbox stego/exif tools as needed."),
+            },
+            {
+                "type": "image",
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+                "mimeType": mime_type,
+            },
+        ]
+    }
 
 
 SOLVER_PREAMBLE = """\
@@ -90,6 +117,7 @@ Start order: if the prompt requires connecting to a live service first, do that;
 otherwise `cat /challenge/TOOLS.txt`, then inspect challenge files and solve.
 Prefer installed tools over guessing. Do not search writeups.
 Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.
+`pip3 install pkg` works as-is (sandbox adds --break-system-packages).
 
 Long-running bash (factoring, scans, compiles, remote loops): always set
 timeout_seconds explicitly (300–900+) and print progress so the session stays
@@ -134,6 +162,7 @@ class CursorSolver:
             image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            settings=settings,
         )
         self.use_vision = supports_vision(model_spec)
         self.loop_detector = LoopDetector()
@@ -155,11 +184,11 @@ class CursorSolver:
         self._api_key = ""
 
     async def start(self) -> None:
-        await self.sandbox.start()
+        from backend.agents.solver_control import start_sandbox_basics
 
-        arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
-        container_arch = arch_result.stdout.strip() or "unknown"
-        distfile_names = list_distfiles(self.challenge_dir)
+        container_arch, distfile_names = await start_sandbox_basics(
+            self.sandbox, self.meta, self.challenge_dir
+        )
         self._system_prompt = SOLVER_PREAMBLE + build_prompt(
             self.meta,
             distfile_names,
@@ -269,83 +298,151 @@ class CursorSolver:
         )
 
     def _build_custom_tools(self) -> dict[str, CustomTool]:
-        async def _wrap(name: str, args: Mapping[str, Any], runner) -> str:
+        async def _wrap(name: str, args: Mapping[str, Any], runner) -> str | dict:
             self._step_count += 1
-            self.tracer.tool_call(name, args, self._step_count)
+            step = self._step_count
+            self.tracer.tool_call(name, args, step)
             args_preview = json.dumps(args, ensure_ascii=False, default=str)
-            _live(f"{self.agent_name} tool#{self._step_count} → {name}", args_preview, limit=1500)
+            _live(f"{self.agent_name} tool#{step} → {name}", args_preview, limit=1500)
 
             loop_status = self.loop_detector.check(name, args)
             if loop_status == "break":
-                self.tracer.event("loop_break", tool=name, step=self._step_count)
+                self.tracer.event("loop_break", tool=name, step=step)
                 msg = "Loop detected — change arguments or tool flags before repeating."
-                _live(f"{self.agent_name} tool#{self._step_count} ✗ {name}", msg)
+                self.tracer.tool_result(name, msg, step)
+                _live(f"{self.agent_name} tool#{step} ✗ {name}", msg)
                 return msg
 
-            result = await runner()
-            if isinstance(result, tuple):
-                # view_image binary — describe instead of embedding
-                image_bytes, mime_type = result
-                text = f"[image {mime_type}, {len(image_bytes)} bytes — analyze via bash tools]"
-            else:
-                text = str(result)
+            try:
+                result = await runner()
+                if isinstance(result, tuple):
+                    image_bytes, mime_type = result
+                    text: str | dict = _image_tool_result(
+                        image_bytes,
+                        mime_type,
+                        label=f"view_image {args.get('filename', '')}".strip(),
+                    )
+                    preview = f"image:{mime_type}:{len(image_bytes)}b"
+                elif isinstance(result, dict) and "content" in result:
+                    text = result
+                    preview = json.dumps(result, ensure_ascii=False, default=str)[:500]
+                else:
+                    text = str(result)
+                    preview = text
 
-            if loop_status == "warn":
-                from backend.loop_detect import LOOP_WARNING_MESSAGE
+                if loop_status == "warn":
+                    from backend.loop_detect import LOOP_WARNING_MESSAGE
 
-                text = f"{text}\n\n{LOOP_WARNING_MESSAGE}"
+                    warn = LOOP_WARNING_MESSAGE
+                    if isinstance(text, dict):
+                        content = list(text.get("content") or [])
+                        content.append({"type": "text", "text": warn})
+                        text = {**text, "content": content}
+                        preview = f"{preview}\n\n{warn}"
+                    else:
+                        text = f"{text}\n\n{warn}"
+                        preview = text
 
-            fail_status = self.loop_detector.check_result(name, text)
-            if fail_status in ("oom_break", "fail_break"):
-                from backend.loop_detect import OOM_STUCK_MESSAGE
+                fail_status = self.loop_detector.check_result(name, str(preview))
+                if fail_status in ("oom_break", "fail_break"):
+                    from backend.loop_detect import OOM_STUCK_MESSAGE
 
-                self.tracer.event("resource_loop", tool=name, step=self._step_count)
-                text = f"{text}\n\n{OOM_STUCK_MESSAGE}"
+                    self.tracer.event("resource_loop", tool=name, step=step)
+                    if isinstance(text, dict):
+                        content = list(text.get("content") or [])
+                        content.append({"type": "text", "text": OOM_STUCK_MESSAGE})
+                        text = {**text, "content": content}
+                        preview = f"{preview}\n\n{OOM_STUCK_MESSAGE}"
+                    else:
+                        text = f"{text}\n\n{OOM_STUCK_MESSAGE}"
+                        preview = text
 
-            self.tracer.tool_result(name, text[:500], self._step_count)
-            _live(f"{self.agent_name} tool#{self._step_count} ← {name}", text, limit=2000)
+                self.tracer.tool_result(name, str(preview)[:500], step)
+                _live(f"{self.agent_name} tool#{step} ← {name}", str(preview), limit=2000)
 
-            if self._step_count % 5 == 0 and self.message_bus:
-                from backend.tools.core import do_check_findings
+                if step % 5 == 0 and self.message_bus:
+                    from backend.tools.core import do_check_findings
 
-                findings = await do_check_findings(self.message_bus, self.model_spec)
-                if findings and "No new findings" not in findings:
-                    text = f"{text}\n\n---\n{findings}"
-            return text
+                    findings = await do_check_findings(
+                        self.message_bus,
+                        getattr(self, "runner_id", None) or self.model_spec,
+                    )
+                    if findings and "No new findings" not in findings:
+                        if isinstance(text, dict):
+                            content = list(text.get("content") or [])
+                            content.append({"type": "text", "text": f"---\n{findings}"})
+                            text = {**text, "content": content}
+                        else:
+                            text = f"{text}\n\n---\n{findings}"
+                return text
+            except Exception as e:
+                err = f"Tool error: {e}"
+                self.tracer.tool_result(name, err[:500], step)
+                self.tracer.event("error", error=err[:300], tool=name, step=step)
+                _live(f"{self.agent_name} tool#{step} ✗ {name}", err, limit=2000)
+                raise
 
-        async def bash(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
-            return await _wrap(
-                "bash",
-                args,
-                lambda: do_bash(
-                    self.sandbox,
-                    args.get("command", ""),
-                    int(args.get("timeout_seconds", 300) or 300),
-                ),
-            )
+        async def bash(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
+            async def _run() -> str:
+                command = str(args.get("command", "") or "")
+                timeout = int(args.get("timeout_seconds", 300) or 300)
+                parsed = parse_submit_flag(command)
+                if parsed is not None:
+                    if parsed.has_expansion:
+                        return SUBMIT_EXPANSION_ERROR
+                    if self.submit_fn:
+                        display, _confirmed = await self.submit_fn(parsed.value)
+                    else:
+                        from backend.flags import normalize_flags_required
+                        from backend.tools.core import do_submit_flag
 
-        async def read_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+                        display, _confirmed = await do_submit_flag(
+                            self.meta.name,
+                            parsed.value,
+                            already_accepted=list(self._accepted_flags),
+                            required=normalize_flags_required(
+                                getattr(self.meta, "flags_required", 1)
+                            ),
+                            challenge_dir=self.challenge_dir,
+                            auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
+                        )
+                    suffix = submit_flag_suffix(command, parsed)
+                    if suffix:
+                        more = await do_bash(self.sandbox, suffix, timeout)
+                        return f"{display}\n{more}"
+                    return display
+                if submit_flag_attempted(command):
+                    return SUBMIT_UNPARSED_ERROR
+                notify_msg = extract_notify_coordinator(command)
+                if notify_msg is not None and self.notify_coordinator:
+                    await self.notify_coordinator(notify_msg)
+                    return "Message sent to coordinator."
+                return await do_bash(self.sandbox, command, timeout)
+
+            return await _wrap("bash", args, _run)
+
+        async def read_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap(
                 "read_file",
                 args,
                 lambda: do_read_file(self.sandbox, args.get("path", "")),
             )
 
-        async def write_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def write_file(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap(
                 "write_file",
                 args,
                 lambda: do_write_file(self.sandbox, args.get("path", ""), args.get("content", "")),
             )
 
-        async def list_files(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def list_files(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap(
                 "list_files",
                 args,
                 lambda: do_list_files(self.sandbox, args.get("path", "/challenge/distfiles")),
             )
 
-        async def submit_flag(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def submit_flag(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             async def _run() -> str:
                 flag = str(args.get("flag", "")).strip()
                 if self.submit_fn:
@@ -360,9 +457,7 @@ class CursorSolver:
                         already_accepted=list(self._accepted_flags),
                         required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
                         challenge_dir=self.challenge_dir,
-                        auto_confirm=bool(
-                            getattr(self.settings, "auto_confirm_flags", False)
-                        ),
+                        auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
                     )
                 if (
                     display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
@@ -388,17 +483,19 @@ class CursorSolver:
 
             return await _wrap("submit_flag", args, _run)
 
-        async def webhook_create(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def webhook_create(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap("webhook_create", args, do_webhook_create)
 
-        async def webhook_get_requests(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def webhook_get_requests(
+            args: Mapping[str, Any], _ctx: CustomToolContext
+        ) -> str | dict:
             return await _wrap(
                 "webhook_get_requests",
                 args,
                 lambda: do_webhook_get_requests(args.get("uuid", "")),
             )
 
-        async def view_image(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def view_image(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap(
                 "view_image",
                 args,
@@ -407,7 +504,9 @@ class CursorSolver:
                 ),
             )
 
-        async def notify_coordinator(args: Mapping[str, Any], _ctx: CustomToolContext) -> str:
+        async def notify_coordinator(
+            args: Mapping[str, Any], _ctx: CustomToolContext
+        ) -> str | dict:
             async def _run() -> str:
                 if self.notify_coordinator:
                     await self.notify_coordinator(args.get("message", ""))
@@ -615,12 +714,14 @@ class CursorSolver:
 
             status = str(result.status)
             if status == "error":
-                err = (result.result or "run error")
+                err = result.result or "run error"
                 self.tracer.event("error", error=err)
-                err_l = err.lower()
-                if any(k in err_l for k in ("quota", "rate", "capacity", "usage", "billing")):
+                from backend.agents.solver_control import classify_turn_error
+
+                classified = classify_turn_error(err)
+                if classified == QUOTA_ERROR:
                     return self._result(QUOTA_ERROR)
-                if is_infra_error_message(err):
+                if classified == INFRA_ERROR:
                     self._findings = f"Infra: {err}"
                     return self._result(INFRA_ERROR)
                 return self._result(ERROR)
@@ -638,9 +739,12 @@ class CursorSolver:
             logger.error("[%s] Cursor startup/API error: %s", self.agent_name, e)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
-            if any(k in error_str.lower() for k in ("quota", "rate", "401", "403", "billing")):
+            from backend.agents.solver_control import classify_turn_error
+
+            classified = classify_turn_error(error_str)
+            if classified == QUOTA_ERROR:
                 return self._result(QUOTA_ERROR)
-            if is_infra_error_message(error_str) or getattr(e, "is_retryable", False):
+            if classified == INFRA_ERROR or getattr(e, "is_retryable", False):
                 return self._result(INFRA_ERROR)
             return self._result(ERROR)
         except Exception as e:
@@ -648,9 +752,12 @@ class CursorSolver:
             logger.error("[%s] Error: %s", self.agent_name, e, exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
-            if any(k in error_str.lower() for k in ("quota", "rate", "overloaded")):
+            from backend.agents.solver_control import classify_turn_error
+
+            classified = classify_turn_error(error_str)
+            if classified == QUOTA_ERROR:
                 return self._result(QUOTA_ERROR)
-            if is_infra_error_message(error_str):
+            if classified == INFRA_ERROR:
                 return self._result(INFRA_ERROR)
             return self._result(ERROR)
 
@@ -665,7 +772,7 @@ class CursorSolver:
             stripped = stripped[start : end + 1]
         try:
             parsed = json.loads(stripped)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             return
         if isinstance(parsed, dict) and parsed.get("type") == "flag_found":
             flag = parsed.get("flag")
@@ -679,9 +786,9 @@ class CursorSolver:
                 # JSON alone does not confirm — only submit_flag does.
 
     def bump(self, insights: str) -> None:
-        self._bump_insights = insights
-        self.loop_detector.reset()
-        self.tracer.event("bump", insights=insights[:500])
+        from backend.agents.solver_control import stash_bump
+
+        stash_bump(self, insights)
         logger.info("[%s] Bumped with insights", self.agent_name)
 
     def _result(
@@ -706,6 +813,16 @@ class CursorSolver:
         )
 
     async def stop(self) -> None:
+        if self._step_count == 0 and not getattr(self, "_started", False):
+            self.tracer.event(
+                "error",
+                error="stopped before start completed (0 steps)",
+            )
+        elif self._step_count == 0:
+            self.tracer.event(
+                "error",
+                error="stopped with 0 tool steps",
+            )
         self.tracer.event("stop", step_count=self._step_count)
         self.tracer.close()
         if self._agent is not None:

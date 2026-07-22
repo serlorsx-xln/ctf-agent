@@ -7,9 +7,14 @@ pyghidra             Native CPython API to Ghidra (headless). Requires this pack
                            prog = flat_api.getCurrentProgram()
                            # decompile / listing …
 analyzeHeadless      Ghidra CLI batch analyzer. analyzeHeadless <project> <name> -import <bin>
+dnfile               Parse .NET PE metadata / methods / user strings (pip).
+                     python3 -c 'from dnfile import dnPE; pe=dnPE("x.dll"); ...'
+monodis              Mono IL disassembler for managed assemblies.
+                     monodis --output=il.txt /challenge/distfiles/app.dll
 r2 / angr            Also in the pwn pack for lighter RE / symbolic work.
 
 == NOTES ==
 First ensure may download/extract a large tree into the host pack cache.
-Loaded on demand when you `import pyghidra` or run analyzeHeadless; ELF challenges
-prefetch this pack with pwn. Re-read /challenge/TOOLS.txt after install.
+Loaded on demand when you `import pyghidra` / `import dnfile` or run analyzeHeadless.
+ELF challenges prefetch this pack with pwn; .NET (BSJB / *.runtimeconfig.json) prefetch
+ghidra alone. Re-read /challenge/TOOLS.txt after install.

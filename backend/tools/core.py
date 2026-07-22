@@ -154,9 +154,7 @@ async def do_submit_flag(
     if not preview.startswith("CANDIDATE"):
         return preview, done
 
-    confirm = confirm_fn or (
-        lambda f: prompt_flag_confirmation(f, auto_confirm=auto_confirm)
-    )
+    confirm = confirm_fn or (lambda f: prompt_flag_confirmation(f, auto_confirm=auto_confirm))
     ok = await asyncio.to_thread(confirm, (flag or "").strip())
     if not ok:
         f = (flag or "").strip()
@@ -186,7 +184,7 @@ def _is_internal_url(url: str) -> bool:
             second_octet = int(host.split(".")[1])
             if 16 <= second_octet <= 31:
                 return True
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             pass
     return False
 
@@ -216,7 +214,8 @@ async def do_webhook_create() -> str:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post("https://webhook.site/token")
-            if resp.status_code != 200:
+            # webhook.site returns 201 Created on success (not 200).
+            if resp.status_code not in (200, 201):
                 return f"webhook.site error: HTTP {resp.status_code}"
             data = resp.json()
             return json.dumps({"uuid": data["uuid"], "url": f"https://webhook.site/{data['uuid']}"})
@@ -228,7 +227,7 @@ async def do_webhook_get_requests(uuid: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(f"https://webhook.site/token/{uuid}/requests")
-            if resp.status_code != 200:
+            if resp.status_code not in (200, 201):
                 return f"webhook.site error: HTTP {resp.status_code}"
             data = resp.json()
             if not data.get("data"):

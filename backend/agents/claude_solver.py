@@ -34,8 +34,10 @@ from backend.agents.live_log import live as _live
 from backend.agents.live_log import live_json
 from backend.bash_intercept import (
     SUBMIT_EXPANSION_ERROR,
+    SUBMIT_UNPARSED_ERROR,
     extract_notify_coordinator,
     parse_submit_flag,
+    submit_flag_attempted,
     submit_flag_suffix,
 )
 from backend.continue_prompt import build_continue_prompt
@@ -43,9 +45,9 @@ from backend.cost_tracker import CostTracker
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.output_types import solver_output_json_schema
-from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
+from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import CANCELLED, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,7 @@ class ClaudeSolver:
             image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            settings=settings,
         )
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
@@ -106,7 +109,7 @@ class ClaudeSolver:
                 continue
             try:
                 val = int(raw)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
             if val > 1000:  # treat as ms
                 return max(5, min(val // 1000, 900))
@@ -199,12 +202,11 @@ class ClaudeSolver:
         )
 
     async def start(self) -> None:
-        await self.sandbox.start()
+        from backend.agents.solver_control import start_sandbox_basics
 
-        arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
-        container_arch = arch_result.stdout.strip() or "unknown"
-
-        distfile_names = list_distfiles(self.challenge_dir)
+        container_arch, distfile_names = await start_sandbox_basics(
+            self.sandbox, self.meta, self.challenge_dir
+        )
         sandbox_preamble = (
             "IMPORTANT: You are running inside a Docker sandbox. "
             "All files are under /challenge/ — distfiles at /challenge/distfiles/, "
@@ -305,6 +307,17 @@ class ClaudeSolver:
                             },
                         }
                     }
+                if submit_flag_attempted(command):
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "allow",
+                            "updatedInput": {
+                                **tool_input,
+                                "command": f"echo {shlex.quote(SUBMIT_UNPARSED_ERROR)}",
+                            },
+                        }
+                    }
 
                 # Intercept notify_coordinator anywhere in a compound command
                 notify_msg = extract_notify_coordinator(command)
@@ -388,7 +401,9 @@ class ClaudeSolver:
             if self._step_count % 5 == 0 and self.message_bus:
                 from backend.tools.core import do_check_findings
 
-                findings = await do_check_findings(self.message_bus, self.model_spec)
+                findings = await do_check_findings(
+                    self.message_bus, getattr(self, "runner_id", None) or self.model_spec
+                )
                 if findings and "No new findings" not in findings:
                     return {
                         "hookSpecificOutput": {
@@ -537,18 +552,14 @@ class ClaudeSolver:
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
-            if (
-                "quota" in error_str.lower()
-                or "rate" in error_str.lower()
-                or "overloaded" in error_str.lower()
-            ):
-                return self._result(QUOTA_ERROR)
-            return self._result(ERROR)
+            from backend.agents.solver_control import classify_turn_error
+
+            return self._result(classify_turn_error(error_str))
 
     def bump(self, insights: str) -> None:
-        self._bump_insights = insights
-        self.loop_detector.reset()
-        self.tracer.event("bump", insights=insights[:500])
+        from backend.agents.solver_control import stash_bump
+
+        stash_bump(self, insights)
         logger.info(f"[{self.agent_name}] Bumped with insights (session {self._session_id})")
 
     def _result(

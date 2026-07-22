@@ -117,8 +117,7 @@ CHALS = [
             "Come and play our hot new blackjack game."
         ),
         "note": (
-            "Game / finals-style blackjack + Game of Life. "
-            "Build image from distfiles/bjgame."
+            "Game / finals-style blackjack + Game of Life. Build image from distfiles/bjgame."
         ),
     },
 ]
@@ -148,7 +147,10 @@ SKIP_TOP = {
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    env = {**dict(**__import__("os").environ), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+    env = {
+        **dict(**__import__("os").environ),
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    }
     env.pop("DOCKER_HOST", None)
     return subprocess.run(cmd, check=False, env=env, **kw)
 
@@ -428,9 +430,7 @@ def write_challenge_txt(c: dict, html: str, handout: list[str]) -> None:
         spawn_lines += [
             "```bash",
             f"docker pull --platform linux/amd64 {c['image']}",
-            f"docker run -d --platform linux/amd64 --name {slug} "
-            + port_map
-            + f"{c['image']}",
+            f"docker run -d --platform linux/amd64 --name {slug} " + port_map + f"{c['image']}",
             "```",
             "",
         ]

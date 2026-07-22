@@ -42,9 +42,7 @@ class SolverTracer:
         except Exception:
             pass
 
-    def tool_call(
-        self, tool_name: str, args: Mapping[str, object] | str, step: int
-    ) -> None:
+    def tool_call(self, tool_name: str, args: Mapping[str, object] | str, step: int) -> None:
         args_str = args if isinstance(args, str) else json.dumps(dict(args), default=str)
         self._write({"type": "tool_call", "tool": tool_name, "args": args_str[:2000], "step": step})
 

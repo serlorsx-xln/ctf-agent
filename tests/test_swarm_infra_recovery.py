@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from backend.agents.swarm import ChallengeSwarm, MAX_INFRA_RECOVERIES
+from backend.agents.swarm import MAX_INFRA_RECOVERIES, ChallengeSwarm
 from backend.prompts import ChallengeMeta
-from backend.solver_base import FLAG_FOUND, GAVE_UP, INFRA_ERROR, SolverResult
+from backend.solver_base import FLAG_FOUND, INFRA_ERROR, SolverResult
 
 
 class _FakeSettings:
@@ -14,6 +14,11 @@ class _FakeSettings:
     container_memory_limit = "1g"
     detected_packs: list = []
     sandbox_image_locked = False
+    force_packs: list = []
+    eval_max_wall_s = None
+    eval_max_usd = None
+    eval_strict_packs = False
+    eval_out = ""
 
 
 class _RecoveringSolver:
@@ -60,6 +65,9 @@ class _RecoveringSolver:
 
 
 def _swarm() -> ChallengeSwarm:
+    from backend.eval_run import EvalRunState
+    from backend.message_bus import ChallengeMessageBus
+
     swarm = ChallengeSwarm.__new__(ChallengeSwarm)
     swarm.challenge_dir = "/tmp"
     swarm.meta = ChallengeMeta(name="t", description="", flags_required=1)
@@ -77,9 +85,14 @@ def _swarm() -> ChallengeSwarm:
     swarm._submit_count = {}
     swarm._submitted_flags = set()
     swarm._last_submit_time = {}
-    from backend.message_bus import ChallengeMessageBus
-
     swarm.message_bus = ChallengeMessageBus()
+    swarm._eval = EvalRunState()
+    swarm._infra_recoveries_total = 0
+    swarm._last_model_spec = ""
+    swarm._last_preflight_ms = 0.0
+    swarm._last_steps = 0
+    swarm._last_status = ""
+    swarm._last_flag = None
     return swarm
 
 
@@ -91,7 +104,7 @@ def test_swarm_recovers_infra_then_wins(monkeypatch):
     solver = _RecoveringSolver()
 
     async def _run():
-        return await swarm._run_solver_loop(solver, "cursor/grok-4.5")
+        return await swarm._run_solver_loop(solver, "cursor/grok-4.5", "cursor/grok-4.5")
 
     result, final = asyncio.run(_run())
     assert result.status == FLAG_FOUND

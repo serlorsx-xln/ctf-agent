@@ -140,6 +140,64 @@ def provider_from_spec(spec: str) -> str:
     return spec.split("/", 1)[0]
 
 
+def expand_model_cli_args(models: list[str] | tuple[str, ...]) -> list[str]:
+    """Expand CLI model specs.
+
+    Supports:
+    - Comma-separated specs in one arg: ``claude-sdk/glm-5.2,cursor/grok-4.5``
+    - Repeatable ``--models`` values (Click ``multiple=True``)
+    - ``cursor/grok-4.5*3`` / ``cursor/grok-4.5x3`` multipliers
+    """
+    import re
+
+    out: list[str] = []
+    for raw in models:
+        # One argv may hold several specs joined by commas (common shell habit).
+        pieces = [p.strip() for p in (raw or "").split(",") if p.strip()]
+        for m in pieces:
+            # Prefer *N (shell-friendly when quoted). Also accept trailing xN.
+            star = re.fullmatch(r"(.+)\*(\d+)$", m)
+            if star:
+                base, n_s = star.group(1), star.group(2)
+                n = int(n_s)
+                if n < 1:
+                    raise ValueError(f"Invalid model repeat count in {m!r}")
+                out.extend([base] * n)
+                continue
+            xmul = re.fullmatch(r"(.+?)x(\d+)$", m, flags=re.IGNORECASE)
+            # Only treat as multiplier when base looks like a provider/model spec
+            # (contains '/') so we don't mangle ids that legitimately end in x2.
+            if xmul and "/" in xmul.group(1):
+                base, n_s = xmul.group(1), xmul.group(2)
+                n = int(n_s)
+                if n < 1:
+                    raise ValueError(f"Invalid model repeat count in {m!r}")
+                out.extend([base] * n)
+                continue
+            out.append(m)
+    return out
+
+
+def assign_runner_ids(specs: list[str]) -> list[tuple[str, str]]:
+    """Map possibly-duplicate model specs to unique runner ids.
+
+    Returns ``(runner_id, model_spec)``. A single copy keeps the bare spec;
+    duplicates become ``spec#1``, ``spec#2``, …
+    """
+    from collections import Counter
+
+    totals = Counter(specs)
+    seen: dict[str, int] = {}
+    out: list[tuple[str, str]] = []
+    for spec in specs:
+        seen[spec] = seen.get(spec, 0) + 1
+        if totals[spec] == 1:
+            out.append((spec, spec))
+        else:
+            out.append((f"{spec}#{seen[spec]}", spec))
+    return out
+
+
 EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
 
 

@@ -45,6 +45,10 @@ line-length = 100
 select = ["E", "F", "I", "UP", "B", "SIM", "N", "C4", "PTH"]
 ignore = ["E501", "SIM105", "SIM115", "PTH123"]
 
+[tool.ruff.lint.per-file-ignores]
+# GF(2^128) math keeps uppercase field names (H, V, Z, …).
+"sandbox/scripts/gf128_roots.py" = ["N806"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["backend"]
 

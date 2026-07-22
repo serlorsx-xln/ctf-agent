@@ -1,0 +1,60 @@
+"""Pack cache flock / readiness helpers (materialize lives on DockerSandbox)."""
+
+from __future__ import annotations
+
+import asyncio
+import fcntl
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger("ctf.sandbox")
+
+_pack_cache_locks: dict[str, asyncio.Lock] = {}
+_pack_cache_locks_mu = asyncio.Lock()
+
+
+async def _pack_cache_lock(pack_id: str) -> asyncio.Lock:
+    async with _pack_cache_locks_mu:
+        lock = _pack_cache_locks.get(pack_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _pack_cache_locks[pack_id] = lock
+        return lock
+
+
+def _pack_cache_lock_path(pack_id: str) -> Path:
+    """Cross-process lock file: one extract per pack_id globally."""
+    from backend.tool_router import pack_cache_root
+
+    d = pack_cache_root() / pack_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d / ".extract.lock"
+
+
+def _acquire_pack_flock(pack_id: str) -> int:
+    """Block until this process owns exclusive extract rights for ``pack_id``."""
+    path = _pack_cache_lock_path(pack_id)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    logger.info("Pack %s: waiting for cross-process extract lock (%s)", pack_id, path)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    logger.info("Pack %s: acquired cross-process extract lock", pack_id)
+    return fd
+
+
+def _release_pack_flock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _pack_cache_is_ready(pack_id: str) -> bool:
+    from backend.tool_router import PACK_SPECS, pack_cache_dir
+
+    spec = PACK_SPECS.get(pack_id)
+    if not spec:
+        return False
+    cache = pack_cache_dir(pack_id)
+    marker = cache / ".ready"
+    return marker.is_file() and all((cache / p.lstrip("/")).exists() for p in spec.paths)

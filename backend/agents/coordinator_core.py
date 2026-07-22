@@ -251,9 +251,7 @@ async def do_read_solver_trace(
                         f"** {t}: {json.dumps({k: v for k, v in d.items() if k != 'ts'})}"
                     )
                 elif t == "usage":
-                    line = (
-                        f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)}"
-                    )
+                    line = f"usage: in={d.get('input_tokens', 0)} out={d.get('output_tokens', 0)}"
                     if d.get("cost_usd") is not None:
                         line += f" cost=${d['cost_usd']:.4f} reported"
                     summary.append(line)

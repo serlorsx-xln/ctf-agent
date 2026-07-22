@@ -36,7 +36,13 @@ def _setup_logging(verbose: bool = False) -> None:
     default=None,
     help="Force sandbox image (optional). Default: auto-select from challenge files (L0 + packs).",
 )
-@click.option("--models", multiple=True, help="Model specs (default: all configured)")
+@click.option(
+    "--models",
+    multiple=True,
+    help="Model specs (repeatable, or comma-separated in one arg). "
+    "Same model multiple times = parallel instances. "
+    "Shorthand: cursor/grok-4.5*3",
+)
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option(
@@ -57,6 +63,34 @@ def _setup_logging(verbose: bool = False) -> None:
     is_flag=True,
     help="Skip interactive flag confirmation (also: CTF_AUTO_CONFIRM_FLAGS=1)",
 )
+@click.option(
+    "--pack",
+    "packs",
+    multiple=True,
+    help="Force prefetch pack id(s); repeatable (overrides auto-detect)",
+)
+@click.option(
+    "--eval-out",
+    default="",
+    help="Write JSON eval summary to PATH after a single-challenge run",
+)
+@click.option(
+    "--eval-max-wall-s",
+    default=None,
+    type=float,
+    help="Cancel single-challenge run after this many wall-clock seconds",
+)
+@click.option(
+    "--eval-max-usd",
+    default=None,
+    type=float,
+    help="Cancel single-challenge run after this many reported USD",
+)
+@click.option(
+    "--eval-strict-packs",
+    is_flag=True,
+    help="Fail closed if pack preflight/bootstrap errors (default: fail-soft)",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
     image: str | None,
@@ -68,6 +102,11 @@ def main(
     max_challenges: int,
     msg_port: int,
     auto_confirm_flags: bool,
+    packs: tuple[str, ...],
+    eval_out: str,
+    eval_max_wall_s: float | None,
+    eval_max_usd: float | None,
+    eval_strict_packs: bool,
     verbose: bool,
 ) -> None:
     """CTF Agent — multi-model solver swarm.
@@ -86,8 +125,22 @@ def main(
         settings.sandbox_image_locked = False
     settings.max_concurrent_challenges = max_challenges
     settings.auto_confirm_flags = auto_confirm_flags or settings.auto_confirm_flags
+    if packs:
+        settings.force_packs = list(packs)
+    if eval_out:
+        settings.eval_out = eval_out
+    if eval_max_wall_s is not None:
+        settings.eval_max_wall_s = eval_max_wall_s
+    if eval_max_usd is not None:
+        settings.eval_max_usd = eval_max_usd
+    if eval_strict_packs:
+        settings.eval_strict_packs = True
 
     model_specs = list(models) if models else list(DEFAULT_MODELS)
+    if models:
+        from backend.models import expand_model_cli_args
+
+        model_specs = expand_model_cli_args(list(models))
 
     console.print("[bold]CTF Agent[/bold]")
     console.print(f"  Models: {', '.join(model_specs)}")
@@ -96,17 +149,30 @@ def main(
     elif challenge:
         from backend.tool_router import resolve_sandbox_image
 
-        auto_image, packs = resolve_sandbox_image(
+        auto_image, detected = resolve_sandbox_image(
             challenge,
             default_image=settings.sandbox_image,
         )
-        pack_note = f"; prefetch packs={','.join(packs)}" if packs else ""
-        console.print(f"  Image: {auto_image} (L0{pack_note})")
+        show_packs = settings.force_packs or detected
+        pack_note = f"; prefetch packs={','.join(show_packs)}" if show_packs else ""
+        forced = " (forced)" if settings.force_packs else ""
+        console.print(f"  Image: {auto_image} (L0{pack_note}{forced})")
     else:
         console.print(
             f"  Image: L0 default={settings.sandbox_image} (packs loaded additively per challenge)"
         )
     console.print(f"  Max challenges: {max_challenges}")
+    if settings.eval_out or settings.eval_max_wall_s or settings.eval_max_usd:
+        bits = []
+        if settings.eval_max_wall_s:
+            bits.append(f"wall≤{settings.eval_max_wall_s}s")
+        if settings.eval_max_usd:
+            bits.append(f"usd≤{settings.eval_max_usd}")
+        if settings.eval_out:
+            bits.append(f"out={settings.eval_out}")
+        if settings.eval_strict_packs:
+            bits.append("strict-packs")
+        console.print(f"  Eval: {', '.join(bits)}")
     if settings.auto_confirm_flags:
         console.print("  Flag submit: local + auto-confirm (no human prompt)")
     else:

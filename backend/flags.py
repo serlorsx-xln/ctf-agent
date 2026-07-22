@@ -14,7 +14,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import select
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -121,7 +123,7 @@ def normalize_flags_required(value: int | None) -> int:
         return 1
     try:
         return max(1, int(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 1
 
 
@@ -151,6 +153,44 @@ def _flag_body(flag_lower: str) -> str:
     if "{" in flag_lower and flag_lower.endswith("}"):
         return flag_lower[flag_lower.find("{") + 1 : -1]
     return flag_lower
+
+
+def flag_core(flag: str) -> str:
+    """Inner body of PREFIX{body}, else the stripped flag itself.
+
+    Used to detect rewraps of already-tried intermediate tokens
+    (e.g. ``deadbeef`` → ``v1t{deadbeef}``) without enforcing a prefix.
+    """
+    f = (flag or "").strip()
+    if "{" in f and f.endswith("}"):
+        return f[f.find("{") + 1 : -1].strip()
+    return f
+
+
+def is_rewrap_of_tried(flag: str, tried: Sequence[str]) -> str | None:
+    """If ``flag`` is a brace-wrap / unwrap variant of a prior try, return that prior.
+
+    Does not enforce flag prefix — only catches recycling the same core token.
+    """
+    f = (flag or "").strip()
+    if not f or not tried:
+        return None
+    core = flag_core(f)
+    if not core:
+        return None
+    core_l = core.lower()
+    f_l = f.lower()
+    for prev in tried:
+        p = (prev or "").strip()
+        if not p or p == f:
+            continue
+        p_core = flag_core(p)
+        if not p_core:
+            continue
+        # Same core under different wrapping (or raw vs wrapped)
+        if core_l == p_core.lower() or core_l == p.lower() or f_l == p_core.lower():
+            return p
+    return None
 
 
 def is_decoy_flag(flag: str) -> bool:
@@ -270,6 +310,7 @@ def env_auto_confirm_flags() -> bool:
 # While True, solver live-logs / INFO should stay quiet so the prompt is visible.
 _confirm_active = False
 _confirm_filter_installed = False
+_confirm_cancel = threading.Event()
 
 
 class _QuietDuringConfirmFilter(logging.Filter):
@@ -280,6 +321,16 @@ class _QuietDuringConfirmFilter(logging.Filter):
 def confirm_in_progress() -> bool:
     """True while the operator is being asked to confirm a flag."""
     return _confirm_active
+
+
+def cancel_flag_confirmation() -> None:
+    """Abort any in-flight operator confirm (infra recover / swarm cancel)."""
+    _confirm_cancel.set()
+
+
+def reset_flag_confirmation_cancel() -> None:
+    """Clear the confirm-cancel latch before a new prompt."""
+    _confirm_cancel.clear()
 
 
 def _install_confirm_log_filter() -> None:
@@ -303,11 +354,7 @@ def _emit_confirm_banner(flag: str) -> None:
     """Print a hard-to-miss banner on stdout and stderr (logging often floods stderr)."""
     bar = "=" * 72
     body = (
-        f"\n\n{bar}\n"
-        f"  FLAG CANDIDATE — answer below (y/N + Enter)\n"
-        f"{bar}\n"
-        f"  {flag}\n"
-        f"{bar}\n"
+        f"\n\n{bar}\n  FLAG CANDIDATE — type y or n (Enter alone ignored)\n{bar}\n  {flag}\n{bar}\n"
     )
     for stream in (sys.stderr, sys.stdout):
         try:
@@ -316,11 +363,54 @@ def _emit_confirm_banner(flag: str) -> None:
             pass
 
 
+def _flush_stdin_buffer() -> None:
+    """Drop already-buffered keystrokes (e.g. stray Enter while logs scroll)."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def _stdin_line_or_cancel(prompt: str, *, poll_s: float = 0.4) -> str | None:
+    """Read a stdin line, or return None if confirm was cancelled.
+
+    Uses short select polls so infra_recover / swarm kill can abort a stuck prompt
+    without waiting forever for the operator.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    buf = ""
+    while not _confirm_cancel.is_set():
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], poll_s)
+        except ValueError, OSError:
+            # Non-selectable stdin — fall back to blocking input.
+            try:
+                return input().strip().lower()
+            except EOFError:
+                return ""
+        if not ready:
+            continue
+        chunk = sys.stdin.readline()
+        if chunk == "":
+            return ""  # EOF
+        buf += chunk
+        if "\n" in chunk:
+            return buf.strip().lower()
+    return None
+
+
 def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
     """Ask the operator whether ``flag`` is correct.
 
     Returns True only on explicit yes, or when auto-confirm is enabled.
-    Non-TTY / EOF → False (safe default: do not complete the run).
+    Empty Enter does **not** count as no (re-prompts) — a buffered newline
+    from scrolling logs must not auto-reject. Non-TTY / EOF → False.
+    Cancel via ``cancel_flag_confirmation()`` → False.
 
     Quiets INFO logging while waiting so parallel tool output does not bury
     the prompt (Cursor may run bash alongside submit_flag).
@@ -328,6 +418,7 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
     global _confirm_active
 
     f = (flag or "").strip()
+    reset_flag_confirmation_cancel()
     _install_confirm_log_filter()
     _confirm_active = True
     try:
@@ -345,12 +436,31 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
             for stream in (sys.stderr, sys.stdout):
                 print(msg, file=stream, flush=True)
             return False
-        try:
-            # input() always writes the prompt to stdout — keep it simple and loud.
-            ans = input(">>> Confirm this flag as correct? [y/N]: ").strip().lower()
-        except EOFError:
-            return False
-        ok = ans in ("y", "yes")
+        _flush_stdin_buffer()
+        while True:
+            if _confirm_cancel.is_set():
+                msg = ">>> Confirm cancelled (session recovering) — not counting.\n"
+                for stream in (sys.stderr, sys.stdout):
+                    print(msg, file=stream, flush=True)
+                return False
+            try:
+                ans = _stdin_line_or_cancel(">>> Confirm this flag as correct? [y/n]: ")
+            except EOFError:
+                return False
+            if ans is None:
+                msg = ">>> Confirm cancelled (session recovering) — not counting.\n"
+                for stream in (sys.stderr, sys.stdout):
+                    print(msg, file=stream, flush=True)
+                return False
+            if ans in ("y", "yes"):
+                ok = True
+                break
+            if ans in ("n", "no"):
+                ok = False
+                break
+            retry = ">>> Type y or n (empty Enter ignored).\n"
+            for stream in (sys.stderr, sys.stdout):
+                print(retry, file=stream, flush=True)
         result = (
             ">>> Confirmed — counting this flag.\n"
             if ok
@@ -392,10 +502,24 @@ def accept_flag(
             f'REJECTED decoy/placeholder "{f}". Recover the real flag from challenge logic.',
             False,
         )
+    # Wrap of a decoy body: PREFIX{fake_flag} / PREFIX{placeholder}
+    body = flag_core(f)
+    if body and body != f and is_decoy_flag(body):
+        return (
+            f'REJECTED decoy/placeholder wrap "{f}". Recover the real flag from challenge logic.',
+            False,
+        )
     if is_filename_like_flag_token(f) or f in artifacts:
         return (
             f'REJECTED "{f}" — looks like a packaging artifact (Dockerfile ENV / '
             "filename), not the awarded flag. Recover the real flag from challenge logic.",
+            False,
+        )
+    # PREFIX{artifact_basename} / wrap of collected packaging tokens
+    if body and body != f and (is_filename_like_flag_token(body) or body in artifacts):
+        return (
+            f'REJECTED "{f}" — wraps a packaging artifact, not the awarded flag. '
+            "Recover the real flag from challenge logic.",
             False,
         )
 

@@ -27,9 +27,9 @@ from backend.cost_tracker import CostTracker
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
-from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
+from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
+from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tools.core import (
     do_bash,
     do_list_files,
@@ -183,6 +183,7 @@ class CodexSolver:
             image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
             challenge_dir=challenge_dir,
             memory_limit=getattr(settings, "container_memory_limit", "4g"),
+            settings=settings,
         )
         self.use_vision = supports_vision(model_spec)
         self.loop_detector = LoopDetector()
@@ -205,12 +206,11 @@ class CodexSolver:
         self._turn_done: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
-        await self.sandbox.start()
+        from backend.agents.solver_control import start_sandbox_basics
 
-        arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
-        container_arch = arch_result.stdout.strip() or "unknown"
-
-        distfile_names = list_distfiles(self.challenge_dir)
+        container_arch, distfile_names = await start_sandbox_basics(
+            self.sandbox, self.meta, self.challenge_dir
+        )
         system_prompt = build_prompt(
             self.meta,
             distfile_names,
@@ -349,7 +349,7 @@ class CodexSolver:
                                 parsed = json.loads(text)
                                 if isinstance(parsed, dict) and "type" in parsed:
                                     self._structured_output = parsed
-                            except (json.JSONDecodeError, ValueError):
+                            except json.JSONDecodeError, ValueError:
                                 pass
                 elif item_type in ("reasoning", "thought", "agentReasoning"):
                     text = item.get("text") or item.get("content") or item.get("summary") or ""
@@ -498,7 +498,9 @@ class CodexSolver:
             if self._step_count % 5 == 0 and self.message_bus:
                 from backend.tools.core import do_check_findings
 
-                findings = await do_check_findings(self.message_bus, self.model_spec)
+                findings = await do_check_findings(
+                    self.message_bus, getattr(self, "runner_id", None) or self.model_spec
+                )
                 if findings and "No new findings" not in findings:
                     result_text = f"{result_text}\n\n---\n{findings}"
 
@@ -613,9 +615,9 @@ class CodexSolver:
                 # Context overflow is terminal — don't fallback, just error
                 if "context_length" in err or "context window" in err:
                     return self._result(ERROR)
-                if any(k in err for k in ("quota", "rate", "capacity", "usage")):
-                    return self._result(QUOTA_ERROR)
-                return self._result(ERROR)
+                from backend.agents.solver_control import classify_turn_error
+
+                return self._result(classify_turn_error(self._turn_error))
 
             if self._structured_output and self._structured_output.get("type") == "flag_found":
                 self._flag = self._structured_output.get("flag")
@@ -635,14 +637,14 @@ class CodexSolver:
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
-            if "quota" in error_str.lower() or "rate" in error_str.lower():
-                return self._result(QUOTA_ERROR)
-            return self._result(ERROR)
+            from backend.agents.solver_control import classify_turn_error
+
+            return self._result(classify_turn_error(error_str))
 
     def bump(self, insights: str) -> None:
-        self._bump_insights = insights
-        self.loop_detector.reset()
-        self.tracer.event("bump", insights=insights[:500])
+        from backend.agents.solver_control import stash_bump
+
+        stash_bump(self, insights)
 
     def _result(self, status: str) -> SolverResult:
         self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed)
@@ -663,7 +665,7 @@ class CodexSolver:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 pass
         if self._proc:
             try:

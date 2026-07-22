@@ -2,7 +2,8 @@
 
 Claude solvers rewrite Bash through docker exec; ``submit_flag`` /
 ``notify_coordinator`` are harness verbs (not container binaries). Agents often
-prefix them with ``cd … &&``, so matching must tolerate compound commands.
+prefix them with ``cd … &&``, so matching must tolerate compound commands,
+redirections, and pipelines.
 """
 
 from __future__ import annotations
@@ -13,21 +14,22 @@ from dataclasses import dataclass
 # Command boundary: start of string, or after ; && || newline
 _BOUNDARY = r"(?:^|(?<=;)|(?<=&&)|(?<=\|\|)|(?<=\n))"
 
+# Flag/message argument, then optional trailing junk (redirects/pipes) is OK —
+# we only need the verb + argument; suffix handling strips command connectors.
 _SUBMIT_FLAG_RE = re.compile(
     rf"{_BOUNDARY}\s*submit_flag\s+"
-    r"(?:(?P<q>['\"])(?P<quoted>.+?)(?P=q)|(?P<bare>\S+))"
-    r"\s*(?:$|(?=;)|(?=&&)|(?=\|\|)|(?=\n))",
+    r"(?:(?P<q>['\"])(?P<quoted>.+?)(?P=q)|(?P<bare>\S+))",
     re.DOTALL,
 )
 
 _NOTIFY_RE = re.compile(
     rf"{_BOUNDARY}\s*notify_coordinator\s+"
-    r"(?:(?P<q>['\"])(?P<quoted>.+?)(?P=q)|(?P<bare>\S+))"
-    r"\s*(?:$|(?=;)|(?=&&)|(?=\|\|)|(?=\n))",
+    r"(?:(?P<q>['\"])(?P<quoted>.+?)(?P=q)|(?P<bare>\S+))",
     re.DOTALL,
 )
 
-_SHELL_EXPANSION_RE = re.compile(r"\$\(|\$\{|`")
+# $(...), ${...}, backticks, and bare $VAR / $1
+_SHELL_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|\$[A-Za-z_][A-Za-z0-9_]*|\$\d+")
 
 
 @dataclass(frozen=True)
@@ -39,26 +41,32 @@ class ParsedHarnessVerb:
     end: int
     has_expansion: bool
 
-    @property
-    def suffix(self) -> str:
-        """Remainder of the command after this verb (leading ;/&&/|| stripped)."""
-        return ""  # filled by helper using full command
-
 
 def _strip_cmd_prefix(tail: str) -> str:
-    return re.sub(r"^\s*(?:&&|\|\||;)\s*", "", tail).strip()
+    """Keep only a real follow-on command (after ; / && / ||), not redirects."""
+    stripped = re.sub(r"^\s*(?:&&|\|\||;)\s*", "", tail).strip()
+    if not stripped:
+        return ""
+    # Pure redirection / pipeline continuation is not a follow-on harness command.
+    if stripped.startswith((">", "<", "|", "2>", "1>", "&")):
+        return ""
+    # e.g. `2>&1 | head` left after matching the flag arg
+    if re.match(r"^\d*&?>", stripped) or re.match(r"^\d*>", stripped):
+        return ""
+    return stripped
 
 
 def parse_submit_flag(command: str) -> ParsedHarnessVerb | None:
     """Parse ``submit_flag``; detect shell expansions that the harness cannot eval."""
     if not command or "submit_flag" not in command:
         return None
-    m = _SUBMIT_FLAG_RE.search(command.strip())
+    stripped = command.strip()
+    m = _SUBMIT_FLAG_RE.search(stripped)
     if not m:
         # Unquoted $(...) form: submit_flag $(cat f)
         m2 = re.search(
             rf"{_BOUNDARY}\s*submit_flag\s+(\$\([^)]*\)|\$\{{[^}}]*\}}|`[^`]+`)",
-            command.strip(),
+            stripped,
         )
         if not m2:
             return None
@@ -89,6 +97,13 @@ def extract_submit_flag(command: str) -> str | None:
     return parsed.value or None
 
 
+def submit_flag_attempted(command: str) -> bool:
+    """True when the line tries to invoke harness ``submit_flag`` (not a mention)."""
+    if not command or "submit_flag" not in command:
+        return False
+    return bool(re.search(rf"{_BOUNDARY}\s*submit_flag\b", command.strip()))
+
+
 def submit_flag_suffix(command: str, parsed: ParsedHarnessVerb) -> str:
     """Commands after the matched ``submit_flag`` (if any)."""
     # Match was against strip()'d text — map end onto original when possible.
@@ -115,7 +130,13 @@ def extract_notify_coordinator(command: str) -> str | None:
 
 
 SUBMIT_EXPANSION_ERROR = (
-    "ERROR: submit_flag does not expand shell $(...), ${...}, or backticks. "
+    "ERROR: submit_flag does not expand shell $VAR, $(...), ${...}, or backticks. "
     "Call the submit_flag tool with the literal flag string "
     "(e.g. read the file first, then submit the value)."
+)
+
+SUBMIT_UNPARSED_ERROR = (
+    "ERROR: could not parse submit_flag in this bash line. "
+    "Call the submit_flag tool (or mcp__ctf__submit_flag) with a literal flag string — "
+    "not a shell loop, pipeline, or variable."
 )

@@ -1,5 +1,6 @@
 == FORENSICS ==
 binwalk              Firmware / embedded extract. binwalk -e file
+unsquashfs           Extract squashfs rootfs. unsquashfs -d out rootfs.sqsh
 mmls / fls / icat    Sleuthkit partition + file listing + extract by inode
 tsk_recover          Recover deleted files. tsk_recover disk.img outdir/
 fsstat               Filesystem stats
@@ -7,7 +8,18 @@ foremost             Header/footer carving. foremost -i disk.img -o outdir/
 testdisk             Partition recovery
 dcfldd               Forensic dd with hashing
 xfs_db / xfs_repair  XFS inspection
+sqlite3              Query SQLite DBs (leases/trust/etc). sqlite3 file.db .dump
 volatility3          Memory forensics. vol -f memdump.raw windows.info
+qemu-arm-static      Run armhf ELF from firmware (alias: qarm / qemu-arm).
+                     Wrappers auto-add -L /usr/arm-linux-gnueabihf.
+                     qarm ./usr/bin/picam-verify --help
+
+== OFFICE / MACROS ==
+olevba / oleid       VBA + XLM macros from .xlsm/.docm (oletools)
+                     olevba file.xlsm
+olefile              Low-level OLE streams. import olefile
+openpyxl             Read .xlsx/.xlsm cells + fills (data_only=False).
+                     from openpyxl import load_workbook
 
 == NETWORK CAPTURE ==
 tshark               CLI packet analysis (Wireshark engine).
@@ -18,5 +30,6 @@ scapy                Python packet crafting / pcap parse.
                      from scapy.all import rdpcap, TCP, Raw
 
 == NOTES ==
-Loaded on demand when these commands are first used (.pcap / .pcapng prefetch).
+Loaded on demand when these commands are first used
+(.pcap / .pcapng / .img / .xlsm / .xlsx prefetch).
 Exit 137/124 → shrink dumps / use lighter plugins; re-read /challenge/TOOLS.txt.

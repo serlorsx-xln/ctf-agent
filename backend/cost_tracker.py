@@ -100,11 +100,7 @@ class CostTracker:
             prev = agent.reported_cost_usd or 0.0
             agent.reported_cost_usd = prev + float(reported_cost_usd)
 
-        cost_note = (
-            f" | ${reported_cost_usd:.4f} reported"
-            if reported_cost_usd is not None
-            else ""
-        )
+        cost_note = f" | ${reported_cost_usd:.4f} reported" if reported_cost_usd is not None else ""
         logger.debug(
             f"{agent_name}: {_fmt_tokens(usage.input_tokens)} in / "
             f"{_fmt_tokens(usage.cache_read_tokens)} cached ({_cache_rate(usage)} hit) / "
@@ -194,9 +190,7 @@ class CostTracker:
         for model, s in by_model.items():
             hit_rate = f"{(s['cached'] / s['input'] * 100):.0f}%" if s["input"] > 0 else "n/a"
             cost_note = (
-                f" | ${s['reported_cost']:.2f} reported"
-                if s["reported_cost"] is not None
-                else ""
+                f" | ${s['reported_cost']:.2f} reported" if s["reported_cost"] is not None else ""
             )
             logger.info(
                 "  %s: %s in / %s cached (%s hit) / %s out | %.1fs%s",

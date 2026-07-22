@@ -35,9 +35,12 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 
 # Low-memory GF(2^128) root finder (GCM field) — always available on L0
 COPY sandbox/scripts/gf128_roots.py /opt/ctf/gf128_roots.py
+COPY sandbox/scripts/pip3_ctf_wrapper.sh /opt/ctf/pip3_ctf_wrapper.sh
 RUN printf '%s\n' '#!/bin/bash' 'exec python3 /opt/ctf/gf128_roots.py "$@"' \
       > /usr/local/bin/gf128-roots \
-    && chmod +x /usr/local/bin/gf128-roots /opt/ctf/gf128_roots.py
+    && chmod +x /usr/local/bin/gf128-roots /opt/ctf/gf128_roots.py \
+    && install -m 0755 /opt/ctf/pip3_ctf_wrapper.sh /usr/local/bin/pip3 \
+    && ln -sfn pip3 /usr/local/bin/pip
 
 COPY sandbox/sandbox-tools-core.txt /tools.txt
 

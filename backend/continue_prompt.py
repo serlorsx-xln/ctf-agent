@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from backend.flags import normalize_flags_required
 
-
 INFRA_RECOVERY_BLURB = (
     "NOTE: The previous Cursor agent session was interrupted by a transport/"
     "bridge timeout or internal error — not because your approach failed. "

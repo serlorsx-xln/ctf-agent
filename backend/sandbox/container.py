@@ -1,169 +1,52 @@
-"""Docker sandbox for CTF challenge solving — native async via aiodocker."""
+"""Docker sandbox container lifecycle — start/stop/exec/files/packs."""
 
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import io
 import logging
 import os
 import shlex
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import aiodocker
 
+from backend.sandbox.docker_client import (
+    CONTAINER_LABEL,
+    OWNER_PID_LABEL,
+    _docker_cli,
+    _docker_client,
+    _start_semaphore,
+    _track_start,
+    _track_stop,
+)
+
+# _docker_cli still used by pack materialize / finalize paths.
+from backend.sandbox.governor import (
+    apply_live_memory,
+    parse_memory_bytes,
+    recommended_memory_limit,
+    sandbox_nano_cpus,
+)
+from backend.sandbox.harden import (
+    harden_hosts_edit_command,
+    harden_nmap_command,
+    parse_challenge_network_hints,
+)
+from backend.sandbox.packs import (
+    _acquire_pack_flock,
+    _pack_cache_is_ready,
+    _pack_cache_lock,
+    _release_pack_flock,
+)
+from backend.sandbox.proxy import _DEFAULT_PROBE_PORTS, _lab_probe_script
+
 logger = logging.getLogger(__name__)
-
-CONTAINER_LABEL = "ctf-agent"
-OWNER_PID_LABEL = "ctf-agent.owner-pid"
-
-# Concurrency control
-_start_semaphore: asyncio.Semaphore | None = None
-_active_count: int = 0
-_count_lock = asyncio.Lock()
-
-_WARN_THRESHOLDS = {100, 200, 500}
-
-# Serialize host pack-cache extract/finalize per pack_id (same process).
-_pack_cache_locks: dict[str, asyncio.Lock] = {}
-_pack_cache_locks_mu = asyncio.Lock()
-
-
-async def _pack_cache_lock(pack_id: str) -> asyncio.Lock:
-    async with _pack_cache_locks_mu:
-        lock = _pack_cache_locks.get(pack_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            _pack_cache_locks[pack_id] = lock
-        return lock
-
-
-def _pack_cache_lock_path(pack_id: str) -> Path:
-    """Cross-process lock file: one extract per pack_id globally."""
-    from backend.tool_router import pack_cache_root
-
-    d = pack_cache_root() / pack_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d / ".extract.lock"
-
-
-def _acquire_pack_flock(pack_id: str) -> int:
-    """Block until this process owns exclusive extract rights for ``pack_id``."""
-    path = _pack_cache_lock_path(pack_id)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
-    logger.info("Pack %s: waiting for cross-process extract lock (%s)", pack_id, path)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    logger.info("Pack %s: acquired cross-process extract lock", pack_id)
-    return fd
-
-
-def _release_pack_flock(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
-def _pack_cache_is_ready(pack_id: str) -> bool:
-    from backend.tool_router import PACK_SPECS, pack_cache_dir
-
-    spec = PACK_SPECS.get(pack_id)
-    if not spec:
-        return False
-    cache = pack_cache_dir(pack_id)
-    marker = cache / ".ready"
-    return marker.is_file() and all((cache / p.lstrip("/")).exists() for p in spec.paths)
-
-
-def _docker_client() -> aiodocker.Docker:
-    """Connect like the Docker CLI: DOCKER_HOST wins over ~/.docker currentContext.
-
-    aiodocker prefers currentContext (e.g. desktop-linux) over DOCKER_HOST, which
-    breaks Colima setups where the CLI sees images but the agent does not.
-    """
-    host = os.environ.get("DOCKER_HOST")
-    if host:
-        return aiodocker.Docker(url=host)
-    return aiodocker.Docker()
-
-
-def configure_semaphore(max_concurrent: int = 50) -> None:
-    """Set the max concurrent container starts. Call once at startup."""
-    global _start_semaphore
-    _start_semaphore = asyncio.Semaphore(max_concurrent)
-
-
-async def _track_start() -> None:
-    global _active_count
-    async with _count_lock:
-        _active_count += 1
-        if _active_count in _WARN_THRESHOLDS:
-            logger.warning("Active containers: %d", _active_count)
-
-
-async def _track_stop() -> None:
-    global _active_count
-    async with _count_lock:
-        _active_count = max(0, _active_count - 1)
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-async def cleanup_orphan_containers() -> None:
-    """Remove leftover ctf-agent containers without killing concurrent solvers.
-
-    Containers labeled with a live owner PID are left alone so two ``ctf-solve``
-    processes can run at once. Unlabeled running containers are also kept
-    (legacy / in-flight). Only true orphans (dead owner, or exited unlabeled)
-    are force-deleted.
-    """
-    try:
-        docker = _docker_client()
-        try:
-            containers = await docker.containers.list(
-                all=True,
-                filters={"label": [CONTAINER_LABEL]},
-            )
-            removed = 0
-            skipped = 0
-            for c in containers:
-                try:
-                    info = await c.show()
-                    labels = (info.get("Config") or {}).get("Labels") or {}
-                    owner = (labels.get(OWNER_PID_LABEL) or "").strip()
-                    status = ((info.get("State") or {}).get("Status") or "").lower()
-                    if owner.isdigit() and _pid_alive(int(owner)):
-                        skipped += 1
-                        continue
-                    if not owner and status in {"running", "created", "restarting"}:
-                        # No owner label but still live — likely a concurrent run
-                        # started before owner labeling; do not steal it.
-                        skipped += 1
-                        continue
-                    await c.delete(force=True)
-                    removed += 1
-                except Exception:
-                    pass
-            if removed:
-                logger.info(
-                    "Cleaned up %d orphan container(s) (kept %d live)",
-                    removed,
-                    skipped,
-                )
-        finally:
-            await docker.close()
-    except Exception as e:
-        logger.warning("Orphan cleanup failed: %s", e)
 
 
 @dataclass
@@ -173,235 +56,6 @@ class ExecResult:
     stderr: str
 
 
-def parse_challenge_network_hints(text: str) -> tuple[list[str], list[int]]:
-    """Extract lab hosts (IPs + lab-ish FQDNs) and TCP ports from challenge text.
-
-    Generic patterns only — not challenge-specific service lists.
-    Hostnames are included so Mac+VPN calibration can probe when no RFC1918 IP
-    is pasted (common Assumed Breach writeups with only ``dc.lab.htb``).
-    """
-    import re
-
-    hosts: list[str] = []
-    seen_h: set[str] = set()
-
-    def _add_host(h: str) -> None:
-        h = h.strip().rstrip(".").lower()
-        if not h or h in seen_h or h.startswith("127."):
-            return
-        if h in {"localhost", "example.com", "example.org"}:
-            return
-        # Docker Desktop / Colima gateway — not a remote VPN lab.
-        if h == "host.docker.internal" or h.endswith(".docker.internal"):
-            return
-        seen_h.add(h)
-        hosts.append(h)
-
-    for m in re.finditer(
-        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-        r"|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}"
-        r"|192\.168\.\d{1,3}\.\d{1,3})\b",
-        text,
-    ):
-        _add_host(m.group(0))
-
-    # Lab-ish DNS names (htb/thm/local/…) — not a general TLD grab.
-    for m in re.finditer(
-        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
-        r"(?:htb|thm|local|lab|internal|lan|corp|vuln|offline)\b",
-        text,
-        flags=re.I,
-    ):
-        _add_host(m.group(0))
-
-    # nc host port / connect host port
-    for m in re.finditer(
-        r"\bnc\s+([A-Za-z0-9._-]+)\s+(\d{2,5})\b",
-        text,
-        flags=re.I,
-    ):
-        _add_host(m.group(1))
-
-    ports: list[int] = []
-    seen_p: set[int] = set()
-
-    def _add_port(raw: str) -> None:
-        try:
-            p = int(raw)
-        except ValueError:
-            return
-        if 1 <= p <= 65535 and p not in seen_p:
-            seen_p.add(p)
-            ports.append(p)
-
-    # host:port / :port after an IP or hostname
-    for m in re.finditer(
-        r"(?:(?:10|172|192)\.[\d.]+|localhost|127\.0\.0\.1|[A-Za-z0-9._-]+\.(?:htb|thm|local|lab))"
-        r":(\d{1,5})\b",
-        text,
-        flags=re.I,
-    ):
-        _add_port(m.group(1))
-
-    for m in re.finditer(
-        r"\bnc\s+[A-Za-z0-9._-]+\s+(\d{2,5})\b",
-        text,
-        flags=re.I,
-    ):
-        _add_port(m.group(1))
-
-    # port 31337 / ports: 80, 443, 31337 / tcp/31337 / TCP 31337
-    for m in re.finditer(
-        r"\b(?:ports?|tcp|udp)\s*[#:=/\-]?\s*(\d{1,5}(?:\s*,\s*\d{1,5})*)\b",
-        text,
-        flags=re.I,
-    ):
-        for part in re.split(r"\s*,\s*", m.group(1)):
-            _add_port(part)
-
-    return hosts[:8], ports[:32]
-
-
-# Common services + a few often-closed sentinels (REFUSED ⇒ host is routed).
-_DEFAULT_PROBE_PORTS: tuple[int, ...] = (
-    22,
-    80,
-    443,
-    445,
-    3389,
-    5985,
-    8080,
-    8443,
-    8000,
-    3000,
-    1,
-    65535,
-)
-
-
-def _lab_probe_script(hosts: list[str], ports: list[int], ok_token: str) -> str:
-    """TCP probe: open OR connection-refused both mean the lab route works."""
-    hosts_py = ",".join(repr(h) for h in hosts)
-    ports_py = ",".join(str(p) for p in ports)
-    fail_token = ok_token.replace("OK", "FAIL")
-    return f"""
-import errno, socket
-hosts=[{hosts_py}]
-ports=[{ports_py}]
-for h in hosts:
-    for p in ports:
-        try:
-            s=socket.create_connection((h,p), timeout=4)
-            s.close()
-            print({ok_token!r}, h, p, 'open')
-            raise SystemExit(0)
-        except ConnectionRefusedError:
-            print({ok_token!r}, h, p, 'refused')
-            raise SystemExit(0)
-        except OSError as e:
-            if getattr(e, 'errno', None) in (errno.ECONNREFUSED, 111, 61):
-                print({ok_token!r}, h, p, 'refused')
-                raise SystemExit(0)
-        except Exception:
-            pass
-print({fail_token!r})
-"""
-
-
-def harden_nmap_command(command: str) -> str:
-    """Make agent nmap reliable through Docker/VPN/SOCKS.
-
-    Force ``-Pn`` and TCP connect ``-sT`` (SYN scans often lie in containers).
-    Rewrite explicit ``-sS`` to ``-sT``. Does **not** rewrite port ranges —
-    custom / full-port scans stay intact on every routing path.
-    """
-    import re
-
-    # Only when nmap is invoked as a command (not `echo nmap`).
-    if not (re.match(r"nmap\b", command.lstrip()) or re.search(r"[\n;|&]\s*nmap\b", command)):
-        return command
-
-    # SYN needs raw sockets; rewrite to connect scan. Leave -sU / -sV / etc.
-    command = re.sub(r"(?<!\S)-sS\b", "-sT", command)
-
-    # Real scan types only — not -sV/-sC (version/scripts).
-    has_scan = re.search(r"(?<!\S)-s(?:T|S|A|W|M|U|Y|Z|O|N|F|X)\b", command)
-    has_pn = re.search(r"(?<!\S)-Pn\b", command)
-    list_or_ping = re.search(r"(?<!\S)-s[nL]\b", command)
-
-    insert: list[str] = []
-    if not has_pn and not list_or_ping:
-        insert.append("-Pn")
-    if not has_scan and not list_or_ping:
-        insert.append("-sT")
-    if not insert:
-        return command
-
-    flags = " ".join(insert)
-
-    def _repl_head(m: re.Match[str]) -> str:
-        return f"{m.group(1)}nmap {flags}"
-
-    if re.match(r"nmap\b", command.lstrip()):
-        leading = command[: len(command) - len(command.lstrip())]
-        return leading + re.sub(r"nmap\b", f"nmap {flags}", command.lstrip(), count=1)
-    return re.sub(r"([\n;|&]\s*)nmap\b", _repl_head, command, count=1)
-
-
-def harden_hosts_edit_command(command: str) -> str:
-    """Rewrite in-place ``sed -i … /etc/hosts`` to a temp-file rewrite.
-
-    Docker bind-mounts ``/etc/hosts``; ``sed -i`` fails with
-    ``Device or resource busy``.
-    """
-    import re
-
-    if "/etc/hosts" not in command or "sed" not in command:
-        return command
-    if "ctf-hosts-add" in command:
-        return command
-
-    # Match a sed -i (optional suffix) … /etc/hosts invocation
-    pattern = re.compile(
-        r"(?P<head>^|[\n;|&]\s*)sed\s+-i\S*\s+(?P<body>.+?)\s+/etc/hosts\b",
-    )
-
-    def _rewrite(m: re.Match[str]) -> str:
-        head = m.group("head")
-        body = m.group("body").strip()
-        # body is typically "'s/foo/bar/'" or similar sed script + optional args
-        return (
-            f'{head}tmp=$(mktemp) && sed {body} /etc/hosts > "$tmp" '
-            f'&& cat "$tmp" > /etc/hosts && rm -f "$tmp"'
-        )
-
-    return pattern.sub(_rewrite, command, count=1)
-
-
-async def _docker_cli(*args: str, timeout_s: float = 600) -> tuple[int, str, str]:
-    """Run the host `docker` CLI (respects DOCKER_HOST)."""
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
-    )
-    try:
-        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return -1, "", f"docker {' '.join(args)} timed out after {timeout_s}s"
-    return (
-        proc.returncode or 0,
-        out_b.decode("utf-8", errors="replace"),
-        err_b.decode("utf-8", errors="replace"),
-    )
-
-
 @dataclass
 class DockerSandbox:
     """Isolated Docker container for a single solver agent."""
@@ -409,6 +63,10 @@ class DockerSandbox:
     image: str
     challenge_dir: str
     memory_limit: str = "16g"
+    # Optional Settings (or duck-typed) for pack preflight / eval_strict_packs.
+    settings: Any = None
+    # Wall time spent in pack prefetch (materialize + ensure) for eval artifacts.
+    preflight_ms: float = 0.0
     workspace_dir: str = ""
     ensured_packs: set[str] = field(default_factory=set)
     extra_path_dirs: list[str] = field(default_factory=list)
@@ -502,7 +160,7 @@ class DockerSandbox:
             if s.endswith("m"):
                 return int(s[:-1]) * 1024 * 1024
             return int(s)
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             logger.warning("Invalid memory_limit %r, defaulting to 4GB", self.memory_limit)
             return 4 * 1024 * 1024 * 1024
 
@@ -520,7 +178,10 @@ class DockerSandbox:
                 }
             ],
             "Memory": self._parse_memory_limit(),
-            "NanoCpus": int(2 * 1e9),
+            "NanoCpus": sandbox_nano_cpus(),
+            # Agents often crash qemu/pwn binaries; unbounded cores fill workspace
+            # (100MB+ per dump) and derail the solve.
+            "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}],
         }
 
     async def start(self) -> None:
@@ -532,7 +193,8 @@ class DockerSandbox:
 
             challenge_root = Path(self.challenge_dir).resolve()
             from backend.challenge import distfiles_host_path
-            from backend.tool_router import detect_packs, pack_binds_enabled
+            from backend.pack_preflight import resolve_prefetch_packs
+            from backend.tool_router import pack_binds_enabled
 
             dist_host = distfiles_host_path(challenge_root)
             binds: list[str] = [f"{self.workspace_dir}:/challenge/workspace:rw"]
@@ -556,8 +218,14 @@ class DockerSandbox:
 
             # Prefetch packs before create so large trees can share RO host binds.
             self._bind_mounted_packs = set()
-            prefetch = detect_packs(self.challenge_dir)
-            from backend.tool_router import recommended_memory_limit
+            prefetch = resolve_prefetch_packs(self.settings, self.challenge_dir)
+            strict = bool(getattr(self.settings, "eval_strict_packs", False))
+            preflight_t0 = time.monotonic()
+            logger.info(
+                "preflight_start packs=%s strict=%s",
+                prefetch or [],
+                strict,
+            )
 
             bumped = recommended_memory_limit(self.memory_limit, prefetch)
             if bumped != self.memory_limit:
@@ -570,6 +238,7 @@ class DockerSandbox:
                 self.memory_limit = bumped
             if pack_binds_enabled():
                 for pack in prefetch:
+                    pack_t0 = time.monotonic()
                     try:
                         cache = await self._materialize_pack_cache(pack)
                         pack_binds = self._pack_bind_strings(cache, pack)
@@ -577,10 +246,11 @@ class DockerSandbox:
                             binds.extend(pack_binds)
                             self._bind_mounted_packs.add(pack)
                             logger.info(
-                                "Pack %s: %d RO bind(s) from host cache %s",
+                                "Pack %s: %d RO bind(s) from host cache %s (%.0fms)",
                                 pack,
                                 len(pack_binds),
                                 cache,
+                                (time.monotonic() - pack_t0) * 1000,
                             )
                     except Exception as e:
                         logger.warning(
@@ -588,6 +258,8 @@ class DockerSandbox:
                             pack,
                             e,
                         )
+                        if strict:
+                            raise
 
             self._binds = binds
 
@@ -607,35 +279,52 @@ class DockerSandbox:
                 self._host_proxy_port = await acquire_host_proxy()
             else:
                 self._host_proxy_port = None
-                logger.info(
-                    "Host VPN routing: DIRECT (no remote lab hosts; skipping SOCKS)"
-                )
+                logger.info("Host VPN routing: DIRECT (no remote lab hosts; skipping SOCKS)")
             self._host_proxy_wrap = False
             try:
                 await self._create_and_start(self.image)
+                await self._ensure_pip_break_system_wrapper()
                 if self._host_proxy_port:
                     await self._install_host_proxy_client(self._host_proxy_port)
                     await self._calibrate_host_proxy_routing()
                 await self.refresh_tools_doc()
 
                 # Bootstrap prefetched packs (bind-mounted trees skip the copy).
+                # Refresh /tools.txt once after all packs (not per-pack).
                 try:
                     for pack in prefetch:
+                        pack_t0 = time.monotonic()
                         logger.info(
                             "Prefetch bootstrap pack=%s (apt/pip may take 1–2 min "
                             "on a fresh container)…",
                             pack,
                         )
-                        msg = await self.ensure_pack(pack)
-                        logger.info("Prefetch pack %s: %s", pack, msg)
+                        msg = await self.ensure_pack(pack, refresh_tools=False)
+                        logger.info(
+                            "Prefetch pack %s: %s (%.0fms)",
+                            pack,
+                            msg,
+                            (time.monotonic() - pack_t0) * 1000,
+                        )
+                    if prefetch:
+                        await self.refresh_tools_doc()
                 except Exception as e:
                     logger.warning("Pack prefetch failed: %s", e)
+                    if strict:
+                        raise
             except Exception:
                 if self._host_proxy_port is not None:
                     await release_host_proxy()
                     self._host_proxy_port = None
                     self._host_proxy_wrap = False
                 raise
+            finally:
+                self.preflight_ms = (time.monotonic() - preflight_t0) * 1000
+                logger.info(
+                    "preflight_done packs=%s preflight_ms=%.0f",
+                    prefetch or [],
+                    self.preflight_ms,
+                )
 
     async def _resolve_l0_image(self, preferred: str) -> str:
         """Use preferred L0 if present; else ``ctf-sandbox-core``."""
@@ -935,6 +624,31 @@ class DockerSandbox:
     def _harden_hosts_edit_command(self, command: str) -> str:
         return harden_hosts_edit_command(command)
 
+    async def _ensure_pip_break_system_wrapper(self) -> None:
+        """Install /usr/local/bin/pip3 wrapper so bare `pip install` works (PEP 668).
+
+        New core images ship this in Dockerfile.core; inject at start so older
+        ctf-sandbox-core tags still behave. Idempotent.
+        """
+        from pathlib import Path
+
+        wrapper = (
+            Path(__file__).resolve().parents[2] / "sandbox" / "scripts" / "pip3_ctf_wrapper.sh"
+        )
+        try:
+            body = wrapper.read_bytes()
+        except OSError as e:
+            logger.warning("pip3 wrapper script missing on host: %s", e)
+            return
+        try:
+            await self._write_file_inner("/usr/local/bin/pip3", body)
+            await self._exec_inner(
+                "chmod +x /usr/local/bin/pip3 && ln -sfn pip3 /usr/local/bin/pip",
+                timeout_s=15,
+            )
+        except Exception as e:
+            logger.warning("Could not install pip3 PEP 668 wrapper: %s", e)
+
     async def refresh_tools_doc(self) -> None:
         from backend.tool_router import merged_tools_doc
 
@@ -956,12 +670,15 @@ class DockerSandbox:
         )
         return result.exit_code == 0 and "yes" in result.stdout
 
-    async def ensure_pack(self, pack_id: str) -> str:
+    async def ensure_pack(self, pack_id: str, *, refresh_tools: bool = True) -> str:
         """Attach an L1 tool pack into this L0 container (additive, idempotent).
 
         Prefetched packs are usually RO bind-mounted from the host cache; late
         discovery falls back to docker cp. Return strings are agent-visible —
         keep them generic (no pack/image IDs).
+
+        When ``refresh_tools`` is False (batch preflight), skip rewriting
+        ``/tools.txt`` — caller refreshes once after all packs.
         """
         from backend.tool_router import PACK_SPECS
 
@@ -972,9 +689,9 @@ class DockerSandbox:
             return "Those tools are not available in this environment."
 
         async with self._lock:
-            return await self._ensure_pack_inner(pack_id)
+            return await self._ensure_pack_inner(pack_id, refresh_tools=refresh_tools)
 
-    async def _ensure_pack_inner(self, pack_id: str) -> str:
+    async def _ensure_pack_inner(self, pack_id: str, *, refresh_tools: bool = True) -> str:
         from backend.tool_router import (
             PACK_SPECS,
             bootstrap_script,
@@ -987,38 +704,54 @@ class DockerSandbox:
             self.ensured_packs.add(pack_id)
             self._remember_pack_paths(pack_id)
             await self._maybe_raise_memory([pack_id])
-            await self.refresh_tools_doc()
+            if refresh_tools:
+                await self.refresh_tools_doc()
             return "Required tools are already available."
 
         spec = PACK_SPECS[pack_id]
         bound = pack_id in self._bind_mounted_packs
+        donor_available = True
         try:
             await self._docker.images.inspect(spec.image)
         except Exception:
-            # Crypto-style packs may use L0 as donor — fall back to the live image.
+            donor_available = False
+
+        # Consistency: packs with ``requires_donor`` need the donor image (or a
+        # prior bind mount). Never mark ready after apt/pip alone — that falsely
+        # advertises Ghidra/jadx/stegseek. Apt/pip-only packs use core + paths=().
+        if not donor_available and spec.requires_donor and not bound:
+            logger.warning(
+                "Pack donor image missing: pack=%s image=%s",
+                pack_id,
+                spec.image,
+            )
+            from backend.tool_router import donor_build_hint
+
+            hint = donor_build_hint(pack_id)
+            return (
+                "Required tools are not installed in this environment yet."
+                f"{hint} "
+                "Ask an operator to finish sandbox setup, then retry the command."
+            )
+        if not donor_available and not bound:
+            # Apt/pip pack whose declared image tag is missing — bootstrap on L0
+            # if the live sandbox image is present (normally both are core).
             try:
                 await self._docker.images.inspect(self.image)
-                logger.warning(
-                    "Pack donor %s missing; using live image %s",
-                    spec.image,
-                    self.image,
-                )
             except Exception:
-                # Bind-mounted packs can still bootstrap without the donor image.
-                if not bound:
-                    logger.warning(
-                        "Pack donor image missing: pack=%s image=%s",
-                        pack_id,
-                        spec.image,
-                    )
-                    from backend.tool_router import donor_build_hint
+                from backend.tool_router import donor_build_hint
 
-                    hint = donor_build_hint(pack_id)
-                    return (
-                        "Required tools are not installed in this environment yet."
-                        f"{hint} "
-                        "Ask an operator to finish sandbox setup, then retry the command."
-                    )
+                hint = donor_build_hint(pack_id)
+                return (
+                    "Required tools are not installed in this environment yet."
+                    f"{hint} "
+                    "Ask an operator to finish sandbox setup, then retry the command."
+                )
+            logger.warning(
+                "Pack image %s missing; apt/pip bootstrap on live %s",
+                spec.image,
+                self.image,
+            )
 
         logger.info(
             "Ensuring pack '%s' additively into %s (%s)",
@@ -1071,7 +804,8 @@ class DockerSandbox:
         self.ensured_packs.add(pack_id)
         self._remember_pack_paths(pack_id)
         await self._maybe_raise_memory([pack_id])
-        await self.refresh_tools_doc()
+        if refresh_tools:
+            await self.refresh_tools_doc()
         return (
             "Additional tools are now available. "
             "Workspace was preserved. Re-run your command, then re-read /tools.txt."
@@ -1079,8 +813,6 @@ class DockerSandbox:
 
     async def _maybe_raise_memory(self, packs: list[str]) -> None:
         """Bump live container Memory if pack floors exceed the current limit."""
-        from backend.tool_router import parse_memory_bytes, recommended_memory_limit
-
         new = recommended_memory_limit(self.memory_limit, packs)
         if parse_memory_bytes(new) <= parse_memory_bytes(self.memory_limit):
             return
@@ -1088,21 +820,8 @@ class DockerSandbox:
         self.memory_limit = new
         if not self._container:
             return
-        cid = self._container.id
-        rc, _, err = await _docker_cli(
-            "update",
-            f"--memory={new}",
-            f"--memory-swap={new}",
-            cid,
-            timeout_s=60,
-        )
-        if rc != 0:
-            logger.warning(
-                "Could not raise container memory %s → %s: %s",
-                old,
-                new,
-                (err or "").strip()[:300],
-            )
+        ok = await apply_live_memory(self._container.id, new)
+        if not ok:
             self.memory_limit = old
             return
         logger.info("Raised live sandbox memory %s → %s for packs %s", old, new, packs)

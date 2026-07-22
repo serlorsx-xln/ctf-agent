@@ -38,3 +38,6 @@ codex-schema-*/
 # Organizer/build trees — not agent handouts
 challenges/*/.service-src/
 challenges/*/Dockerfile.local
+
+# Human-only expected flags (never mount / never prompt)
+eval/sealed/

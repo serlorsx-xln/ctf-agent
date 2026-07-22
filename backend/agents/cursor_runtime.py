@@ -164,7 +164,12 @@ def is_infra_error_message(message: str | None) -> bool:
     """True when the failure is Cursor bridge/transport, not the challenge."""
     if not message:
         return False
-    err = message.lower()
+    err = message.strip().lower()
+    # Cursor often finishes a turn as status=error with no detail ("error").
+    # Treat those as session/transport poison so swarm recovers instead of
+    # counting toward the consecutive-ERROR give-up limit.
+    if err in {"error", "run error", "unknown error", "failed"}:
+        return True
     needles = (
         "bridge request timed out",
         "readtimeout",

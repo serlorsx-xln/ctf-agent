@@ -71,13 +71,13 @@ class LocalChallengePoller:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 pass
 
     async def get_event(self, timeout: float = 1.0) -> PollEvent | None:
         try:
             return await asyncio.wait_for(self._event_queue.get(), timeout=timeout)
-        except (TimeoutError, asyncio.CancelledError):
+        except TimeoutError, asyncio.CancelledError:
             return None
 
     def drain_events(self) -> list[PollEvent]:

@@ -27,7 +27,7 @@ from backend.models import (
     supports_vision,
 )
 from backend.output_types import FlagFound
-from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
+from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tools.flag import submit_flag
@@ -153,6 +153,7 @@ class Solver:
             image=settings.sandbox_image,
             challenge_dir=challenge_dir,
             memory_limit=settings.container_memory_limit,
+            settings=settings,
         )
         self.use_vision = supports_vision(model_spec)
         self.deps = SolverDeps(
@@ -177,16 +178,15 @@ class Solver:
 
     async def start(self) -> None:
         """Start the sandbox and build the agent."""
+        from backend.agents.solver_control import start_sandbox_basics
+
         if self.sandbox is None:
             raise RuntimeError("Solver sandbox is missing")
-        if not self.sandbox._container:
-            await self.sandbox.start()
+        container_arch, distfile_names = await start_sandbox_basics(
+            self.sandbox, self.meta, self.challenge_dir
+        )
         self.deps.workspace_dir = self.sandbox.workspace_dir
 
-        arch_result = await self.sandbox.exec("uname -m", timeout_s=10)
-        container_arch = arch_result.stdout.strip() or "unknown"
-
-        distfile_names = list_distfiles(self.challenge_dir)
         system_prompt = build_prompt(
             self.meta,
             distfile_names,
@@ -310,9 +310,7 @@ class Solver:
     ) -> SolverResult:
         agent_usage = self.cost_tracker.by_agent.get(self.agent_name)
         reported = (
-            agent_usage.reported_cost_usd
-            if agent_usage and agent_usage.has_reported_cost
-            else None
+            agent_usage.reported_cost_usd if agent_usage and agent_usage.has_reported_cost else None
         )
         finish_kw: dict = {
             "status": status,

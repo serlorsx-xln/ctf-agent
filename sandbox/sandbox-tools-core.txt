@@ -41,3 +41,4 @@ abandoning the technique. For huge scans, narrow scope or use a faster tool.
 Python packages belong to the interpreter you run (e.g. `python3` vs `sage`).
 If a needed command is missing, just run it — the sandbox may install it
 once and retry. Then re-read /tools.txt. Workspace is preserved.
+`pip3 install …` works without flags (wrapper adds --break-system-packages).

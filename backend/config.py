@@ -25,10 +25,17 @@ class Settings(BaseSettings):
     # True when user passed --image (router must not override).
     sandbox_image_locked: bool = False
     detected_packs: list[str] = Field(default_factory=list)
+    # CLI ``--pack`` forces prefetch list (wins over detect / detected_packs).
+    force_packs: list[str] = Field(default_factory=list)
     max_concurrent_challenges: int = 10
     container_memory_limit: str = "16g"
     # When True, skip interactive flag confirmation (tests / unattended).
     # Also honored via env CTF_AUTO_CONFIRM_FLAGS=1.
     auto_confirm_flags: bool = False
+    # Eval harness (optional budgets + JSON summary path).
+    eval_max_wall_s: float | None = None
+    eval_max_usd: float | None = None
+    eval_strict_packs: bool = False
+    eval_out: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

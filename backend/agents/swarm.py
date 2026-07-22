@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
 from backend.message_bus import ChallengeMessageBus
-from backend.models import DEFAULT_MODELS, provider_from_spec
+from backend.models import DEFAULT_MODELS, assign_runner_ids, provider_from_spec
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -28,6 +29,19 @@ if TYPE_CHECKING:
     from backend.config import Settings
 
 logger = logging.getLogger(__name__)
+
+_RecoverSession = Callable[[str | None], Awaitable[None]]
+
+
+def _tracker_cost_usd(tracker: Any) -> float:
+    """Read CostTracker.total_cost_usd; tolerate MagicMock callables in tests."""
+    raw: Any = getattr(tracker, "total_cost_usd", 0.0)
+    if callable(raw):
+        raw = raw()
+    try:
+        return float(raw)
+    except TypeError, ValueError:
+        return 0.0
 
 
 # After this many bridge recoveries in one challenge, stop (avoid infinite spin).
@@ -72,11 +86,21 @@ class ChallengeSwarm:
         default_factory=dict
     )  # per-model last submit timestamp
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+    # Eval harness counters (infra recoveries + wall clock).
+    _eval: Any = field(default=None, repr=False)
+    _infra_recoveries_total: int = 0
+    _last_model_spec: str = ""
+    _last_preflight_ms: float = 0.0
+    _last_steps: int = 0
+    _last_status: str = ""
+    _last_flag: str | None = None
 
     def __post_init__(self) -> None:
         # Transparent L1: stay on L0; prefetch packs into the same container.
+        from backend.eval_run import EvalRunState
         from backend.tool_router import apply_router_to_settings
 
+        self._eval = EvalRunState()
         image, packs = apply_router_to_settings(self.settings, self.challenge_dir)
         if packs:
             logger.info(
@@ -88,7 +112,43 @@ class ChallengeSwarm:
         else:
             logger.info("[%s] L0 image=%s", self.meta.name, image)
 
-    def _create_solver(self, model_spec: str):
+    def _tag_solver(self, solver, runner_id: str, model_spec: str):
+        """Give duplicate-model runners distinct names / logs / bus identity."""
+        solver.runner_id = runner_id
+        if runner_id == model_spec:
+            return
+        # e.g. cursor/grok-4.5#2 → grok-4.5#2
+        label = runner_id.split("/", 1)[-1]
+        mid = getattr(solver, "model_id", label)
+        if "#" in label:
+            mid = label
+        solver.agent_name = f"{self.meta.name}/{mid}"
+        tracer = getattr(solver, "tracer", None)
+        if tracer is not None:
+            from backend.tracing import SolverTracer
+
+            old_path = getattr(tracer, "path", None)
+            try:
+                tracer.close()
+            except Exception:
+                pass
+            solver.tracer = SolverTracer(self.meta.name, mid)
+            # Drop the unused pre-tag stub file (parallel #N left empty traces).
+            if old_path:
+                try:
+                    from pathlib import Path
+
+                    p = Path(old_path)
+                    if p.is_file() and p.stat().st_size == 0:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # Pydantic solver bus identity
+        deps = getattr(solver, "deps", None)
+        if deps is not None and hasattr(deps, "model_spec"):
+            deps.model_spec = runner_id
+
+    def _create_solver(self, model_spec: str, runner_id: str | None = None):
         """Create the right solver type based on provider.
 
         - cursor/* → CursorSolver (Cursor SDK + CURSOR_API_KEY)
@@ -96,17 +156,18 @@ class ChallengeSwarm:
         - codex/* → CodexSolver (Codex App Server, subscription-first)
         - bedrock/*, azure/*, zen/*, google/* → Pydantic AI Solver (API)
         """
+        rid = runner_id or model_spec
         provider = provider_from_spec(model_spec)
 
         def _submit_fn(flag):
-            return self.try_submit_flag(flag, model_spec)
+            return self.try_submit_flag(flag, rid)
 
-        _notify = self._make_notify_fn(model_spec)
+        _notify = self._make_notify_fn(rid)
 
         if provider == "cursor":
             from backend.agents.cursor_solver import CursorSolver
 
-            return CursorSolver(
+            solver = CursorSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
@@ -117,11 +178,13 @@ class ChallengeSwarm:
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
             )
+            self._tag_solver(solver, rid, model_spec)
+            return solver
 
         if provider == "claude-sdk":
             from backend.agents.claude_solver import ClaudeSolver
 
-            return ClaudeSolver(
+            solver = ClaudeSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
@@ -132,11 +195,13 @@ class ChallengeSwarm:
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
             )
+            self._tag_solver(solver, rid, model_spec)
+            return solver
 
         if provider == "codex":
             from backend.agents.codex_solver import CodexSolver
 
-            return CodexSolver(
+            solver = CodexSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
@@ -147,22 +212,31 @@ class ChallengeSwarm:
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
             )
+            self._tag_solver(solver, rid, model_spec)
+            return solver
 
-        return self._create_pydantic_solver(model_spec)
+        solver = self._create_pydantic_solver(model_spec, runner_id=rid)
+        self._tag_solver(solver, rid, model_spec)
+        return solver
 
-    def _make_notify_fn(self, model_spec: str):
+    def _make_notify_fn(self, runner_id: str):
         """Create a callback that pushes solver messages to the coordinator inbox."""
 
         async def _notify(message: str) -> None:
             if self.coordinator_inbox:
-                self.coordinator_inbox.put_nowait(f"[{self.meta.name}/{model_spec}] {message}")
+                self.coordinator_inbox.put_nowait(f"[{self.meta.name}/{runner_id}] {message}")
 
         return _notify
 
     def _create_pydantic_solver(
-        self, model_spec: str, sandbox=None, owns_sandbox: bool | None = None
+        self,
+        model_spec: str,
+        sandbox=None,
+        owns_sandbox: bool | None = None,
+        runner_id: str | None = None,
     ) -> Solver:
         """Create a Pydantic AI solver. Pass sandbox to reuse an existing container (quota fallback)."""
+        rid = runner_id or model_spec
         solver = Solver(
             model_spec=model_spec,
             challenge_dir=self.challenge_dir,
@@ -174,9 +248,9 @@ class ChallengeSwarm:
             owns_sandbox=owns_sandbox,
         )
         solver.deps.message_bus = self.message_bus
-        solver.deps.model_spec = model_spec
-        solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, model_spec)
-        solver.deps.notify_coordinator = self._make_notify_fn(model_spec)
+        solver.deps.model_spec = rid
+        solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, rid)
+        solver.deps.notify_coordinator = self._make_notify_fn(rid)
         from backend.flags import normalize_flags_required
 
         solver.deps.flags_required = normalize_flags_required(
@@ -186,9 +260,40 @@ class ChallengeSwarm:
 
     def _gather_sibling_insights(self, exclude_model: str) -> str:
         parts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(label: str, text: str) -> None:
+            t = (text or "").strip()
+            if not t or t.startswith(("Error:", "Turn failed:", "Infra:")):
+                return
+            key = f"{label}:{t[:200]}"
+            if key in seen:
+                return
+            seen.add(key)
+            parts.append(f"[{label}]: {t}")
+
         for model, finding in self.findings.items():
-            if model != exclude_model and finding:
-                parts.append(f"[{model}]: {finding}")
+            if model != exclude_model:
+                _add(model, finding)
+
+        # Live mid-turn notes from siblings still running
+        for rid, solver in self.solvers.items():
+            if rid == exclude_model:
+                continue
+            live = getattr(solver, "_findings", None) or ""
+            _add(rid, str(live))
+
+        if self.confirmed_flags:
+            parts.append("Accepted flag(s) so far: " + " | ".join(self.confirmed_flags))
+        if self._submitted_flags:
+            # Help siblings avoid junk rewrap loops
+            sample = sorted(self._submitted_flags)
+            if len(sample) > 24:
+                sample = sample[:24] + ["…"]
+            parts.append(
+                "Already-tried candidates (do not resubmit or wrap these): " + ", ".join(sample)
+            )
+
         return "\n\n".join(parts) if parts else "No sibling insights available yet."
 
     # Escalating cooldowns after incorrect submissions (per model)
@@ -220,6 +325,17 @@ class ChallengeSwarm:
             if normalized in self._submitted_flags:
                 return "INCORRECT — already tried this exact flag.", False
 
+            from backend.flags import is_rewrap_of_tried
+
+            prior_try = is_rewrap_of_tried(normalized, list(self._submitted_flags))
+            if prior_try is not None:
+                return (
+                    f'REJECTED — "{normalized}" is a wrap/unwrap of already-tried '
+                    f'"{prior_try}". Do not wrap intermediate tokens, digests, EXIF, '
+                    "or firmware codenames. Recover the real awarded flag.",
+                    False,
+                )
+
             # Escalating cooldown after incorrect submissions
             wrong_count = self._submit_count.get(model_spec, 0)
             cooldown_idx = min(wrong_count, len(self.SUBMISSION_COOLDOWNS) - 1)
@@ -247,6 +363,8 @@ class ChallengeSwarm:
                 challenge_dir=self.challenge_dir,
                 auto_confirm=auto,
             )
+            # Hard rejects (decoy/artifact/rewrap-style) still dedupe so agents
+            # do not re-prompt the operator with the same junk.
             self._submitted_flags.add(normalized)
 
             if display.startswith(("ACCEPTED", "CORRECT")):
@@ -262,29 +380,34 @@ class ChallengeSwarm:
                     self.confirmed_flag = " | ".join(self.confirmed_flags)
                 return display, is_complete
 
-            # Rejected / not counted
-            self._submit_count[model_spec] = wrong_count + 1
-            self._last_submit_time[model_spec] = time.monotonic()
+            # Rejected / not counted — escalate cooldown only for attempts that
+            # reached the operator (or incorrect), not pure parse empties.
+            if not display.startswith("Empty flag"):
+                self._submit_count[model_spec] = wrong_count + 1
+                self._last_submit_time[model_spec] = time.monotonic()
             return display, False
 
-    async def _run_solver(self, model_spec: str) -> SolverResult | None:
-        solver = self._create_solver(model_spec)
-        self.solvers[model_spec] = solver
+    async def _run_solver(self, runner_id: str, model_spec: str) -> SolverResult | None:
+        solver = self._create_solver(model_spec, runner_id=runner_id)
+        self.solvers[runner_id] = solver
 
         try:
-            result, final_solver = await self._run_solver_loop(solver, model_spec)
+            result, final_solver = await self._run_solver_loop(solver, runner_id, model_spec)
             solver = final_solver
             return result
         except Exception as e:
-            logger.error(f"[{self.meta.name}/{model_spec}] Fatal: {e}", exc_info=True)
+            logger.error(f"[{self.meta.name}/{runner_id}] Fatal: {e}", exc_info=True)
             return None
         finally:
             await solver.stop()
 
     async def _run_solver_loop(
-        self, solver, model_spec: str
+        self, solver, runner_id: str, model_spec: str
     ) -> tuple[SolverResult, SolverProtocol]:
-        """Inner loop: start → run → bump → run → ..."""
+        """Inner loop: start → run → bump → run → ...
+
+        ``runner_id`` keys solvers/findings/bus; ``model_spec`` is the real API model.
+        """
         bump_count = 0
         consecutive_errors = 0
         infra_recoveries = 0
@@ -297,19 +420,58 @@ class ChallengeSwarm:
             log_path="",
         )
         await solver.start()
+        sb = getattr(solver, "sandbox", None)
+        if sb is not None:
+            self._last_preflight_ms = float(getattr(sb, "preflight_ms", 0.0) or 0.0)
+        self._last_model_spec = runner_id
 
         while not self.cancel_event.is_set():
-            result = await solver.run_until_done_or_gave_up()
+            # Eval wall / USD budgets (thin harness).
+            cost_now = 0.0
+            if self.cost_tracker is not None:
+                cost_now = _tracker_cost_usd(self.cost_tracker)
+            budget = self._eval.budget_exceeded(self.settings, cost_now) if self._eval else None
+            if budget:
+                from backend.eval_run import EVAL_BUDGET
 
-            # Only broadcast useful findings — skip errors and broken solvers
+                logger.warning(
+                    "[%s/%s] Eval budget hit (%s) — cancelling",
+                    self.meta.name,
+                    runner_id,
+                    budget,
+                )
+                self.cancel_event.set()
+                result = SolverResult(
+                    flag=self.confirmed_flag,
+                    status=EVAL_BUDGET,
+                    findings_summary=f"Eval budget exceeded ({budget})",
+                    step_count=result.step_count,
+                    cost_usd=result.cost_usd,
+                    log_path=result.log_path,
+                )
+                self._last_status = EVAL_BUDGET
+                self._last_steps = result.step_count
+                self._last_flag = result.flag
+                return result, solver
+
+            result = await solver.run_until_done_or_gave_up()
+            self._last_status = result.status
+            self._last_steps = result.step_count
+            self._last_flag = result.flag
+
+            # Only broadcast useful findings — skip broken solvers, but DO keep
+            # mid-run notes even on infra_error so sibling recover gets context.
+            live_notes = (result.findings_summary or "").strip()
+            solver_notes = str(getattr(solver, "_findings", "") or "").strip()
+            note = live_notes if live_notes else solver_notes
             if (
-                result.status not in (ERROR, QUOTA_ERROR, INFRA_ERROR)
-                and result.step_count > 0
-                and result.findings_summary
-                and not result.findings_summary.startswith(("Error:", "Turn failed:", "Infra:"))
+                result.step_count > 0
+                and note
+                and not note.startswith(("Error:", "Turn failed:", "Infra:"))
             ):
-                self.findings[model_spec] = result.findings_summary
-                await self.message_bus.post(model_spec, result.findings_summary[:500])
+                self.findings[runner_id] = note
+                if result.status not in (ERROR, QUOTA_ERROR, INFRA_ERROR):
+                    await self.message_bus.post(runner_id, note[:500])
 
             if result.status == FLAG_FOUND and self.confirmed_flag:
                 # Soft race: cancel siblings only when all required flags are in.
@@ -324,7 +486,7 @@ class ChallengeSwarm:
                         log_path=result.log_path,
                     )
                 self.winner = result
-                logger.info(f"[{self.meta.name}] Flag(s) found by {model_spec}: {result.flag}")
+                logger.info(f"[{self.meta.name}] Flag(s) found by {runner_id}: {result.flag}")
                 return result, solver
 
             if result.status == FLAG_FOUND and not self.confirmed_flag:
@@ -334,7 +496,7 @@ class ChallengeSwarm:
                     "[%s] %s reported FLAG_FOUND but challenge incomplete "
                     "(%s/%s) — soft race continues",
                     self.meta.name,
-                    model_spec,
+                    runner_id,
                     len(self.confirmed_flags),
                     normalize_flags_required(getattr(self.meta, "flags_required", 1)),
                 )
@@ -359,16 +521,20 @@ class ChallengeSwarm:
                 fallback_spec = _quota_fallback_spec(model_spec)
                 if fallback_spec:
                     logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Quota exhausted — falling back to {fallback_spec}"
+                        f"[{self.meta.name}/{runner_id}] Quota exhausted — falling back to {fallback_spec}"
                     )
                     existing_sandbox = solver.sandbox
                     # Detach sandbox from old solver so stop() doesn't destroy it
                     solver.sandbox = None  # type: ignore[assignment]
                     await solver.stop()
                     solver = self._create_pydantic_solver(
-                        fallback_spec, sandbox=existing_sandbox, owns_sandbox=True
+                        fallback_spec,
+                        sandbox=existing_sandbox,
+                        owns_sandbox=True,
+                        runner_id=runner_id,
                     )
-                    self.solvers[model_spec] = solver
+                    self._tag_solver(solver, runner_id, fallback_spec)
+                    self.solvers[runner_id] = solver
                     await solver.start()
                     continue
                 # No fallback available, treat as error
@@ -378,12 +544,22 @@ class ChallengeSwarm:
             # toward the consecutive-ERROR give-up limit (session is poisoned).
             if result.status == INFRA_ERROR:
                 infra_recoveries += 1
+                self._infra_recoveries_total += 1
+                if self._eval is not None:
+                    self._eval.infra_recoveries = self._infra_recoveries_total
                 consecutive_errors = 0
+                # Unblock any operator confirm stuck under the flag lock.
+                try:
+                    from backend.flags import cancel_flag_confirmation
+
+                    cancel_flag_confirmation()
+                except Exception:
+                    pass
                 if infra_recoveries > MAX_INFRA_RECOVERIES:
                     logger.warning(
                         "[%s/%s] %s infra recoveries — giving up",
                         self.meta.name,
-                        model_spec,
+                        runner_id,
                         infra_recoveries,
                     )
                     break
@@ -391,13 +567,13 @@ class ChallengeSwarm:
                     logger.warning(
                         "[%s/%s] Infra errors before any progress — giving up",
                         self.meta.name,
-                        model_spec,
+                        runner_id,
                     )
                     break
                 logger.warning(
                     "[%s/%s] Infra error (%s/%s): %s — recovering session",
                     self.meta.name,
-                    model_spec,
+                    runner_id,
                     infra_recoveries,
                     MAX_INFRA_RECOVERIES,
                     (result.findings_summary or "")[:160],
@@ -410,15 +586,16 @@ class ChallengeSwarm:
                     break
                 except TimeoutError:
                     pass
-                insights = self._gather_sibling_insights(model_spec)
-                if hasattr(solver, "recover_session"):
+                insights = self._gather_sibling_insights(runner_id)
+                recover = getattr(solver, "recover_session", None)
+                if callable(recover):
                     try:
-                        await solver.recover_session(insights)
+                        await cast(_RecoverSession, recover)(insights)
                     except Exception as e:
                         logger.error(
                             "[%s/%s] Session recover failed: %s",
                             self.meta.name,
-                            model_spec,
+                            runner_id,
                             e,
                             exc_info=True,
                         )
@@ -429,9 +606,7 @@ class ChallengeSwarm:
 
             if result.status in (GAVE_UP, ERROR):
                 if result.step_count == 0:
-                    logger.warning(
-                        f"[{self.meta.name}/{model_spec}] Broken (0 steps) — not bumping"
-                    )
+                    logger.warning(f"[{self.meta.name}/{runner_id}] Broken (0 steps) — not bumping")
                     break
 
                 # Track consecutive non-infra errors — stop after 3 in a row
@@ -439,7 +614,7 @@ class ChallengeSwarm:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
                         logger.warning(
-                            f"[{self.meta.name}/{model_spec}] {consecutive_errors} consecutive errors — giving up"
+                            f"[{self.meta.name}/{runner_id}] {consecutive_errors} consecutive errors — giving up"
                         )
                         break
                 else:
@@ -455,18 +630,22 @@ class ChallengeSwarm:
                     break  # cancelled during cooldown
                 except TimeoutError:
                     pass  # cooldown elapsed, proceed with bump
-                insights = self._gather_sibling_insights(model_spec)
+                insights = self._gather_sibling_insights(runner_id)
                 solver.bump(insights)
-                logger.info(f"[{self.meta.name}/{model_spec}] Bumped ({bump_count}), resuming")
+                logger.info(f"[{self.meta.name}/{runner_id}] Bumped ({bump_count}), resuming")
                 continue
 
         return result, solver
 
     async def run(self) -> SolverResult | None:
         """Run all solvers in parallel. Returns the winner's result or None."""
+        slots = assign_runner_ids(self.model_specs)
         tasks = [
-            asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
-            for spec in self.model_specs
+            asyncio.create_task(
+                self._run_solver(runner_id, model_spec),
+                name=f"solver-{runner_id}",
+            )
+            for runner_id, model_spec in slots
         ]
 
         try:
@@ -484,19 +663,45 @@ class ChallengeSwarm:
                         for p in pending:
                             p.cancel()
                         await asyncio.gather(*pending, return_exceptions=True)
+                        self._write_eval_artifact(result)
                         return result
 
                 tasks = list(pending)
 
             self.cancel_event.set()
-            return self._end_summary()
+            summary = self._end_summary()
+            self._write_eval_artifact(summary)
+            return summary
         except Exception as e:
             logger.error(f"[{self.meta.name}] Swarm error: {e}", exc_info=True)
             self.cancel_event.set()
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._write_eval_artifact(None)
             return None
+
+    def _write_eval_artifact(self, result: SolverResult | None) -> None:
+        out = (getattr(self.settings, "eval_out", "") or "").strip()
+        if not out:
+            return
+        from backend.eval_run import write_eval_summary
+
+        status = result.status if result else (self._last_status or ERROR)
+        cost_usd = 0.0
+        if self.cost_tracker is not None:
+            cost_usd = _tracker_cost_usd(self.cost_tracker)
+        write_eval_summary(
+            out,
+            challenge=self.meta.name,
+            model=self._last_model_spec or (",".join(self.model_specs)),
+            status=status,
+            steps=result.step_count if result else self._last_steps,
+            infra_recoveries=self._infra_recoveries_total,
+            preflight_ms=self._last_preflight_ms,
+            cost_usd=cost_usd,
+            flag=result.flag if result else self._last_flag,
+        )
 
     def _end_summary(self) -> SolverResult | None:
         """Return winner, or a partial summary when flags were found but race unfinished."""
@@ -546,6 +751,12 @@ class ChallengeSwarm:
 
     def kill(self) -> None:
         """Cancel all agents for this challenge."""
+        try:
+            from backend.flags import cancel_flag_confirmation
+
+            cancel_flag_confirmation()
+        except Exception:
+            pass
         self.cancel_event.set()
 
     def get_status(self) -> dict:
@@ -560,12 +771,13 @@ class ChallengeSwarm:
             "flags_accepted": list(self.confirmed_flags),
             "winner": self.winner.flag if self.winner else None,
             "agents": {
-                spec: {
-                    "findings": self.findings.get(spec, ""),
+                rid: {
+                    "model": spec,
+                    "findings": self.findings.get(rid, ""),
                     "status": "running"
-                    if spec in self.solvers and not self.cancel_event.is_set()
+                    if rid in self.solvers and not self.cancel_event.is_set()
                     else ("won" if self.winner and self.winner.flag else "finished"),
                 }
-                for spec in self.model_specs
+                for rid, spec in assign_runner_ids(self.model_specs)
             },
         }
