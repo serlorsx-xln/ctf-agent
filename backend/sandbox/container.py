@@ -302,8 +302,8 @@ class DockerSandbox:
                     for pack in prefetch:
                         pack_t0 = time.monotonic()
                         logger.info(
-                            "Prefetch bootstrap pack=%s (apt/pip may take 1–2 min "
-                            "on a fresh container)…",
+                            "Prefetch bootstrap pack=%s (first container: pwn ~5–8 min, "
+                            "ghidra ~3–5 min; later packs usually faster)…",
                             pack,
                         )
                         msg = await self.ensure_pack(pack, refresh_tools=False)

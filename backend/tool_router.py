@@ -1191,6 +1191,22 @@ def merged_tools_doc(base_image: str, ensured_packs: set[str] | list[str]) -> st
     return "\n".join(parts) + "\n"
 
 
+def _pip_import_module(package: str) -> str:
+    """Best-effort import name for ``python3 -c 'import …'`` skip checks."""
+    name = re.split(r"[\[<>=!]", (package or "").strip(), maxsplit=1)[0]
+    aliases = {
+        "pwntools": "pwn",
+        "ROPgadget": "ropgadget",
+        "keystone-engine": "keystone",
+        "pyelftools": "elftools",
+        "Pillow": "PIL",
+        "PyJWT": "jwt",
+        "frida-tools": "frida",
+        "certipy-ad": "certipy",
+    }
+    return aliases.get(name, name.replace("-", "_"))
+
+
 def bootstrap_script(pack_id: str) -> str:
     """Shell script run inside L0 after files are copied."""
     spec = PACK_SPECS[pack_id]
@@ -1213,11 +1229,17 @@ def bootstrap_script(pack_id: str) -> str:
         ]
     if spec.pip:
         pkgs = " ".join(shlex.quote(p) for p in spec.pip)
+        import_ok = " && ".join(
+            f"python3 -c 'import {_pip_import_module(p)}' 2>/dev/null" for p in spec.pip
+        )
         lines += [
             "PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
-            # Prefer a no-op when satisfied — still cheap vs apt-get update.
-            f"$PIP3 install --no-cache-dir --break-system-packages {pkgs} "
+            f"if {import_ok}; then",
+            "  echo 'pip packages already present; skipping pip'",
+            "else",
+            f"  $PIP3 install --no-cache-dir --break-system-packages {pkgs} "
             f"|| $PIP3 install --no-cache-dir {pkgs} || true",
+            "fi",
         ]
     if pack_id == "crypto":
         # Sage tree is often RO bind-mounted; only touch writable wrapper paths.

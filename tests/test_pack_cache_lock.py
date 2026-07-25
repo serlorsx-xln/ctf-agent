@@ -47,7 +47,9 @@ def test_pack_cache_is_ready_requires_marker_and_paths(tmp_path: Path, monkeypat
     cache = tmp_path / "crypto" / arch
     assert sandbox._pack_cache_is_ready("crypto") is False
 
-    (cache / "opt" / "sagemath").mkdir(parents=True)
+    (cache / "opt" / "sagemath" / "bin").mkdir(parents=True)
+    (cache / "opt" / "sagemath" / "bin" / "sage").write_text("#!/bin/bash\n")
+    (cache / "opt" / "sagemath" / "bin" / "python3").write_text("#!/bin/bash\n")
     (cache / "usr" / "local" / "bin").mkdir(parents=True)
     (cache / "usr" / "local" / "bin" / "sage").write_text("#!/bin/bash\n")
     (cache / "usr" / "local" / "bin" / "sage-python").write_text("#!/bin/bash\n")

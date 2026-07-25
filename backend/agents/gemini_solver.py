@@ -433,9 +433,10 @@ class GeminiSolver:
             for p in parts
             if getattr(p, "text", None)
         ]
-        text = "\n\n".join(t for t in texts if t).strip()
+        from backend.writeup import join_streamed_text_parts
+
         # Recap reaches the TUI via ``[artemis] summary`` — skip live writeup spam.
-        return text
+        return join_streamed_text_parts(texts)
 
     async def stop(self) -> None:
         try:

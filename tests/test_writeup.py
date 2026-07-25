@@ -193,3 +193,50 @@ async def test_capture_normalizes_output():
     assert "Hello world." in text
     assert "```" not in text
 
+
+def test_collapse_streamed_word_per_line_writeup():
+    from backend.writeup import (
+        clean_how_lines,
+        collapse_prose_fragments,
+        is_fragmented_prose,
+        is_usable_narrative,
+        join_streamed_text_parts,
+    )
+
+    streamed = "\n".join(
+        [
+            "##",
+            "Challenge",
+            "A",
+            "Windows",
+            "x",
+            "64",
+            "reverse",
+            "challenge",
+            "shipped",
+            "as",
+            "medium_rare.dll",
+        ]
+    )
+    assert is_fragmented_prose(streamed)
+    collapsed = collapse_prose_fragments(streamed)
+    flat = collapsed.replace("\n", " ")
+    assert "Windows" in flat and "reverse challenge" in flat
+    assert "medium_rare.dll" in flat
+    assert is_usable_narrative(collapsed)
+    cleaned = clean_how_lines(collapsed)
+    assert cleaned[0] == "Challenge"
+    assert any("medium_rare.dll" in ln for ln in cleaned)
+
+    parts = ["##", "Challenge", "A", "Windows", "x64", "DLL", "with", "encrypted", "blob"]
+    joined = join_streamed_text_parts(parts)
+    assert "Windows x64 DLL" in joined
+    assert not is_fragmented_prose(joined)
+
+
+def test_fragmented_accept_spam_still_rejected():
+    from backend.writeup import is_usable_narrative
+
+    spam = "\n".join(["The", "flag", "was", "accepted", "as", "CORRECT"])
+    assert not is_usable_narrative(spam)
+

@@ -57,6 +57,113 @@ _ACCEPT_NOISE_RE = re.compile(
     r"(?i)\b(?:the flag was accepted|CORRECT|FLAG FOUND|Confirmed —|"
     r"Challenge complete|counting this flag|Cogitated)\b"
 )
+_SECTION_LABEL_ONLY_RE = re.compile(
+    r"(?i)^(Challenge|Key insight|How|Solution summary|Steps)\s*:?\s*$"
+)
+_BARE_HASH_RE = re.compile(r"^#{1,3}$")
+
+
+def _merge_broken_heading_lines(lines: list[str]) -> list[str]:
+    """``##`` on one line + ``Challenge`` on the next → ``## Challenge``."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if _BARE_HASH_RE.fullmatch(s) and i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if nxt and not _HEADING_RE.match(nxt):
+                out.append(f"{s} {nxt}")
+                i += 2
+                continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
+def is_fragmented_prose(text: str) -> bool:
+    """True when model output is token-streamed (one word per line)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if len(lines) < 6:
+        return False
+    bodyish = 0
+    short = 0
+    for ln in lines:
+        if _HEADING_RE.match(ln) or _BARE_HASH_RE.fullmatch(ln):
+            continue
+        if _NUMBERED_START_RE.match(ln):
+            continue
+        if _SECTION_LABEL_ONLY_RE.match(ln):
+            continue
+        bodyish += 1
+        if len(ln.split()) <= 2 and not ln.endswith((".", "!", "?", ":", ";")):
+            short += 1
+    if bodyish < 4:
+        return False
+    return short >= max(4, int(bodyish * 0.55))
+
+
+def collapse_prose_fragments(text: str) -> str:
+    """Merge word-per-line streamed prose into normal paragraphs."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    lines = _merge_broken_heading_lines(raw.splitlines())
+    if not is_fragmented_prose("\n".join(lines)):
+        merged = "\n".join(lines).strip()
+        return merged if merged != raw else raw
+
+    out: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if buf:
+            out.append(" ".join(buf))
+            buf.clear()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            flush()
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if _HEADING_RE.match(line) or _BARE_HASH_RE.fullmatch(line):
+            flush()
+            title = _HEADING_RE.sub("", line).strip() or line
+            out.append(title)
+            continue
+        if _SECTION_LABEL_ONLY_RE.match(line):
+            flush()
+            out.append(line)
+            continue
+        if _NUMBERED_START_RE.match(line):
+            flush()
+            out.append(line)
+            continue
+        if len(line.split()) <= 3 and not line.endswith((".", "!", "?", ":", ";")):
+            buf.append(line)
+            continue
+        if buf:
+            buf.append(line)
+            flush()
+        else:
+            out.append(line)
+    flush()
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out).strip()
+
+
+def join_streamed_text_parts(parts: list[str]) -> str:
+    """Join Cursor/Gemini writeup deltas without word-per-line paragraphs."""
+    chunks = [p.strip() for p in parts if (p or "").strip()]
+    if not chunks:
+        return ""
+    if len(chunks) >= 3:
+        tiny = sum(1 for c in chunks if len(c.split()) <= 4 and "\n" not in c)
+        if tiny >= len(chunks) * 0.6:
+            return collapse_prose_fragments(" ".join(chunks))
+    return collapse_prose_fragments("\n\n".join(chunks))
 
 
 def expand_summary_line(line: str) -> list[str]:
@@ -126,7 +233,7 @@ def narrative_body(text: str) -> str:
 
 def clean_how_lines(text: str) -> list[str]:
     """Expand + drop flag/CORRECT noise; ready for the How: recap."""
-    body = narrative_body(text)
+    body = narrative_body(collapse_prose_fragments(text))
     if not body:
         return []
     out: list[str] = []
@@ -177,7 +284,10 @@ def is_usable_narrative(text: str) -> bool:
     """True when cleaned prose is worth showing instead of the command trail."""
     if is_command_trail(text):
         return False
-    lines = [ln for ln in clean_how_lines(text) if ln.strip()]
+    collapsed = collapse_prose_fragments(text)
+    if is_fragmented_prose(collapsed):
+        return False
+    lines = [ln for ln in clean_how_lines(collapsed) if ln.strip()]
     if not lines:
         return False
     # Drop bare section labels for the substance check.
@@ -201,7 +311,7 @@ def is_usable_narrative(text: str) -> bool:
 
 def normalize_writeup_text(text: str) -> str:
     """Clean model writeup for the TUI recap (keep structure, drop junk)."""
-    cleaned = str(text or "").strip()
+    cleaned = collapse_prose_fragments(str(text or ""))
     if not cleaned:
         return ""
     # Drop only short single-line solver failure envelopes — not prose that

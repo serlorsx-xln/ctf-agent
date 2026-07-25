@@ -643,7 +643,9 @@ class ClaudeSolver:
                     if isinstance(block, TextBlock) and str(block.text or "").strip():
                         parts.append(block.text.strip())
                         # No per-token live stream — see cursor_solver.produce_writeup.
-        return "\n\n".join(parts).strip()
+        from backend.writeup import join_streamed_text_parts
+
+        return join_streamed_text_parts(parts)
 
     async def stop(self) -> None:
         self.tracer.event("stop", step_count=self._step_count)

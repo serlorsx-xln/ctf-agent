@@ -28,6 +28,42 @@ DEFAULT_BAKE_PACKS: tuple[str, ...] = (
     "web",
 )
 
+# Host-cache paths that must exist after a successful donor extract. Top-level
+# dirs alone are not enough — a partial delete during disk pressure can leave
+# ``.ready`` while ``opt/sagemath/bin/sage`` is missing.
+_PACK_CACHE_SENTINELS: dict[str, tuple[str, ...]] = {
+    "mobile": ("opt/jadx/bin/jadx",),
+    "crypto": ("opt/sagemath/bin/sage", "opt/sagemath/bin/python3"),
+    "crypto-tools": ("opt/RsaCtfTool",),
+    "ghidra": ("opt/ghidra/support/analyzeHeadless",),
+    "steg": ("opt/stegseek/bin/stegseek",),
+    "pwn": ("root/.gdbinit-gef.py",),
+    "linux": ("opt/linux-tools",),
+}
+
+
+def pack_cache_incomplete(pack_id: str) -> bool:
+    """True when ``.ready`` exists but extracted trees look truncated."""
+    from backend.tool_router import pack_cache_dir
+
+    sentinels = _PACK_CACHE_SENTINELS.get(pack_id)
+    if not sentinels:
+        return False
+    cache = pack_cache_dir(pack_id)
+    return any(not (cache / rel).exists() for rel in sentinels)
+
+
+def invalidate_pack_cache(pack_id: str) -> None:
+    """Drop ready/prepared markers so the next materialize re-extracts."""
+    from backend.tool_router import pack_cache_dir
+
+    cache = pack_cache_dir(pack_id)
+    for name in (".ready", ".prepared"):
+        try:
+            (cache / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
 
 def probe_docker_env() -> list[str]:
     """Return advisory lines about Docker / Colima / DOCKER_HOST (never fails setup)."""
@@ -172,8 +208,15 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
         return False, f"Unknown pack: {pack_id}"
     cache = pack_cache_dir(pack_id)
     if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):
-        maybe_upgrade_ready_marker(pack_id)
-        return True, f"Pack {pack_id}: cache already ready at {cache}"
+        if pack_cache_incomplete(pack_id):
+            logger.warning(
+                "Pack %s: cache incomplete (partial delete?) — rematerializing",
+                pack_id,
+            )
+            invalidate_pack_cache(pack_id)
+        else:
+            maybe_upgrade_ready_marker(pack_id)
+            return True, f"Pack {pack_id}: cache already ready at {cache}"
 
     tmp = Path(os.environ.get("TMPDIR") or "/tmp") / "artemis-setup"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -188,8 +231,15 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
         # Cross-process: two `artemis setup` runs bake the same pack serially.
         fd = await asyncio.to_thread(_acquire_pack_flock, pack_id)
         if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):
-            maybe_upgrade_ready_marker(pack_id)
-            return True, f"Pack {pack_id}: cache already ready at {cache}"
+            if pack_cache_incomplete(pack_id):
+                logger.warning(
+                    "Pack %s: cache incomplete under flock — rematerializing",
+                    pack_id,
+                )
+                invalidate_pack_cache(pack_id)
+            else:
+                maybe_upgrade_ready_marker(pack_id)
+                return True, f"Pack {pack_id}: cache already ready at {cache}"
         if pack_cache_stale(pack_id):
             logger.info("Pack %s: Dockerfile changed — rematerializing cache", pack_id)
             try:

@@ -1049,7 +1049,9 @@ class CursorSolver:
             await asyncio.wait_for(run.wait(), timeout=5.0)
         except TimeoutError:
             pass
-        return "\n\n".join(parts).strip()
+        from backend.writeup import join_streamed_text_parts
+
+        return join_streamed_text_parts(parts)
 
     async def stop(self) -> None:
         if self._step_count == 0 and not getattr(self, "_started", False):
