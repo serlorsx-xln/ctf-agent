@@ -1,0 +1,148 @@
+"""Auto-build pack donor images when missing (Strix-style first-use setup).
+
+Keeps the core+packs model: donors stay optional until needed, then we build
+them once instead of telling the operator to run docker by hand.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fcntl
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger("ctf.sandbox.donor")
+
+# pack_id → (Dockerfile relative to repo root, image tag)
+DONOR_BUILD_SPECS: dict[str, tuple[str, str]] = {
+    "crypto": ("sandbox/Dockerfile.crypto", "ctf-sandbox-crypto"),
+    "crypto-tools": ("sandbox/Dockerfile.crypto-tools", "ctf-sandbox-crypto-tools"),
+    "steg": ("sandbox/Dockerfile.steg", "ctf-sandbox-steg"),
+    "linux": ("sandbox/Dockerfile.linux", "ctf-sandbox-linux"),
+    "mobile": ("sandbox/Dockerfile.mobile", "ctf-sandbox-mobile"),
+    "pwn": ("sandbox/Dockerfile.pwn", "ctf-sandbox-pwn"),
+    "ghidra": ("sandbox/Dockerfile.ghidra", "ctf-sandbox-ghidra"),
+}
+
+# Cap so a hung build cannot freeze the agent forever.
+_DEFAULT_BUILD_TIMEOUT_S = 1800
+
+_build_locks: dict[str, asyncio.Lock] = {}
+
+
+def repo_root() -> Path:
+    env = (os.environ.get("ARTEMIS_REPO_ROOT") or "").strip()
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2]
+
+
+def donor_image_for(pack_id: str) -> str | None:
+    spec = DONOR_BUILD_SPECS.get(pack_id)
+    return spec[1] if spec else None
+
+
+def donor_dockerfile_for(pack_id: str) -> Path | None:
+    spec = DONOR_BUILD_SPECS.get(pack_id)
+    if not spec:
+        return None
+    return repo_root() / spec[0]
+
+
+def _lock_for(pack_id: str) -> asyncio.Lock:
+    lock = _build_locks.get(pack_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _build_locks[pack_id] = lock
+    return lock
+
+
+def _donor_flock_path(pack_id: str) -> Path:
+    from backend.tool_router import pack_cache_root
+
+    d = pack_cache_root() / pack_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d / ".donor-build.lock"
+
+
+def _acquire_donor_flock(pack_id: str) -> int:
+    path = _donor_flock_path(pack_id)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    logger.info("Donor %s: waiting for cross-process build lock (%s)", pack_id, path)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    logger.info("Donor %s: acquired cross-process build lock", pack_id)
+    return fd
+
+
+def _release_donor_flock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
+    """Ensure the donor Docker image for ``pack_id`` exists.
+
+    Returns ``(ok, message)``. When the image is already present, ok=True with
+    a short note. When missing, attempts ``docker build`` once (serialized per
+    pack, cross-process). Failures leave ok=False with an operator-facing message.
+    """
+    spec = DONOR_BUILD_SPECS.get(pack_id)
+    if not spec:
+        return True, f"pack {pack_id} has no donor image"
+
+    dockerfile_rel, image = spec
+    root = repo_root()
+    dockerfile = root / dockerfile_rel
+    if not dockerfile.is_file():
+        return False, f"Dockerfile missing: {dockerfile}"
+
+    from backend.sandbox.docker_client import _docker_cli
+
+    # Fast path: already built.
+    rc, _, _ = await _docker_cli("image", "inspect", image, timeout_s=30)
+    if rc == 0:
+        return True, f"donor {image} already present"
+
+    async with _lock_for(pack_id):
+        fd = await asyncio.to_thread(_acquire_donor_flock, pack_id)
+        try:
+            # Another waiter / process may have finished the build.
+            rc, _, _ = await _docker_cli("image", "inspect", image, timeout_s=30)
+            if rc == 0:
+                return True, f"donor {image} already present"
+
+            timeout_s = int(
+                os.environ.get("ARTEMIS_DONOR_BUILD_TIMEOUT_S", str(_DEFAULT_BUILD_TIMEOUT_S))
+            )
+            logger.info(
+                "Building missing donor image %s from %s (timeout=%ss)",
+                image,
+                dockerfile,
+                timeout_s,
+            )
+            # Surface progress into the agent bash stream via stderr logger.
+            rc, out, err = await _docker_cli(
+                "build",
+                "-f",
+                str(dockerfile),
+                "-t",
+                image,
+                str(root),
+                timeout_s=timeout_s,
+            )
+            if rc != 0:
+                detail = (err or out or "").strip()[-800:]
+                logger.warning("Donor build failed for %s: %s", image, detail)
+                return (
+                    False,
+                    f"Auto-build of {image} failed (exit {rc}). "
+                    f"Build manually: docker build -f {dockerfile_rel} -t {image} . "
+                    f"Detail: {detail or 'no output'}",
+                )
+            logger.info("Donor image ready: %s", image)
+            return True, f"Built donor {image}"
+        finally:
+            await asyncio.to_thread(_release_donor_flock, fd)

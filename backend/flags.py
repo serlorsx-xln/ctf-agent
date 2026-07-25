@@ -11,6 +11,7 @@ auto-complete a run.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -59,10 +60,9 @@ _ENV_FLAG_ASSIGN = re.compile(
 )
 
 # Optional in challenge.txt: flags_required: 2  (default 1 if omitted)
-_FLAGS_REQUIRED_LINE = re.compile(
-    r"^flags_required\s*:\s*(\d+)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
+# NOTE: flags_required is no longer parsed from challenge text — the operator
+# is always asked via the TUI digits dialog. normalize_flags_required clamps
+# the dialog answer.
 
 _ARTIFACT_TEXT_NAMES = frozenset(
     {
@@ -103,27 +103,13 @@ _MAX_ARTIFACT_WALK_FILES = 400
 ConfirmFn = Callable[[str], bool]
 
 
-def parse_flags_required(text: str) -> int:
-    """How many distinct flags this challenge needs. Default 1.
-
-    Only an explicit ``flags_required: N`` line overrides the default.
-    No keyword inference from free-form paste (wording varies; CLI will ask later).
-    """
-    if not text:
-        return 1
-    m = _FLAGS_REQUIRED_LINE.search(text)
-    if not m:
-        return 1
-    return max(1, int(m.group(1)))
-
-
 def normalize_flags_required(value: int | None) -> int:
     """Clamp / default a flags_required value to >= 1."""
     if value is None:
         return 1
     try:
         return max(1, int(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 1
 
 
@@ -273,30 +259,6 @@ def collect_artifact_flag_candidates(challenge_dir: str | Path | None) -> set[st
     return out
 
 
-def is_plausible_flag(
-    flag: str,
-    *,
-    artifact_flags: Sequence[str] | None = None,
-) -> bool:
-    """Legacy shape check — not used as an accept oracle anymore.
-
-    Kept for callers/tests that still inspect format. Human confirmation decides
-    correctness; any non-decoy non-artifact string may be submitted.
-    """
-    f = (flag or "").strip()
-    if not f or is_decoy_flag(f):
-        return False
-    if is_filename_like_flag_token(f):
-        return False
-    if artifact_flags and f in set(artifact_flags):
-        return False
-    if _FLAG_BRACE.match(f) or _FLAG_DASH.match(f):
-        return True
-    if "{" in f and "}" in f and len(f) >= 10:
-        return True
-    return bool(_looks_secret_token(f))
-
-
 def env_auto_confirm_flags() -> bool:
     """True when CTF_AUTO_CONFIRM_FLAGS is set (tests / unattended runs)."""
     return os.environ.get("CTF_AUTO_CONFIRM_FLAGS", "").strip().lower() in (
@@ -350,17 +312,30 @@ def _install_confirm_log_filter() -> None:
     _confirm_filter_installed = True
 
 
+def _emit_line(msg: str) -> None:
+    """Print once to stdout.
+
+    Swarm bridge merges stderr into stdout; printing both streams duplicates
+    every confirm / outcome line in the TUI live log.
+    """
+    try:
+        print(msg, end="" if msg.endswith("\n") else "\n", flush=True)
+    except OSError:
+        pass
+
+
 def _emit_confirm_banner(flag: str) -> None:
-    """Print a hard-to-miss banner on stdout and stderr (logging often floods stderr)."""
+    """Print a hard-to-miss banner (stdout only — see ``_emit_line``)."""
     bar = "=" * 72
-    body = (
-        f"\n\n{bar}\n  FLAG CANDIDATE — type y or n (Enter alone ignored)\n{bar}\n  {flag}\n{bar}\n"
-    )
-    for stream in (sys.stderr, sys.stdout):
-        try:
-            print(body, file=stream, flush=True)
-        except OSError:
-            pass
+    if os.environ.get("ARTEMIS_FLAG_CONFIRM", "").strip() in ("1", "true", "yes"):
+        body = (
+            f"\n\n{bar}\n  FLAG CANDIDATE — confirm in the TUI dialog (y/n)\n{bar}\n  {flag}\n{bar}\n"
+        )
+    else:
+        body = (
+            f"\n\n{bar}\n  FLAG CANDIDATE — type y or n (Enter alone ignored)\n{bar}\n  {flag}\n{bar}\n"
+        )
+    _emit_line(body)
 
 
 def _flush_stdin_buffer() -> None:
@@ -387,7 +362,7 @@ def _stdin_line_or_cancel(prompt: str, *, poll_s: float = 0.4) -> str | None:
     while not _confirm_cancel.is_set():
         try:
             ready, _, _ = select.select([sys.stdin], [], [], poll_s)
-        except ValueError, OSError:
+        except (ValueError, OSError):
             # Non-selectable stdin — fall back to blocking input.
             try:
                 return input().strip().lower()
@@ -404,44 +379,73 @@ def _stdin_line_or_cancel(prompt: str, *, poll_s: float = 0.4) -> str | None:
     return None
 
 
-def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
+def normalize_confirm(value: object) -> tuple[bool, str]:
+    """Coerce a confirm result to ``(ok, reason)``.
+
+    Confirm callables predate the reason channel and many still return a bare
+    bool (stdin path, ``--auto-confirm-flags``, test doubles), so both shapes
+    have to keep working.
+    """
+    if isinstance(value, tuple):
+        ok = bool(value[0]) if value else False
+        reason = str(value[1]).strip() if len(value) > 1 and value[1] else ""
+        return ok, reason
+    return bool(value), ""
+
+
+def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool | tuple[bool, str]:
     """Ask the operator whether ``flag`` is correct.
 
-    Returns True only on explicit yes, or when auto-confirm is enabled.
+    Returns True (or ``(True, "")``) only on explicit yes, or when auto-confirm
+    is enabled. The TUI/daemon path returns ``(ok, reason)`` so a rejection can
+    carry the operator's explanation; pass the result through
+    :func:`normalize_confirm`.
     Empty Enter does **not** count as no (re-prompts) — a buffered newline
     from scrolling logs must not auto-reject. Non-TTY / EOF → False.
     Cancel via ``cancel_flag_confirmation()`` → False.
 
-    Quiets INFO logging while waiting so parallel tool output does not bury
-    the prompt (Cursor may run bash alongside submit_flag).
+    When ``ARTEMIS_FLAG_CONFIRM=1`` (TUI swarm), ask via file handshake so the
+    TUI can show a dialog — not stdin y/N (TUI owns the keyboard).
     """
     global _confirm_active
 
     f = (flag or "").strip()
     reset_flag_confirmation_cancel()
+    try:
+        from backend.agents.live_log import flush_stream
+
+        flush_stream()
+    except Exception:
+        pass
     _install_confirm_log_filter()
     _confirm_active = True
     try:
+        # TUI owns the keyboard — never auto-confirm away the dialog unless
+        # the caller explicitly passed auto_confirm=True on this call.
+        tui_confirm = os.environ.get("ARTEMIS_FLAG_CONFIRM", "").strip() in ("1", "true", "yes")
         _emit_confirm_banner(f)
-        if auto_confirm or env_auto_confirm_flags():
+        if auto_confirm or (env_auto_confirm_flags() and not tui_confirm):
             msg = "Auto-confirm enabled — accepting candidate.\n"
-            for stream in (sys.stderr, sys.stdout):
-                print(msg, file=stream, flush=True)
+            _emit_line(msg)
             return True
+        if tui_confirm:
+            # Prefer daemon socket (single dialog channel). File handshake is
+            # legacy fallback only when ARTEMIS_DAEMON_SOCK is unset.
+            if os.environ.get("ARTEMIS_DAEMON_SOCK"):
+                return _prompt_flag_confirmation_daemon(f)
+            return _prompt_flag_confirmation_tui(f)
         if not sys.stdin.isatty():
             msg = (
                 "No TTY for confirmation — rejecting candidate "
                 "(set CTF_AUTO_CONFIRM_FLAGS=1 or pass --auto-confirm-flags).\n"
             )
-            for stream in (sys.stderr, sys.stdout):
-                print(msg, file=stream, flush=True)
+            _emit_line(msg)
             return False
         _flush_stdin_buffer()
         while True:
             if _confirm_cancel.is_set():
                 msg = ">>> Confirm cancelled (session recovering) — not counting.\n"
-                for stream in (sys.stderr, sys.stdout):
-                    print(msg, file=stream, flush=True)
+                _emit_line(msg)
                 return False
             try:
                 ans = _stdin_line_or_cancel(">>> Confirm this flag as correct? [y/n]: ")
@@ -449,8 +453,7 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
                 return False
             if ans is None:
                 msg = ">>> Confirm cancelled (session recovering) — not counting.\n"
-                for stream in (sys.stderr, sys.stdout):
-                    print(msg, file=stream, flush=True)
+                _emit_line(msg)
                 return False
             if ans in ("y", "yes"):
                 ok = True
@@ -459,18 +462,182 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool:
                 ok = False
                 break
             retry = ">>> Type y or n (empty Enter ignored).\n"
-            for stream in (sys.stderr, sys.stdout):
-                print(retry, file=stream, flush=True)
+            _emit_line(retry)
         result = (
             ">>> Confirmed — counting this flag.\n"
             if ok
             else ">>> Rejected by operator — not counting.\n"
         )
-        for stream in (sys.stderr, sys.stdout):
-            print(result, file=stream, flush=True)
+        _emit_line(result)
         return ok
     finally:
         _confirm_active = False
+
+
+def _artemis_cache_dir() -> Path:
+    from backend.cache import cache_dir
+
+    return cache_dir()
+
+
+def _prompt_flag_confirmation_tui(flag: str) -> bool:
+    """Block until TUI writes an answer file for this confirm request."""
+    import time
+    import uuid
+
+    req_id = uuid.uuid4().hex[:12]
+    cache = _artemis_cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    pending = cache / f"flag-confirm-{req_id}.pending.json"
+    answer = cache / f"flag-confirm-{req_id}.answer.json"
+    try:
+        if answer.exists():
+            answer.unlink()
+    except OSError:
+        pass
+    pending.write_text(
+        json.dumps({"id": req_id, "flag": flag, "created": time.time()}),
+        encoding="utf-8",
+    )
+    line = f"[artemis] FLAG_CONFIRM id={req_id} flag={flag}\n"
+    _emit_line(line)
+    # Wait up to 30 minutes for TUI reply
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        if _confirm_cancel.is_set():
+            msg = ">>> Confirm cancelled (session recovering) — not counting.\n"
+            _emit_line(msg)
+            return False
+        if answer.is_file():
+            try:
+                data = json.loads(answer.read_text(encoding="utf-8"))
+                ok = bool(data.get("ok"))
+            except Exception:
+                ok = False
+            try:
+                answer.unlink(missing_ok=True)
+                pending.unlink(missing_ok=True)
+            except OSError:
+                pass
+            result = (
+                ">>> Confirmed — counting this flag.\n"
+                if ok
+                else ">>> Rejected by operator — not counting.\n"
+            )
+            _emit_line(result)
+            return ok
+        time.sleep(0.25)
+
+    msg = ">>> Confirm timed out — not counting.\n"
+    _emit_line(msg)
+    try:
+        pending.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
+
+
+def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
+    """Ask the TUI (via the daemon socket) to confirm a flag.
+
+    Returns ``(ok, reason)`` when the daemon answers, where ``reason`` is the
+    operator's optional one-line explanation for a rejection. Fallback paths
+    return a bare bool; use :func:`normalize_confirm` on the result.
+
+    The solver runs in the detached swarm subprocess; this opens a synchronous
+    Unix socket to the daemon, sends a ``flag_confirm_request``, and blocks
+    until the daemon relays the TUI's answer. Cancel-aware via
+    ``_confirm_cancel`` (checked in the select poll loop) so ``swarm.kill()``
+    and infra-recovery can abort a stuck confirm.
+    """
+    import json as _json
+    import select
+    import socket
+    import time
+    import uuid
+
+    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
+    if not sock_path:
+        return _prompt_flag_confirmation_tui(flag)
+
+    session = os.environ.get("ARTEMIS_SESSION_ID")
+    req_id = uuid.uuid4().hex[:12]
+    deadline = time.monotonic() + 1800  # 30 min, same as file handshake
+
+    line = f"[artemis] FLAG_CONFIRM id={req_id} flag={flag}\n"
+    _emit_line(line)
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        s.connect(sock_path)
+    except OSError:
+        # Daemon unreachable — fall back to file handshake so the solve isn't lost.
+        return _prompt_flag_confirmation_tui(flag)
+
+    try:
+        # hello
+        s.sendall(
+            _json.dumps({"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}).encode()
+            + b"\n"
+        )
+        # request
+        s.sendall(
+            _json.dumps(
+                {
+                    "v": 1,
+                    "id": req_id,
+                    "type": "flag_confirm_request",
+                    "request_id": req_id,
+                    "flag": flag,
+                    "session": session,
+                }
+            ).encode()
+            + b"\n"
+        )
+        buf = b""
+        while time.monotonic() < deadline:
+            if _confirm_cancel.is_set():
+                _emit_line(">>> Confirm cancelled (session recovering) — not counting.\n")
+                return False
+            r, _, _ = select.select([s], [], [], 0.25)
+            if not r:
+                continue
+            try:
+                chunk = s.recv(4096)
+            except (TimeoutError, OSError):
+                continue
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                if not raw.strip():
+                    continue
+                try:
+                    msg = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("id") == req_id and msg.get("type") in (
+                    "flag_confirm_request",
+                    "error",
+                ):
+                    ok = bool(msg.get("ok"))
+                    reason = str(msg.get("reason") or "").strip()
+                    if ok:
+                        _emit_line(">>> Confirmed — counting this flag.\n")
+                    elif reason:
+                        _emit_line(f">>> Rejected by operator — not counting. ({reason})\n")
+                    else:
+                        _emit_line(">>> Rejected by operator — not counting.\n")
+                    return ok, reason
+        _emit_line(">>> Confirm timed out — not counting.\n")
+        return False, ""
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def accept_flag(
@@ -481,12 +648,14 @@ def accept_flag(
     challenge_dir: str | Path | None = None,
     artifact_flags: Sequence[str] | None = None,
     human_confirmed: bool = False,
+    by: str = "",
 ) -> tuple[str, bool]:
     """Validate a submission; count it only when ``human_confirmed`` is True.
 
     Returns (display_message, challenge_complete).
     Unconfirmed valid submissions return ``CANDIDATE`` and False.
     ``challenge_complete`` is True only when ``required`` distinct flags are in.
+    ``by`` names the submitting runner so a swarm accept says who earned it.
     """
     f = (flag or "").strip()
     req = normalize_flags_required(required)
@@ -546,23 +715,27 @@ def accept_flag(
             False,
         )
 
+    from backend.agents.live_log import emit_line
+
     accepted = [*prior, f]
     n = len(accepted)
+    author = f" via {by}" if by else ""
     if n < req:
-        return (
-            f'ACCEPTED "{f}" ({n}/{req}). '
+        msg = (
+            f'ACCEPTED "{f}"{author} ({n}/{req}). '
             "Continue — submit the remaining distinct flag(s). "
-            "Do not stop until all required flags are accepted.",
-            False,
+            "Do not stop until all required flags are accepted."
         )
+        emit_line(f"[artemis] outcome {msg}")
+        return msg, False
 
     joined = " | ".join(accepted)
     if req == 1:
-        return (
-            f'CORRECT — accepted "{f}". Challenge complete for this run.',
-            True,
+        msg = f'CORRECT — accepted "{f}"{author}. Challenge complete for this run.'
+    else:
+        msg = (
+            f"CORRECT — accepted all {req} flags: {joined}"
+            f"{f' (last{author})' if by else ''}. Challenge complete for this run."
         )
-    return (
-        f"CORRECT — accepted all {req} flags: {joined}. Challenge complete for this run.",
-        True,
-    )
+    emit_line(f"[artemis] outcome {msg}")
+    return msg, True

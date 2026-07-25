@@ -12,7 +12,6 @@ from backend.flags import (
     is_counted_accept_message,
     is_decoy_flag,
     is_filename_like_flag_token,
-    parse_flags_required,
 )
 
 
@@ -70,13 +69,6 @@ def test_already_solved() -> None:
     assert msg.startswith("ALREADY SOLVED")
     assert is_complete_accept_message(msg)
     assert not is_counted_accept_message(msg)
-
-
-def test_parse_flags_required() -> None:
-    assert parse_flags_required("") == 1
-    assert parse_flags_required("hello") == 1
-    assert parse_flags_required("flags_required: 2\nfoo") == 2
-
 
 def test_accepted_message_does_not_substring_match_correct() -> None:
     msg, done = accept_flag("CTF{user_aaaaaaaa}", required=2, human_confirmed=True)
@@ -243,3 +235,81 @@ def test_coordinator_no_swarm_multi_flag_progress() -> None:
         assert _solved_names(deps) == {"ping"}
 
     asyncio.run(_run())
+
+
+def test_tui_flag_confirm_handshake(tmp_path, monkeypatch) -> None:
+    """TUI path: pending file + answer file, no stdin."""
+    import json
+    import threading
+    import time
+
+    from backend.flags import prompt_flag_confirmation
+
+    cache = tmp_path / "artemis-cache"
+    cache.mkdir()
+    monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
+    monkeypatch.setenv("ARTEMIS_FLAG_CONFIRM", "1")
+    monkeypatch.delenv("CTF_AUTO_CONFIRM_FLAGS", raising=False)
+
+    def answerer() -> None:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            pending = list(cache.glob("flag-confirm-*.pending.json"))
+            if pending:
+                data = json.loads(pending[0].read_text(encoding="utf-8"))
+                req_id = data["id"]
+                answer = cache / f"flag-confirm-{req_id}.answer.json"
+                answer.write_text(json.dumps({"ok": True, "id": req_id}), encoding="utf-8")
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=answerer, daemon=True)
+    t.start()
+    ok = prompt_flag_confirmation("CTF{tui_handshake}")
+    t.join(timeout=2)
+    assert ok is True
+
+
+def test_clear_tui_handshakes(tmp_path, monkeypatch) -> None:
+    from backend.shell import sandbox_session as ss
+
+    monkeypatch.setenv("ARTEMIS_CACHE", str(tmp_path))
+    (tmp_path / "flag-confirm-abc.pending.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "flag-confirm-abc.answer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "flags-ask-xyz.pending.json").write_text("{}", encoding="utf-8")
+    ss.clear_tui_handshakes()
+    assert list(tmp_path.glob("flag-confirm-*")) == []
+    assert list(tmp_path.glob("flags-ask-*")) == []
+
+
+def test_tui_flag_confirm_ignores_env_auto_confirm(tmp_path, monkeypatch) -> None:
+    """ARTEMIS_FLAG_CONFIRM wins over CTF_AUTO_CONFIRM_FLAGS for TUI dialogs."""
+    import json
+    import threading
+    import time
+
+    from backend.flags import prompt_flag_confirmation
+
+    cache = tmp_path / "artemis-cache"
+    cache.mkdir()
+    monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
+    monkeypatch.setenv("ARTEMIS_FLAG_CONFIRM", "1")
+    monkeypatch.setenv("CTF_AUTO_CONFIRM_FLAGS", "1")
+
+    def answerer() -> None:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            pending = list(cache.glob("flag-confirm-*.pending.json"))
+            if pending:
+                data = json.loads(pending[0].read_text(encoding="utf-8"))
+                req_id = data["id"]
+                answer = cache / f"flag-confirm-{req_id}.answer.json"
+                answer.write_text(json.dumps({"ok": False, "id": req_id}), encoding="utf-8")
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=answerer, daemon=True)
+    t.start()
+    ok = prompt_flag_confirmation("CTF{should_use_dialog}")
+    t.join(timeout=2)
+    assert ok is False  # dialog rejected — not env auto-confirm

@@ -69,7 +69,11 @@ class ClaudeSolver:
         notify_coordinator=None,
     ) -> None:
         self.model_spec = model_spec
-        self.model_id = model_id_from_spec(model_spec)
+        # A custom model id from /connect (auth.json metadata) overrides the
+        # spec's model id when the user didn't pass an explicit one in the spec.
+        custom_model = (getattr(settings, "anthropic_model_id", "") or "").strip()
+        spec_model = model_id_from_spec(model_spec)
+        self.model_id = custom_model or spec_model
         self.challenge_dir = challenge_dir
         self.meta = meta
         self.cost_tracker = cost_tracker
@@ -96,6 +100,7 @@ class ClaudeSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
+        self._action_log: list[str] = []
         self._cost_usd = 0.0
         self._cost_reported = False
         self._bump_insights: str | None = None
@@ -109,7 +114,7 @@ class ClaudeSolver:
                 continue
             try:
                 val = int(raw)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 continue
             if val > 1000:  # treat as ms
                 return max(5, min(val // 1000, 900))
@@ -158,6 +163,15 @@ class ClaudeSolver:
             and flag_val not in self._accepted_flags
         ):
             self._accepted_flags.append(flag_val)
+            try:
+                from backend.shell.sandbox_session import sync_accepted_flags
+
+                sync_accepted_flags(
+                    self._accepted_flags,
+                    flags_required=normalize_flags_required(getattr(self.meta, "flags_required", 1)),
+                )
+            except Exception:
+                pass
         if confirmed:
             self._confirmed = True
             self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag_val
@@ -250,6 +264,9 @@ class ClaudeSolver:
             # Step counting and loop detection for all tools
             self._step_count += 1
             self.tracer.tool_call(tool_name, tool_input, self._step_count)
+            from backend.action_log import append_action
+
+            append_action(self._action_log, tool_name, tool_input)
             live_json(
                 f"{self.agent_name} tool#{self._step_count} → {tool_name}",
                 tool_input,
@@ -417,12 +434,17 @@ class ClaudeSolver:
 
         effort = effort_from_spec(self.model_spec)
 
+        # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator.
+        # Propagate a custom Anthropic base URL (/connect → auth.json metadata).
+        env = {"CLAUDECODE": ""}
+        base_url = getattr(self.settings, "anthropic_base_url", "") or ""
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = base_url
         options = ClaudeAgentOptions(
             model=self.model_id,
             system_prompt=system_prompt,
             effort=effort,
-            # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator
-            env={"CLAUDECODE": ""},
+            env=env,
             mcp_servers={"ctf": mcp_server},
             allowed_tools=[
                 "Bash",
@@ -500,6 +522,19 @@ class ClaudeSolver:
                         elif isinstance(block, TextBlock):
                             self._findings = block.text[:2000]
                             _live(f"{self.agent_name} ai", block.text)
+                    # Mid-turn usage preview (provider-reported only). The SDK
+                    # attaches usage to AssistantMessage on newer versions; the
+                    # final commit still happens on ResultMessage below.
+                    msg_usage = getattr(message, "usage", None)
+                    if msg_usage is not None:
+                        u = msg_usage if isinstance(msg_usage, dict) else vars(msg_usage)
+                        self.cost_tracker.publish_with_pending(
+                            input_tokens=int(u.get("input_tokens", 0) or 0),
+                            output_tokens=int(u.get("output_tokens", 0) or 0),
+                            cache_read_tokens=int(
+                                u.get("cache_read_input_tokens", u.get("cache_read_tokens", 0)) or 0
+                            ),
+                        )
 
                 elif isinstance(message, ResultMessage):
                     self._session_id = message.session_id
@@ -553,8 +588,15 @@ class ClaudeSolver:
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
             from backend.agents.solver_control import classify_turn_error
+            from backend.solver_base import QUOTA_ERROR
 
-            return self._result(classify_turn_error(error_str))
+            status = classify_turn_error(error_str)
+            if status == QUOTA_ERROR:
+                _live(
+                    self.agent_name,
+                    "provider/auth error — check API key or billing (details suppressed)",
+                )
+            return self._result(status)
 
     def bump(self, insights: str) -> None:
         from backend.agents.solver_control import stash_bump
@@ -585,6 +627,23 @@ class ClaudeSolver:
             cost_usd=run_cost if run_cost is not None else self._cost_usd,
             log_path=self.tracer.path,
         )
+
+    async def produce_writeup(self) -> str:
+        """One more turn: narrative writeup for the operator recap (no tools expected)."""
+        from backend.writeup import WRITEUP_PROMPT
+
+        if self._client is None:
+            return ""
+        parts: list[str] = []
+        _live(self.agent_name, "── writeup ──")
+        await self._client.query(WRITEUP_PROMPT)
+        async for message in self._client.receive_response():
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock) and str(block.text or "").strip():
+                        parts.append(block.text.strip())
+                        # No per-token live stream — see cursor_solver.produce_writeup.
+        return "\n\n".join(parts).strip()
 
     async def stop(self) -> None:
         self.tracer.event("stop", step_count=self._step_count)

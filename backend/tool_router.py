@@ -67,6 +67,14 @@ class PackSpec:
     # Paths bind-mounted RO from cache at container start (None = all paths).
     # Use a subset when bootstrap must rewrite files under a parent (e.g. sage wrappers).
     bind_paths: tuple[str, ...] | None = None
+    # Writable per-pack scratch bind-mounted RW from the host so first-use builds
+    # (e.g. blutter compiling a Dart VM for a snapshot version) survive container
+    # recreation and later challenges. Never evicted with the RO pack cache.
+    state_dirs: tuple[str, ...] = ()
+    # When True, ``state_dirs`` are machine-global (not per Artemis session).
+    # Blutter Dart VMs are keyed by Dart version — session isolation forced a
+    # full recompile on every new TUI session.
+    shared_state: bool = False
     # apt packages to ensure inside L0 (best-effort).
     apt: tuple[str, ...] = ()
     # pip packages (uses --break-system-packages when needed).
@@ -95,8 +103,11 @@ PACK_SPECS: dict[str, PackSpec] = {
             "/opt/apktool",
             "/opt/blutter",
             "/usr/local/bin/apktool",
-            "/usr/local/bin/blutter",
         ),
+        # blutter builds a Dart VM per snapshot version (minutes on first use).
+        # Keep it on the host so one compile serves every later APK/run/session.
+        state_dirs=("/var/cache/ctf-blutter",),
+        shared_state=True,
         apt=(
             "openjdk-17-jre-headless",
             "android-tools-adb",
@@ -573,6 +584,105 @@ def pack_cache_dir(pack_id: str) -> Path:
     return pack_cache_root() / pack_id / arch
 
 
+def pack_state_root() -> Path:
+    """Root for writable pack scratch (kept out of the evictable pack cache)."""
+    override = os.environ.get("CTF_PACK_STATE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return pack_cache_root().parent / "pack-state"
+
+
+def _pack_state_shared(pack_id: str) -> bool:
+    spec = PACK_SPECS.get(pack_id)
+    return bool(spec and spec.shared_state)
+
+
+def _blutter_vm_present(state_home: Path) -> bool:
+    bin_dir = state_home / "bin"
+    if not bin_dir.is_dir():
+        return False
+    try:
+        return any(bin_dir.glob("blutter_dartvm*"))
+    except OSError:
+        return False
+
+
+def _adopt_shared_state_from_sessions(pack_id: str, shared_home: Path) -> None:
+    """Copy a previously session-scoped Dart VM into the shared cache once.
+
+    Older builds wrote under ``…/<arch>/<session>/var/cache/ctf-blutter``. After
+    switching to ``shared_state``, reuse that work so operators are not forced
+    through another 10–30 minute compile.
+    """
+    if _blutter_vm_present(shared_home):
+        return
+    arch = platform.machine().replace("aarch64", "arm64")
+    root = pack_state_root() / pack_id / arch
+    if not root.is_dir():
+        return
+    donors: list[Path] = []
+    try:
+        for child in root.iterdir():
+            # Shared tree lives at root/var/… — skip it; scan session leftovers.
+            if not child.is_dir() or child.name == "var":
+                continue
+            cand = child / "var" / "cache" / "ctf-blutter"
+            if cand.is_dir() and _blutter_vm_present(cand):
+                donors.append(cand)
+    except OSError:
+        return
+    if not donors:
+        return
+    donor = max(donors, key=lambda p: p.stat().st_mtime)
+    import shutil
+
+    shared_home.mkdir(parents=True, exist_ok=True)
+    for name in ("bin", "build", "dartsdk", "packages"):
+        src = donor / name
+        dst = shared_home / name
+        if not src.exists() or dst.exists():
+            continue
+        try:
+            shutil.copytree(src, dst, symlinks=True)
+        except OSError as e:
+            logger.warning("Adopt %s → %s failed: %s", src, dst, e)
+    if _blutter_vm_present(shared_home):
+        logger.info(
+            "Pack %s: adopted shared state cache from %s → %s",
+            pack_id,
+            donor,
+            shared_home,
+        )
+
+
+def pack_state_dir(
+    pack_id: str, container_path: str, *, session_id: str | None = None
+) -> Path:
+    """Writable pack scratch dir on the host (bound RW into the sandbox).
+
+    Packs with ``shared_state=True`` (blutter) skip session namespacing so one
+    Dart VM compile serves every Artemis session on this machine.
+    """
+    from backend.daemon.session_id import normalize_session_id
+
+    arch = platform.machine().replace("aarch64", "arm64")
+    rel = container_path.lstrip("/")
+    if _pack_state_shared(pack_id):
+        home = pack_state_root() / pack_id / arch / rel
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+            _adopt_shared_state_from_sessions(pack_id, home)
+        except OSError as e:
+            logger.debug("pack_state_dir prepare %s: %s", home, e)
+        return home
+    sid = normalize_session_id(
+        session_id
+        if session_id is not None
+        else os.environ.get("ARTEMIS_SESSION_ID")
+    )
+    return pack_state_root() / pack_id / arch / sid / rel
+
+
 def pack_binds_enabled() -> bool:
     """Host-cache bind mounts (default on). Set CTF_PACK_BIND=0 to force docker cp."""
     return os.environ.get("CTF_PACK_BIND", "1").strip().lower() not in (
@@ -596,7 +706,7 @@ def parse_memory_bytes(limit: str) -> int:
         if s.endswith("k"):
             return int(float(s[:-1]) * 1024)
         return int(s)
-    except ValueError, IndexError:
+    except (ValueError, IndexError):
         return 0
 
 
@@ -738,6 +848,22 @@ def pack_cache_item(cache: Path, container_path: str) -> Path:
     return cache / container_path.lstrip("/")
 
 
+BLUTTER_WRAPPER = Path(__file__).resolve().parents[1] / "sandbox" / "scripts" / "blutter.sh"
+
+
+def blutter_wrapper_source() -> str:
+    """Repo copy of the blutter entrypoint, written by the mobile bootstrap.
+
+    Kept out of the donor image binds so cache/locking fixes ship without a
+    ``ctf-sandbox-mobile`` rebuild.
+    """
+    try:
+        return BLUTTER_WRAPPER.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("blutter wrapper unreadable at %s: %s", BLUTTER_WRAPPER, e)
+        return ""
+
+
 def pack_marker_path(pack_id: str) -> str:
     """Opaque in-container marker (no pack id in the path).
 
@@ -757,6 +883,10 @@ def pack_marker_path(pack_id: str) -> str:
                 ",".join(spec.gems),
             )
         )
+        if pack_id == "mobile":
+            # Wrapper is written by bootstrap; editing it must re-bootstrap.
+            wrapper = blutter_wrapper_source()
+            payload += "|" + hashlib.sha256(wrapper.encode("utf-8")).hexdigest()[:16]
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"/var/lib/ctf/.ready-{digest}"
 
@@ -819,12 +949,23 @@ def _challenge_text(challenge_dir: Path) -> str:
 
 
 def _wants_linux_remote_pack(text: str) -> bool:
-    """High-confidence remote AD / Assumed Breach labs (no distfiles needed)."""
+    """Prefetch linux for SSH / light remote / AD labs (no distfiles needed)."""
     if not text:
         return False
     low = text.lower()
     compact = low.replace(" ", "").replace("-", "")
     if "assumedbreach" in compact:
+        return True
+    # SSH / password-guest pastes (pwnable.kr style) need openssh + sshpass.
+    if re.search(
+        r"(?i)\bssh\s+\S+@\S+|\bsshpass\b|\bssh\s+[^\n]{0,80}-p\s*\d{2,5}\b",
+        text,
+    ):
+        return True
+    if re.search(r"(?i)\b(nc|ncat|socat)\s+\S+\s+\d{2,5}\b", text) and re.search(
+        r"(?i)\b(ssh|sshpass|openssh|linux\s+box|privilege\s+escalat)",
+        text,
+    ):
         return True
     ad_keys = (
         "active directory",
@@ -834,6 +975,8 @@ def _wants_linux_remote_pack(text: str) -> bool:
         "ldap",
         "smb ",
         " smb",
+        "smbclient",
+        "\\\\",
         "ntlm",
         "bloodhound",
     )
@@ -925,8 +1068,8 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
             or suffix == ".elf"
             or (path.suffix == "" and _looks_like_elf(path))
         ):
+            # Prefetch pwn only — Ghidra is heavy; load on Tags:rev / .NET / first use.
             packs.add("pwn")
-            packs.add("ghidra")
 
     text = _challenge_text(root)
     if _wants_linux_remote_pack(text):
@@ -954,12 +1097,20 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
             packs.add("steg")
         if tags & {"rev", "reverse", "re"}:
             packs.add("ghidra")
+        if tags & {"linux", "ad", "pentest", "assumed-breach", "assumedbreach"}:
+            packs.add("linux")
 
-    # ELF handouts always suggest ghidra; do not also force-prefetch the heavy
-    # pwn apt/pip stack for crypto/rev-tagged challenges (angr/qemu still load
-    # on demand when the agent actually needs them).
+    # ELF handouts prefetch pwn; do not also force the heavy pwn stack for
+    # crypto/rev-tagged challenges (angr/qemu still load on demand).
     if "pwn" in packs and "crypto" in tags and "pwn" not in tags and "shellcoding" not in tags:
         packs.discard("pwn")
+
+    # Mobile-only handouts: do not also prefetch pwn/ghidra/crypto unless tagged.
+    # jadx/blutter still lazy-ensure; sage/ghidra stay on demand.
+    if "mobile" in packs and not (tags & {"pwn", "shellcoding", "rev", "reverse", "re", "crypto"}):
+        packs.discard("pwn")
+        packs.discard("ghidra")
+        packs.discard("crypto")
 
     return [p for p in _PACK_PRIORITY if p in packs]
 
@@ -1130,6 +1281,16 @@ def bootstrap_script(pack_id: str) -> str:
             "  ln -sfn /opt/ghidra/support/analyzeHeadless /usr/local/bin/analyzeHeadless || true",
             "fi",
         ]
+    if pack_id == "mobile":
+        wrapper = blutter_wrapper_source()
+        if wrapper:
+            lines += [
+                "mkdir -p /usr/local/bin /var/cache/ctf-blutter",
+                "cat > /usr/local/bin/blutter <<'CTF_BLUTTER_WRAPPER_EOF'",
+                wrapper.rstrip("\n"),
+                "CTF_BLUTTER_WRAPPER_EOF",
+                "chmod +x /usr/local/bin/blutter",
+            ]
     if pack_id == "forensics":
         lines += [
             "mkdir -p /usr/local/bin",
@@ -1392,16 +1553,10 @@ def parse_ensure_pack_command(command: str) -> str | None:
 
 def donor_build_hint(pack_id: str) -> str:
     """Operator-facing build hint when a donor image is missing."""
-    hints = {
-        "crypto": ("docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto ."),
-        "crypto-tools": (
-            "docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools ."
-        ),
-        "steg": "docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .",
-        "linux": "docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .",
-        "mobile": ("docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile ."),
-        "pwn": "docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .",
-        "ghidra": ("docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra ."),
-    }
-    cmd = hints.get(pack_id)
-    return f" Build the donor: {cmd}" if cmd else ""
+    from backend.sandbox.donor_build import DONOR_BUILD_SPECS
+
+    spec = DONOR_BUILD_SPECS.get(pack_id)
+    if not spec:
+        return ""
+    dockerfile, image = spec
+    return f" Build the donor: docker build -f {dockerfile} -t {image} ."

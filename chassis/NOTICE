@@ -1,0 +1,14 @@
+Artemis Chassis — notice of third-party code
+============================================
+
+This directory contains source code derived from OpenCode:
+
+  Project:  OpenCode
+  URL:      https://github.com/anomalyco/opencode
+  License:  MIT
+  Copyright (c) 2025 opencode
+
+The full MIT license text is in LICENSE (this directory).
+
+Artemis modifications (branding, CTF modes, tool bridges) are copyright
+their respective authors and distributed with this repository.

@@ -9,10 +9,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
+from backend.log_context import log_agent
 from backend.message_bus import ChallengeMessageBus
-from backend.models import DEFAULT_MODELS, assign_runner_ids, provider_from_spec
+from backend.models import (
+    DEFAULT_MODELS,
+    SUPPORTED_PROVIDERS,
+    agent_display_key,
+    assign_runner_ids,
+    provider_from_spec,
+)
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -33,33 +39,26 @@ logger = logging.getLogger(__name__)
 _RecoverSession = Callable[[str | None], Awaitable[None]]
 
 
-def _tracker_cost_usd(tracker: Any) -> float:
-    """Read CostTracker.total_cost_usd; tolerate MagicMock callables in tests."""
-    raw: Any = getattr(tracker, "total_cost_usd", 0.0)
+def _tracker_cost_usd(tracker: Any) -> float | None:
+    """Read CostTracker.total_reported_cost_usd; tolerate MagicMock callables.
+
+    Returns ``None`` when no provider has reported cost (never estimated).
+    """
+    raw: Any = getattr(tracker, "total_reported_cost_usd", None)
     if callable(raw):
         raw = raw()
+    if raw is None:
+        return None
     try:
         return float(raw)
-    except TypeError, ValueError:
-        return 0.0
+    except (TypeError, ValueError):
+        return None
 
 
 # After this many bridge recoveries in one challenge, stop (avoid infinite spin).
 MAX_INFRA_RECOVERIES = 20
 # Short cooldown before recreating a poisoned Cursor agent.
 INFRA_RECOVERY_COOLDOWN_S = 5
-
-# Quota fallback: map subscription-backed providers to API-backed equivalents
-QUOTA_FALLBACK: dict[str, str] = {
-    "claude-sdk/claude-opus-4-6": "bedrock/us.anthropic.claude-opus-4-6-v1",
-    "codex/gpt-5.4": "azure/gpt-5.4",
-    "codex/gpt-5.4-mini": "azure/gpt-5.4-mini",
-    "codex/gpt-5.3-codex-spark": "zen/gpt-5.3-codex-spark",
-}
-
-
-def _quota_fallback_spec(model_spec: str) -> str | None:
-    return QUOTA_FALLBACK.get(model_spec)
 
 
 @dataclass
@@ -77,8 +76,16 @@ class ChallengeSwarm:
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
+    winner_runner_id: str = ""
     confirmed_flag: str | None = None  # joined flags when challenge complete
     confirmed_flags: list[str] = field(default_factory=list)
+    # Who got each accepted flag, and what they said they did — the swarm card
+    # otherwise ends on a bare flag with no author and no method.
+    flag_credits: dict[str, str] = field(default_factory=dict)
+    flag_notes: dict[str, str] = field(default_factory=dict)
+    _steps_by_runner: dict[str, int] = field(default_factory=dict)
+    # True after How: was streamed — print_swarm_outcome must not dump it again.
+    _how_emitted: bool = False
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
@@ -102,6 +109,9 @@ class ChallengeSwarm:
 
         self._eval = EvalRunState()
         image, packs = apply_router_to_settings(self.settings, self.challenge_dir)
+        pack_note = f"; packs={','.join(packs)}" if packs else ""
+        # stdout (not just logger) so the TUI boot panel sees pack/image status
+        print(f"[artemis] boot L0 image={image}{pack_note}", flush=True)
         if packs:
             logger.info(
                 "[%s] L0 image=%s; prefetch packs=%s",
@@ -154,7 +164,7 @@ class ChallengeSwarm:
         - cursor/* → CursorSolver (Cursor SDK + CURSOR_API_KEY)
         - claude-sdk/* → ClaudeSolver (Claude Agent SDK, subscription-first)
         - codex/* → CodexSolver (Codex App Server, subscription-first)
-        - bedrock/*, azure/*, zen/*, google/* → Pydantic AI Solver (API)
+        - gemini-sdk/* → GeminiSolver (google-genai, API key/ADC/Vertex)
         """
         rid = runner_id or model_spec
         provider = provider_from_spec(model_spec)
@@ -167,6 +177,9 @@ class ChallengeSwarm:
         if provider == "cursor":
             from backend.agents.cursor_solver import CursorSolver
 
+            all_cursor = all(
+                provider_from_spec(s) == "cursor" for s in self.model_specs
+            )
             solver = CursorSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
@@ -177,6 +190,7 @@ class ChallengeSwarm:
                 submit_fn=_submit_fn,
                 message_bus=self.message_bus,
                 notify_coordinator=_notify,
+                emit_global_quota=all_cursor or len(self.model_specs) <= 1,
             )
             self._tag_solver(solver, rid, model_spec)
             return solver
@@ -215,9 +229,29 @@ class ChallengeSwarm:
             self._tag_solver(solver, rid, model_spec)
             return solver
 
-        solver = self._create_pydantic_solver(model_spec, runner_id=rid)
-        self._tag_solver(solver, rid, model_spec)
-        return solver
+        if provider == "gemini-sdk":
+            from backend.agents.gemini_solver import GeminiSolver
+
+            solver = GeminiSolver(
+                model_spec=model_spec,
+                challenge_dir=self.challenge_dir,
+                meta=self.meta,
+                cost_tracker=self.cost_tracker,
+                settings=self.settings,
+                cancel_event=self.cancel_event,
+                submit_fn=_submit_fn,
+                message_bus=self.message_bus,
+                notify_coordinator=_notify,
+            )
+            self._tag_solver(solver, rid, model_spec)
+            return solver
+
+        supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
+        raise ValueError(
+            f"Unsupported provider {provider!r} in {model_spec!r}. "
+            f"Supported: {supported} "
+            f"(legacy Bedrock/Azure/Zen provider shims removed)."
+        )
 
     def _make_notify_fn(self, runner_id: str):
         """Create a callback that pushes solver messages to the coordinator inbox."""
@@ -227,36 +261,6 @@ class ChallengeSwarm:
                 self.coordinator_inbox.put_nowait(f"[{self.meta.name}/{runner_id}] {message}")
 
         return _notify
-
-    def _create_pydantic_solver(
-        self,
-        model_spec: str,
-        sandbox=None,
-        owns_sandbox: bool | None = None,
-        runner_id: str | None = None,
-    ) -> Solver:
-        """Create a Pydantic AI solver. Pass sandbox to reuse an existing container (quota fallback)."""
-        rid = runner_id or model_spec
-        solver = Solver(
-            model_spec=model_spec,
-            challenge_dir=self.challenge_dir,
-            meta=self.meta,
-            cost_tracker=self.cost_tracker,
-            settings=self.settings,
-            cancel_event=self.cancel_event,
-            sandbox=sandbox,
-            owns_sandbox=owns_sandbox,
-        )
-        solver.deps.message_bus = self.message_bus
-        solver.deps.model_spec = rid
-        solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, rid)
-        solver.deps.notify_coordinator = self._make_notify_fn(rid)
-        from backend.flags import normalize_flags_required
-
-        solver.deps.flags_required = normalize_flags_required(
-            getattr(self.meta, "flags_required", 1)
-        )
-        return solver
 
     def _gather_sibling_insights(self, exclude_model: str) -> str:
         parts: list[str] = []
@@ -362,6 +366,7 @@ class ChallengeSwarm:
                 required=required,
                 challenge_dir=self.challenge_dir,
                 auto_confirm=auto,
+                by=model_spec,
             )
             # Hard rejects (decoy/artifact/rewrap-style) still dedupe so agents
             # do not re-prompt the operator with the same junk.
@@ -369,6 +374,19 @@ class ChallengeSwarm:
 
             if display.startswith(("ACCEPTED", "CORRECT")):
                 self.confirmed_flags.append(normalized)
+                self.flag_credits[normalized] = model_spec
+                # Snapshot now: after the race is cut short the solver may be
+                # cancelled before it writes a prose summary. Prefer the model's
+                # own note when it wrote one; always fall back to the tool trail
+                # so "How the flag was found" is never just a name and a step count.
+                from backend.action_log import notes_from_actions
+
+                solver = self.solvers.get(model_spec)
+                prose = str(getattr(solver, "_findings", "") or "").strip()
+                actions = list(getattr(solver, "_action_log", []) or [])
+                notes = notes_from_actions(actions, prose=prose)
+                if notes:
+                    self.flag_notes[model_spec] = notes
                 logger.info(
                     "[%s] Flag progress %s/%s via %s",
                     self.meta.name,
@@ -376,8 +394,22 @@ class ChallengeSwarm:
                     required,
                     model_spec,
                 )
+                # Persist so TUI sidebar / flowCompleted / restart-confirm work.
+                try:
+                    from backend.shell.sandbox_session import sync_accepted_flags
+
+                    sync_accepted_flags(
+                        list(self.confirmed_flags),
+                        flags_required=required,
+                    )
+                except Exception:
+                    logger.debug("sync_accepted_flags failed", exc_info=True)
                 if is_complete:
                     self.confirmed_flag = " | ".join(self.confirmed_flags)
+                    # Sticky main-page recap NOW — do not wait for writeup / teardown.
+                    # Writeup can hang for minutes; without these lines the TUI goes
+                    # empty while sidebar already shows n/n flags.
+                    self._emit_correct_recap(model_spec)
                 return display, is_complete
 
             # Rejected / not counted — escalate cooldown only for attempts that
@@ -388,18 +420,21 @@ class ChallengeSwarm:
             return display, False
 
     async def _run_solver(self, runner_id: str, model_spec: str) -> SolverResult | None:
-        solver = self._create_solver(model_spec, runner_id=runner_id)
-        self.solvers[runner_id] = solver
+        # Each solver runs in its own asyncio task, so the bound tag stays local
+        # and sandbox/pack logs from this runner are attributable in the TUI.
+        with log_agent(f"{self.meta.name}/{runner_id}"):
+            solver = self._create_solver(model_spec, runner_id=runner_id)
+            self.solvers[runner_id] = solver
 
-        try:
-            result, final_solver = await self._run_solver_loop(solver, runner_id, model_spec)
-            solver = final_solver
-            return result
-        except Exception as e:
-            logger.error(f"[{self.meta.name}/{runner_id}] Fatal: {e}", exc_info=True)
-            return None
-        finally:
-            await solver.stop()
+            try:
+                result, final_solver = await self._run_solver_loop(solver, runner_id, model_spec)
+                solver = final_solver
+                return result
+            except Exception as e:
+                logger.error(f"[{self.meta.name}/{runner_id}] Fatal: {e}", exc_info=True)
+                return None
+            finally:
+                await solver.stop()
 
     async def _run_solver_loop(
         self, solver, runner_id: str, model_spec: str
@@ -416,7 +451,7 @@ class ChallengeSwarm:
             status=CANCELLED,
             findings_summary="",
             step_count=0,
-            cost_usd=0.0,
+            cost_usd=None,
             log_path="",
         )
         await solver.start()
@@ -458,13 +493,16 @@ class ChallengeSwarm:
             self._last_status = result.status
             self._last_steps = result.step_count
             self._last_flag = result.flag
+            self._steps_by_runner[runner_id] = result.step_count
 
             # Only broadcast useful findings — skip broken solvers, but DO keep
             # mid-run notes even on infra_error so sibling recover gets context.
             live_notes = (result.findings_summary or "").strip()
             solver_notes = str(getattr(solver, "_findings", "") or "").strip()
             note = live_notes if live_notes else solver_notes
-            if (
+            if note and result.status == QUOTA_ERROR:
+                self.findings[runner_id] = note[:500]
+            elif (
                 result.step_count > 0
                 and note
                 and not note.startswith(("Error:", "Turn failed:", "Infra:"))
@@ -474,8 +512,35 @@ class ChallengeSwarm:
                     await self.message_bus.post(runner_id, note[:500])
 
             if result.status == FLAG_FOUND and self.confirmed_flag:
-                # Soft race: cancel siblings only when all required flags are in.
+                # Solved-by already emitted on the completing submit. Try a short
+                # narrative writeup, but NEVER block teardown on Cursor SDK —
+                # a hung writeup left Stopping + empty main for hours.
+                from backend.writeup import capture_solver_writeup, is_usable_narrative
+
+                writeup = ""
+                existing = (self.flag_notes.get(runner_id) or "").strip()
+                # Action-log notes from submit are enough for How:; skip the
+                # extra Cursor turn when we already have a usable trail.
+                if not is_usable_narrative(existing) and len(existing) < 80:
+                    writeup_task = asyncio.create_task(capture_solver_writeup(solver))
+                    done, _pending = await asyncio.wait({writeup_task}, timeout=12.0)
+                    if writeup_task in done:
+                        try:
+                            writeup = writeup_task.result() or ""
+                        except Exception:
+                            writeup = ""
+                    else:
+                        writeup_task.cancel()
+                        try:
+                            await asyncio.wait_for(writeup_task, timeout=0.5)
+                        except (TimeoutError, asyncio.CancelledError, Exception):
+                            pass
                 self.cancel_event.set()
+                if writeup and is_usable_narrative(writeup):
+                    self.flag_notes[runner_id] = writeup
+                    self.findings[runner_id] = writeup[:500]
+                # One How: block now so a hung exit path still leaves a trail.
+                self._emit_how_recap()
                 if result.flag != self.confirmed_flag:
                     result = SolverResult(
                         flag=self.confirmed_flag,
@@ -486,6 +551,7 @@ class ChallengeSwarm:
                         log_path=result.log_path,
                     )
                 self.winner = result
+                self.winner_runner_id = runner_id
                 logger.info(f"[{self.meta.name}] Flag(s) found by {runner_id}: {result.flag}")
                 return result, solver
 
@@ -494,7 +560,7 @@ class ChallengeSwarm:
 
                 logger.warning(
                     "[%s] %s reported FLAG_FOUND but challenge incomplete "
-                    "(%s/%s) — soft race continues",
+                    "(%s/%s) — soft swarm continues",
                     self.meta.name,
                     runner_id,
                     len(self.confirmed_flags),
@@ -516,28 +582,48 @@ class ChallengeSwarm:
             if result.status == CANCELLED:
                 break
 
-            # Quota exhaustion: fall back to API-backed Pydantic AI solver
+            # Quota exhaustion: stop this solver (no Bedrock/Azure API fallback).
+            # All-Cursor swarms share one account — cancel siblings so Solving
+            # does not spin waiting on models that will hit the same limit.
+            # Mixed providers: only stop this runner (soft race continues).
             if result.status == QUOTA_ERROR:
-                fallback_spec = _quota_fallback_spec(model_spec)
-                if fallback_spec:
-                    logger.warning(
-                        f"[{self.meta.name}/{runner_id}] Quota exhausted — falling back to {fallback_spec}"
+                from backend.agents.cursor_runtime import humanize_cursor_error
+
+                short = humanize_cursor_error(result.findings_summary) or (
+                    "Cursor usage limit reached — switch model or wait for reset"
+                )
+                logger.warning("[%s/%s] %s", self.meta.name, runner_id, short)
+                # Per-runner line so TUI agent boxes show the failure (not endless starting).
+                print(f"[{self.meta.name}/{runner_id}] {short}", flush=True)
+                all_cursor = all(
+                    provider_from_spec(s) == "cursor" for s in self.model_specs
+                )
+                if all_cursor:
+                    # May already be printed live by cursor_solver — keep one global line.
+                    from backend.agents.quota_dedupe import claim_quota_outcome_print
+
+                    if claim_quota_outcome_print(self.cancel_event):
+                        self._quota_outcome_printed = True
+                        from backend.agents.live_log import emit_line
+
+                        emit_line(f"[artemis] outcome ERROR — {short}")
+                    try:
+                        from backend.flags import cancel_flag_confirmation
+
+                        cancel_flag_confirmation()
+                    except Exception:
+                        pass
+                    self.cancel_event.set()
+                else:
+                    # Mixed providers: siblings keep racing, but the main chat must
+                    # still see the failure. Per-agent outcomes alone are filtered
+                    # off the main page, which made quota look like a silent hang.
+                    from backend.agents.live_log import emit_line
+
+                    emit_line(
+                        f"[artemis] outcome WARN — {runner_id} hit a usage limit "
+                        f"(siblings continue): {short}"
                     )
-                    existing_sandbox = solver.sandbox
-                    # Detach sandbox from old solver so stop() doesn't destroy it
-                    solver.sandbox = None  # type: ignore[assignment]
-                    await solver.stop()
-                    solver = self._create_pydantic_solver(
-                        fallback_spec,
-                        sandbox=existing_sandbox,
-                        owns_sandbox=True,
-                        runner_id=runner_id,
-                    )
-                    self._tag_solver(solver, runner_id, fallback_spec)
-                    self.solvers[runner_id] = solver
-                    await solver.start()
-                    continue
-                # No fallback available, treat as error
                 break
 
             # Cursor bridge / transport failures: recreate agent, do not count
@@ -650,7 +736,32 @@ class ChallengeSwarm:
 
         try:
             while tasks:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                cancel_waiter = asyncio.create_task(self.cancel_event.wait())
+                tasks_waiter = asyncio.create_task(
+                    asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                )
+                finished, _ = await asyncio.wait(
+                    {cancel_waiter, tasks_waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if cancel_waiter in finished and self.cancel_event.is_set():
+                    tasks_waiter.cancel()
+                    try:
+                        await tasks_waiter
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    for p in tasks:
+                        p.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    break
+
+                cancel_waiter.cancel()
+                try:
+                    await cancel_waiter
+                except (asyncio.CancelledError, Exception):
+                    pass
+                done, pending = tasks_waiter.result()
 
                 for task in done:
                     try:
@@ -665,6 +776,13 @@ class ChallengeSwarm:
                         await asyncio.gather(*pending, return_exceptions=True)
                         self._write_eval_artifact(result)
                         return result
+
+                # Quota/stop may have been set while a task was completing.
+                if self.cancel_event.is_set() and pending:
+                    for p in pending:
+                        p.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    break
 
                 tasks = list(pending)
 
@@ -688,7 +806,7 @@ class ChallengeSwarm:
         from backend.eval_run import write_eval_summary
 
         status = result.status if result else (self._last_status or ERROR)
-        cost_usd = 0.0
+        cost_usd: float | None = None
         if self.cost_tracker is not None:
             cost_usd = _tracker_cost_usd(self.cost_tracker)
         write_eval_summary(
@@ -707,13 +825,15 @@ class ChallengeSwarm:
         """Return winner, or a partial summary when flags were found but race unfinished."""
         if self.winner:
             return self.winner
+        # Real provider-reported cost (None when no provider reported — never estimated).
+        cost = _tracker_cost_usd(self.cost_tracker) if self.cost_tracker is not None else None
         if self.confirmed_flag:
             return SolverResult(
                 flag=self.confirmed_flag,
                 status=FLAG_FOUND,
                 findings_summary=self._summary_findings(),
                 step_count=0,
-                cost_usd=0.0,
+                cost_usd=cost,
                 log_path="",
             )
         if self.confirmed_flags:
@@ -729,21 +849,125 @@ class ChallengeSwarm:
                     + self._summary_findings()
                 )[:2000],
                 step_count=0,
-                cost_usd=0.0,
+                cost_usd=cost,
                 log_path="",
             )
         # Best-effort: surface any solver findings even without accepts
         summary = self._summary_findings()
         if summary:
+            # Prefer QUOTA_ERROR when every useful note is a usage-limit stop.
+            from backend.agents.cursor_runtime import is_quota_error_message
+
+            status = GAVE_UP
+            if is_quota_error_message(summary) and not self.confirmed_flags:
+                status = QUOTA_ERROR
             return SolverResult(
                 flag=None,
-                status=GAVE_UP,
+                status=status,
                 findings_summary=summary[:2000],
                 step_count=0,
-                cost_usd=0.0,
+                cost_usd=cost,
                 log_path="",
             )
         return None
+
+    def solved_by(self) -> list[str]:
+        """Runner ids credited with an accepted flag, in accept order."""
+        credited = [self.flag_credits[f] for f in self.confirmed_flags if f in self.flag_credits]
+        if self.winner_runner_id and self.winner_runner_id not in credited:
+            credited.append(self.winner_runner_id)
+        return list(dict.fromkeys(credited))
+
+    def solved_by_labels(self) -> list[str]:
+        """Credited runners as the labels the TUI puts on their agent boxes."""
+        specs = dict(assign_runner_ids(self.model_specs))
+        return [agent_display_key(rid, specs.get(rid, rid)) for rid in self.solved_by()]
+
+    def _emit_correct_recap(self, credited_spec: str) -> None:
+        """Print sticky Solved-by as soon as the last flag is accepted.
+
+        CORRECT itself is already emitted by ``accept_flag`` — do not repeat
+        the flag list here. How: comes later via ``_emit_how_recap``.
+        """
+        from backend.agents.live_log import emit_line
+
+        if not self.confirmed_flags:
+            return
+        labels = self.solved_by_labels()
+        who = ", ".join(labels) if labels else agent_display_key(credited_spec, credited_spec)
+        emit_line(f"[artemis] summary Solved by {who}")
+
+    def _emit_how_recap(self) -> None:
+        """Stream How: once (narrative if usable, else command trail)."""
+        if self._how_emitted:
+            return
+        from backend.agents.live_log import emit_line
+
+        lines = self.solve_writeup()
+        # solve_writeup starts with Solved by — already emitted on accept.
+        how_lines = [ln for ln in lines if not ln.startswith("Solved by ")]
+        if not how_lines:
+            return
+        for line in how_lines:
+            emit_line(f"[artemis] summary {line}")
+        self._how_emitted = True
+
+    def solve_writeup(self) -> list[str]:
+        """Operator recap: who solved it, and how (narrative XOR commands).
+
+        Flags are only on the CORRECT outcome — repeating them here cluttered
+        the TUI. Facts only — recorded state, never guessed.
+        """
+        flags = list(self.confirmed_flags)
+        if not flags:
+            return []
+        from backend.action_log import command_how_lines
+        from backend.writeup import clean_how_lines, is_usable_narrative
+
+        specs = dict(assign_runner_ids(self.model_specs))
+        winners = self.solved_by()
+        key = {rid: agent_display_key(rid, specs.get(rid, rid)) for rid in winners}
+        who = ", ".join(key[rid] for rid in winners) if winners else "the swarm"
+        lines = [f"Solved by {who}"]
+        shared = len(winners) > 1
+        for rid in winners:
+            note = (self.flag_notes.get(rid) or self.findings.get(rid) or "").strip()
+            if shared:
+                lines.append(f"How ({key[rid]}):")
+            else:
+                lines.append("How:")
+            if note and is_usable_narrative(note):
+                for piece in clean_how_lines(note):
+                    if not piece.strip():
+                        lines.append("")
+                        continue
+                    lines.append(f"  {piece}")
+                continue
+            # Unusable / missing narrative → command trail only.
+            solver = self.solvers.get(rid)
+            actions = list(getattr(solver, "_action_log", []) or []) if solver else []
+            cmds = command_how_lines(actions)
+            if not cmds and note:
+                import re as _re
+
+                for raw in note.splitlines():
+                    text = raw.strip()
+                    if _re.match(r"^\d+\.\s", text) and "submit_flag:" not in text:
+                        cmds.append(text)
+            if cmds:
+                for cmd in cmds:
+                    lines.append(f"  {cmd}")
+                continue
+            short = clean_how_lines(note) if note else []
+            if short:
+                for piece in short:
+                    if piece.strip():
+                        lines.append(f"  {piece}")
+            else:
+                lines.append("  (no writeup or command trail recorded)")
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return lines[:120]
 
     def _summary_findings(self) -> str:
         parts = [f"[{m}]: {f}" for m, f in self.findings.items() if f]

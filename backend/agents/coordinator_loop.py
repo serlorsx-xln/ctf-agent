@@ -176,7 +176,7 @@ async def run_event_loop(
                 logger.info("Event -> coordinator: %s", msg[:200])
                 await turn_fn(msg)
 
-    except KeyboardInterrupt, asyncio.CancelledError:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Coordinator shutting down...")
     except Exception as e:
         logger.error("Coordinator fatal: %s", e, exc_info=True)
@@ -250,7 +250,7 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
                 try:
                     data = json.loads(body)
                     message = data.get("message", body.decode())
-                except json.JSONDecodeError, UnicodeDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     message = body.decode("utf-8", errors="replace")
 
                 inbox.put_nowait(message)

@@ -32,7 +32,7 @@ def test_cli_pack_and_eval_flags_help() -> None:
     from backend.cli import main
 
     runner = CliRunner()
-    result = runner.invoke(main, ["--help"])
+    result = runner.invoke(main, ["race", "--help"])
     assert result.exit_code == 0
     assert "--pack" in result.output
     assert "--eval-out" in result.output
@@ -51,13 +51,15 @@ def test_cli_applies_pack_and_eval_to_settings(tmp_path: Path, monkeypatch) -> N
 
     captured: dict = {}
 
-    async def fake_run_single(settings, challenge_dir, model_specs, max_challenges):
+    async def fake_run_single(
+        settings, challenge_dir, model_specs, max_challenges, flags_required=None
+    ):
         captured["settings"] = settings
         captured["challenge_dir"] = challenge_dir
         captured["models"] = model_specs
+        captured["flags_required"] = flags_required
 
     monkeypatch.setattr(cli_mod, "_run_single", fake_run_single)
-    # Avoid real image resolution needing full challenge layout
     monkeypatch.setattr(
         "backend.tool_router.resolve_sandbox_image",
         lambda *a, **k: ("ctf-sandbox-core", ["web"]),
@@ -67,6 +69,7 @@ def test_cli_applies_pack_and_eval_to_settings(tmp_path: Path, monkeypatch) -> N
     result = runner.invoke(
         cli_mod.main,
         [
+            "race",
             "--challenge",
             str(chal),
             "--pack",
@@ -209,6 +212,10 @@ def test_swarm_eval_budget_cancels() -> None:
     swarm.solvers = {}
     swarm.findings = {}
     swarm.winner = None
+    swarm.winner_runner_id = ""
+    swarm.flag_credits = {}
+    swarm.flag_notes = {}
+    swarm._steps_by_runner = {}
     swarm.confirmed_flag = None
     swarm.confirmed_flags = []
     swarm._flag_lock = asyncio.Lock()

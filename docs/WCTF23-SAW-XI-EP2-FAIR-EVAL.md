@@ -13,7 +13,7 @@ Imported as `challenges/wctf23-saw-xi-ep2/` with **memory dump only** (no Drive 
 ```bash
 cd /Users/serlorsx/Downloads/ctf
 unset DOCKER_HOST
-uv run ctf-solve --challenge ./challenges/wctf23-saw-xi-ep2 --models 'cursor/grok-4.5' -v
+uv run artemis swarm --challenge ./challenges/wctf23-saw-xi-ep2 --models 'cursor/grok-4.5' -v
 ```
 
 Confirm candidates yourself. Do not paste writeups into prompts.

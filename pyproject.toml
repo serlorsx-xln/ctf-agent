@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Artemis — multi-model CTF solver swarm"
 requires-python = ">=3.14"
 dependencies = [
-    "pydantic-ai[bedrock,openai,google]",
+    "pydantic-ai",
     "pydantic-settings",
-    "boto3",
+    "google-genai",
     "aiodocker",
     "claude-agent-sdk",
     "cursor-sdk>=0.1.9",
@@ -17,7 +17,8 @@ dependencies = [
 
 [project.scripts]
 artemis = "backend.cli:main"
-ctf-solve = "backend.cli:main"
+artemis-daemon = "backend.daemon.server:main"
+ctf-solve = "backend.cli:race_main"
 ctf-msg = "backend.cli:msg"
 
 [build-system]

@@ -19,7 +19,7 @@ Missing sealed flags upstream (no `writeup/flag.txt`): `tctt-junior-secret-or-se
 ```bash
 cd /Users/serlorsx/Downloads/ctf
 unset DOCKER_HOST
-uv run ctf-solve --challenge ./challenges/tctt-junior-very-ez-re --models 'cursor/grok-4.5' -v
+uv run artemis swarm --challenge ./challenges/tctt-junior-very-ez-re --models 'cursor/grok-4.5' -v
 ```
 
 Confirm with sealed JSON yourself (y/N). Never put writeup repo contents back under `challenges/`.

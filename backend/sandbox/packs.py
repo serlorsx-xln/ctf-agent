@@ -50,6 +50,7 @@ def _release_pack_flock(fd: int) -> None:
 
 
 def _pack_cache_is_ready(pack_id: str) -> bool:
+    from backend.sandbox.setup_bake import pack_cache_stale
     from backend.tool_router import PACK_SPECS, pack_cache_dir
 
     spec = PACK_SPECS.get(pack_id)
@@ -57,4 +58,8 @@ def _pack_cache_is_ready(pack_id: str) -> bool:
         return False
     cache = pack_cache_dir(pack_id)
     marker = cache / ".ready"
-    return marker.is_file() and all((cache / p.lstrip("/")).exists() for p in spec.paths)
+    if not marker.is_file():
+        return False
+    if pack_cache_stale(pack_id):
+        return False
+    return all((cache / p.lstrip("/")).exists() for p in spec.paths)

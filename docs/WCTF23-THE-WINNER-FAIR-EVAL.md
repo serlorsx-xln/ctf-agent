@@ -13,7 +13,7 @@ Imported as `challenges/wctf23-the-winner/` with **binary only** (no GitHub/Driv
 ```bash
 cd /Users/serlorsx/Downloads/ctf
 unset DOCKER_HOST
-uv run ctf-solve --challenge ./challenges/wctf23-the-winner --models 'cursor/grok-4.5' -v
+uv run artemis swarm --challenge ./challenges/wctf23-the-winner --models 'cursor/grok-4.5' -v
 ```
 
 Confirm candidates yourself. Do not paste writeups into prompts.

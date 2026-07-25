@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Artemis TUI launcher (vendored chassis + Python CTF backend).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$ROOT/.." && pwd)"
+
+resolve_bun() {
+  if command -v bun >/dev/null 2>&1; then
+    command -v bun
+    return 0
+  fi
+  for candidate in \
+    "${BUN_INSTALL:+$BUN_INSTALL/bin/bun}" \
+    "$HOME/.bun/bin/bun" \
+    /usr/local/bin/bun \
+    /opt/homebrew/bin/bun
+  do
+    if [[ -n "${candidate:-}" && -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+BUN_BIN="$(resolve_bun)" || {
+  echo "Artemis TUI requires Bun." >&2
+  echo "  Install:  curl -fsSL https://bun.sh/install | bash" >&2
+  echo "  Then:     export PATH=\"\$HOME/.bun/bin:\$PATH\"" >&2
+  echo "Swarm-only: uv run artemis swarm --challenge PATH" >&2
+  exit 1
+}
+export PATH="$(dirname "$BUN_BIN"):${PATH:-}"
+
+export ARTEMIS=1
+export ARTEMIS_CHASSIS_ROOT="$ROOT"
+export ARTEMIS_REPO_ROOT="$REPO"
+unset OPENCODE_PURE 2>/dev/null || true
+export OPENCODE_CONFIG="${OPENCODE_CONFIG:-$ROOT/opencode.json}"
+
+# Optional repo .env for Docker/sandbox non-secrets only.
+# API keys must come from TUI /connect (auth.json) — never auto-connect from .env.
+if [[ -f "$REPO/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO/.env"
+  set +a
+fi
+unset CURSOR_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY 2>/dev/null || true
+
+# Inject Cursor / Claude / Codex keys saved via TUI /connect (auth.json).
+if command -v uv >/dev/null 2>&1; then
+  eval "$(
+    uv run --directory "$REPO" python -c '
+from backend.shell.credentials import read_tui_api_keys
+import shlex
+for k, v in read_tui_api_keys().items():
+    print(f"export {k}={shlex.quote(v)}")
+' 2>/dev/null || true
+  )"
+fi
+
+# Cursor TUI proxy (OpenAI-compatible) — catalog + single CTF flow tool_calls.
+# Always restart so catalog/code updates are not stuck behind a stale process.
+if command -v uv >/dev/null 2>&1; then
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:18765 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+  fi
+  uv run --directory "$REPO" python -m backend.shell.cursor_llm_stub \
+    >/tmp/artemis-cursor-llm-stub.log 2>&1 &
+  disown 2>/dev/null || true
+  sleep 0.25
+fi
+
+# Artemis control-plane daemon (NDJSON over Unix socket).
+# Long-lived supervisor: owns session/usage state + swarm subprocess lifecycle.
+# Unlike the stub above we never kill a live daemon: its shutdown stops the
+# swarm, so restarting it here would abort a solve started from another TUI.
+# This spawn is a no-op when one is already bound (it exits on a live socket)
+# and rebinds when the socket is stale, so `git pull` needs a daemon restart.
+# Exiting the TUI (or SIGTERM on the daemon) stops the swarm and reclaims
+# sandbox containers — they must not keep burning CPU/disk after the operator leaves.
+if command -v uv >/dev/null 2>&1; then
+  uv run --directory "$REPO" python -m backend.daemon.server \
+    >/tmp/artemis-daemon.log 2>&1 &
+  disown 2>/dev/null || true
+  # Wait for the socket to bind (cold uv resolve can take >0.25s on first run).
+  DAEMON_SOCK="${ARTEMIS_CACHE:-$HOME/.cache/artemis}/daemon.sock"
+  for _ in $(seq 1 50); do
+    [[ -S "$DAEMON_SOCK" ]] && break
+    sleep 0.1
+  done
+fi
+
+cd "$ROOT"
+set +e
+"$BUN_BIN" run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+code=$?
+set -e
+
+# Belt-and-suspenders: if the TUI died before its shutdown hook ran, stop via daemon.
+if command -v uv >/dev/null 2>&1 && [[ -S "${ARTEMIS_CACHE:-$HOME/.cache/artemis}/daemon.sock" ]]; then
+  uv run --directory "$REPO" python -c '
+import asyncio, json, os, socket, uuid
+from pathlib import Path
+
+async def _cleanup_orphans() -> None:
+    try:
+        from backend.sandbox import cleanup_orphan_containers
+        await cleanup_orphan_containers()
+    except Exception:
+        pass
+
+sock = Path(os.environ.get("ARTEMIS_CACHE", str(Path.home() / ".cache/artemis"))) / "daemon.sock"
+if sock.exists():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3.0)
+    try:
+        s.connect(str(sock))
+        rid = uuid.uuid4().hex[:12]
+        # role=usage would not cancel dialogs, but cannot dispatch swarm_stop.
+        # TUI is already gone — cancel_pending_dialogs on close is fine.
+        s.sendall((json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui"}) + "\n").encode())
+        s.recv(8192)
+        s.sendall((json.dumps({"v": 1, "id": rid, "type": "swarm_stop"}) + "\n").encode())
+        s.recv(8192)
+    except OSError:
+        pass
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+asyncio.run(_cleanup_orphans())
+' 2>/dev/null || true
+fi
+
+exit "$code"

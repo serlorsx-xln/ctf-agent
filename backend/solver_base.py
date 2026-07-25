@@ -21,13 +21,14 @@ class SolverResult:
     status: str
     findings_summary: str
     step_count: int
-    # Provider-reported USD only (e.g. Claude SDK). 0.0 means unknown / not reported.
-    cost_usd: float
+    # Provider-reported USD only (e.g. Claude SDK). ``None`` = unknown / not
+    # reported (never estimated). A real float = the provider reported cost.
+    cost_usd: float | None
     log_path: str
 
 
 class SolverProtocol(Protocol):
-    """Common interface for all solver backends (Cursor, Claude SDK, Codex, Pydantic AI)."""
+    """Common interface for Cursor / Claude SDK / Codex / Gemini solvers."""
 
     model_spec: str
     agent_name: str

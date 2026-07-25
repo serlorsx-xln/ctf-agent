@@ -49,6 +49,7 @@ _rpc_counter = itertools.count(1)
 # Per-model reasoning effort (only for models that support it)
 REASONING_EFFORT: dict[str, str] = {
     "gpt-5.3-codex": "xhigh",
+    "gpt-5.3-codex-spark": "xhigh",
 }
 
 
@@ -197,6 +198,7 @@ class CodexSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
+        self._action_log: list[str] = []
         self._bump_insights: str | None = None
         self._structured_output: dict | None = None
         self._turn_error: str | None = None
@@ -349,7 +351,7 @@ class CodexSolver:
                                 parsed = json.loads(text)
                                 if isinstance(parsed, dict) and "type" in parsed:
                                     self._structured_output = parsed
-                            except json.JSONDecodeError, ValueError:
+                            except (json.JSONDecodeError, ValueError):
                                 pass
                 elif item_type in ("reasoning", "thought", "agentReasoning"):
                     text = item.get("text") or item.get("content") or item.get("summary") or ""
@@ -453,6 +455,9 @@ class CodexSolver:
 
         self._step_count += 1
         self.tracer.tool_call(tool_name, args, self._step_count)
+        from backend.action_log import append_action
+
+        append_action(self._action_log, tool_name, args)
         live_json(
             f"{self.agent_name} tool#{self._step_count} → {tool_name}",
             args,
@@ -481,9 +486,19 @@ class CodexSolver:
         # Build content items — handle image tuples from view_image
         if isinstance(result, tuple):
             image_bytes, mime_type = result
-            data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
-            content_items = [{"type": "inputImage", "imageUrl": data_url}]
-            preview = f"image:{mime_type}:{len(image_bytes)}b"
+            try:
+                data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+                content_items = [{"type": "inputImage", "imageUrl": data_url}]
+                preview = f"image:{mime_type}:{len(image_bytes)}b"
+            except Exception as img_err:
+                from backend.tools.core import VISION_BASH_FALLBACK
+
+                logger.warning("[%s] view_image payload failed: %s", self.agent_name, img_err)
+                preview = (
+                    f"Loaded {mime_type} ({len(image_bytes)} bytes) but could not "
+                    f"attach pixels to the model. {VISION_BASH_FALLBACK}"
+                )
+                content_items = [{"type": "inputText", "text": preview}]
             self.tracer.tool_result(tool_name, preview, self._step_count)
             _live(f"{self.agent_name} tool#{self._step_count} ← {tool_name}", preview)
         else:
@@ -547,6 +562,18 @@ class CodexSolver:
                 and flag.strip() not in self._accepted_flags
             ):
                 self._accepted_flags.append(flag.strip())
+                try:
+                    from backend.flags import normalize_flags_required
+                    from backend.shell.sandbox_session import sync_accepted_flags
+
+                    sync_accepted_flags(
+                        self._accepted_flags,
+                        flags_required=normalize_flags_required(
+                            getattr(self.meta, "flags_required", 1)
+                        ),
+                    )
+                except Exception:
+                    pass
             if is_confirmed:
                 self._confirmed = True
                 self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag
@@ -646,6 +673,34 @@ class CodexSolver:
 
         stash_bump(self, insights)
 
+    async def produce_writeup(self) -> str:
+        """One more turn: narrative writeup for the operator recap (no tools expected)."""
+        from backend.writeup import WRITEUP_PROMPT
+
+        if not self._thread_id:
+            return ""
+        self._turn_done.clear()
+        self._structured_output = None
+        self._turn_error = None
+        before = self._findings
+        _live(self.agent_name, "── writeup ──")
+        await self._rpc(
+            "turn/start",
+            {
+                "threadId": self._thread_id,
+                "input": [{"type": "text", "text": WRITEUP_PROMPT}],
+            },
+        )
+        await self._turn_done.wait()
+        text = (self._findings or "").strip()
+        if text.startswith(("Error:", "Turn failed:", "Infra:")):
+            return ""
+        # Unchanged findings means the model never wrote a new message.
+        if not text or text == (before or "").strip():
+            return ""
+        # Recap reaches the TUI via ``[artemis] summary`` — skip live writeup spam.
+        return text
+
     def _result(self, status: str) -> SolverResult:
         self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed)
         return SolverResult(
@@ -654,7 +709,7 @@ class CodexSolver:
             findings_summary=self._findings[:2000],
             step_count=self._step_count,
             # Codex does not report USD; leave unknown.
-            cost_usd=0.0,
+            cost_usd=None,
             log_path=self.tracer.path,
         )
 
@@ -665,7 +720,7 @@ class CodexSolver:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except asyncio.CancelledError, Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._proc:
             try:

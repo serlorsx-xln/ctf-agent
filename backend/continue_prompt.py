@@ -13,6 +13,15 @@ INFRA_RECOVERY_BLURB = (
 )
 
 
+PIVOT_PRESSURE = (
+    "A full turn on your previous approach produced no accepted flag, so treat it "
+    "as unproven: do not resume it with only new parameters or flags. State in one "
+    "line what you have ruled out, then attack a different surface or technique. "
+    "Existing scripts and results under /challenge/workspace stay valid — reuse the "
+    "findings, not the dead technique."
+)
+
+
 def build_continue_prompt(
     *,
     accepted_flags: list[str] | tuple[str, ...] = (),
@@ -22,8 +31,13 @@ def build_continue_prompt(
 ) -> str:
     """Prompt for the next solver turn after GAVE_UP / bump / resume.
 
-    Partial accepts keep the agent on the working path. Full bumps without
-    accepts may suggest a different approach. Never invent technique playbooks.
+    Three regimes, keyed on the evidence actually available:
+
+    * Partial accepts — a path demonstrably works, so keep the agent on it.
+    * Infra recovery — the turn died on a transport/bridge error, not on the
+      approach, so resume rather than pivot.
+    * Zero accepts, real failure — nothing is proven, so push off the technique
+      that just burned a whole turn. Never invent technique playbooks.
     """
     accepted = [f for f in accepted_flags if f]
     required = normalize_flags_required(flags_required)
@@ -51,18 +65,27 @@ def build_continue_prompt(
             "do not abandon a working path for a random new approach."
         )
 
-    if insights:
+    # Interrupted by infrastructure, not by a wrong approach — resuming is correct.
+    if infra_recovery:
+        if insights:
+            return (
+                f"{prefix}"
+                f"Insights from other agents:\n\n{insights}\n\n"
+                "Resume where you left off. Prefer adjusting parameters, targets, or "
+                "tool flags before abandoning a promising technique."
+            )
         return (
             f"{prefix}"
+            "Resume where you left off. Prefer adjusting parameters, targets, or tool "
+            "flags before abandoning a promising technique."
+        )
+
+    if insights:
+        return (
             "Your previous attempt did not finish the challenge. "
             f"Insights from other agents:\n\n{insights}\n\n"
-            "Use the insights. Prefer adjusting parameters/flags of the current "
-            "technique before switching to an unrelated approach. "
+            f"{PIVOT_PRESSURE} Use the insights to choose the next surface. "
             "Do not blindly repeat identical failing commands."
         )
 
-    return (
-        f"{prefix}"
-        "Continue solving. Prefer adjusting parameters, targets, or tool flags "
-        "before abandoning a promising technique."
-    )
+    return f"Continue solving. {PIVOT_PRESSURE}"

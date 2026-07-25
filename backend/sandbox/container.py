@@ -19,6 +19,7 @@ import aiodocker
 from backend.sandbox.docker_client import (
     CONTAINER_LABEL,
     OWNER_PID_LABEL,
+    SESSION_ID_LABEL,
     _docker_cli,
     _docker_client,
     _start_semaphore,
@@ -65,6 +66,8 @@ class DockerSandbox:
     memory_limit: str = "16g"
     # Optional Settings (or duck-typed) for pack preflight / eval_strict_packs.
     settings: Any = None
+    # Artemis TUI / swarm session id (container label + orphan cleanup scope).
+    session_id: str = "_default"
     # Wall time spent in pack prefetch (materialize + ensure) for eval artifacts.
     preflight_ms: float = 0.0
     workspace_dir: str = ""
@@ -160,7 +163,7 @@ class DockerSandbox:
             if s.endswith("m"):
                 return int(s[:-1]) * 1024 * 1024
             return int(s)
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             logger.warning("Invalid memory_limit %r, defaulting to 4GB", self.memory_limit)
             return 4 * 1024 * 1024 * 1024
 
@@ -236,6 +239,10 @@ class DockerSandbox:
                     sorted(prefetch),
                 )
                 self.memory_limit = bumped
+            # Writable pack scratch (blutter Dart VM, etc.) must mount even when
+            # CTF_PACK_BIND=0 forces docker-cp for RO donor trees — otherwise every
+            # container recompiles the Dart VM from scratch.
+            binds.extend(self._pack_state_bind_strings())
             if pack_binds_enabled():
                 for pack in prefetch:
                     pack_t0 = time.monotonic()
@@ -368,6 +375,11 @@ class DockerSandbox:
             "Labels": {
                 CONTAINER_LABEL: "true",
                 OWNER_PID_LABEL: str(os.getpid()),
+                SESSION_ID_LABEL: (
+                    (self.session_id or "").strip()
+                    or (os.environ.get("ARTEMIS_SESSION_ID") or "").strip()
+                    or "_default"
+                ),
             },
             "HostConfig": self._host_config(),
         }
@@ -557,7 +569,7 @@ class DockerSandbox:
         in the challenge text are probed first. Hosts may be RFC1918 IPs or
         lab-ish FQDNs (``*.htb``, ``*.local``, …).
         """
-        from backend.host_proxy import host_proxy_mode, release_host_proxy
+        from backend.host_proxy import host_proxy_mode
 
         hosts = self._challenge_probe_hosts()
         forced = host_proxy_mode() in ("1", "true", "yes", "on")
@@ -577,9 +589,8 @@ class DockerSandbox:
 
         async def _use_direct(reason: str) -> None:
             self._host_proxy_wrap = False
-            if self._host_proxy_port is not None:
-                await release_host_proxy()
-                self._host_proxy_port = None
+            # Keep the SOCKS lease/port so sibling sandboxes still have a live
+            # hop. Release only in stop() — releasing here under-counts leases.
             logger.info("Host VPN routing: DIRECT (%s)", reason)
 
         async def _use_socks(reason: str, *, warning: bool = False) -> None:
@@ -688,6 +699,37 @@ class DockerSandbox:
         if pack_id not in PACK_SPECS:
             return "Those tools are not available in this environment."
 
+        # Fast path + decide whether long host-side work is needed — under lock.
+        needs_cache = False
+        async with self._lock:
+            if not self._docker or not self._container:
+                raise RuntimeError("Sandbox not started")
+            if pack_id in self.ensured_packs or await self._pack_marker_present(pack_id):
+                self.ensured_packs.add(pack_id)
+                self._remember_pack_paths(pack_id)
+                await self._maybe_raise_memory([pack_id])
+                if refresh_tools:
+                    await self.refresh_tools_doc()
+                return "Required tools are already available."
+            bound = pack_id in self._bind_mounted_packs
+            needs_cache = bool(PACK_SPECS[pack_id].paths) and not bound
+
+        # Donor build + host-cache extract can take many minutes — do them
+        # outside the sandbox lock so bash/read/write stay responsive.
+        from backend.sandbox.donor_build import DONOR_BUILD_SPECS, ensure_donor_image
+
+        if pack_id in DONOR_BUILD_SPECS:
+            await ensure_donor_image(pack_id)
+        if needs_cache:
+            try:
+                await self._materialize_pack_cache(pack_id)
+            except Exception:
+                logger.warning(
+                    "Pack %s host-cache materialize failed (will retry under lock)",
+                    pack_id,
+                    exc_info=True,
+                )
+
         async with self._lock:
             return await self._ensure_pack_inner(pack_id, refresh_tools=refresh_tools)
 
@@ -710,48 +752,71 @@ class DockerSandbox:
 
         spec = PACK_SPECS[pack_id]
         bound = pack_id in self._bind_mounted_packs
+        # Prefer CLI inspect so presence matches donor_build / materialize
+        # (aiodocker can disagree with DOCKER_HOST / currentContext).
         donor_available = True
-        try:
-            await self._docker.images.inspect(spec.image)
-        except Exception:
+        rc, _, _ = await _docker_cli("image", "inspect", spec.image, timeout_s=30)
+        if rc != 0:
             donor_available = False
+            try:
+                await self._docker.images.inspect(spec.image)
+                donor_available = True
+            except Exception:
+                pass
 
         # Consistency: packs with ``requires_donor`` need the donor image (or a
         # prior bind mount). Never mark ready after apt/pip alone — that falsely
         # advertises Ghidra/jadx/stegseek. Apt/pip-only packs use core + paths=().
         if not donor_available and spec.requires_donor and not bound:
-            logger.warning(
-                "Pack donor image missing: pack=%s image=%s",
-                pack_id,
-                spec.image,
-            )
+            # ensure_pack already tried auto-build outside the lock; re-check CLI
+            # (aiodocker inspect can disagree with DOCKER_HOST / CLI context).
+            from backend.sandbox.donor_build import ensure_donor_image
             from backend.tool_router import donor_build_hint
 
-            hint = donor_build_hint(pack_id)
-            return (
-                "Required tools are not installed in this environment yet."
-                f"{hint} "
-                "Ask an operator to finish sandbox setup, then retry the command."
-            )
+            ok, build_msg = await ensure_donor_image(pack_id)
+            if ok:
+                logger.info("Donor auto-build ok for %s: %s", pack_id, build_msg)
+                donor_available = True
+            else:
+                hint = donor_build_hint(pack_id)
+                return (
+                    "Required tools are not installed in this environment yet. "
+                    f"{build_msg}{hint} "
+                    "Ask an operator to finish sandbox setup, then retry the command."
+                )
         if not donor_available and not bound:
             # Apt/pip pack whose declared image tag is missing — bootstrap on L0
             # if the live sandbox image is present (normally both are core).
             try:
                 await self._docker.images.inspect(self.image)
             except Exception:
+                from backend.sandbox.donor_build import DONOR_BUILD_SPECS, ensure_donor_image
                 from backend.tool_router import donor_build_hint
 
-                hint = donor_build_hint(pack_id)
-                return (
-                    "Required tools are not installed in this environment yet."
-                    f"{hint} "
-                    "Ask an operator to finish sandbox setup, then retry the command."
+                if pack_id in DONOR_BUILD_SPECS:
+                    ok, build_msg = await ensure_donor_image(pack_id)
+                    if ok:
+                        donor_available = True
+                    else:
+                        hint = donor_build_hint(pack_id)
+                        return (
+                            "Required tools are not installed in this environment yet. "
+                            f"{build_msg}{hint} "
+                            "Ask an operator to finish sandbox setup, then retry the command."
+                        )
+                else:
+                    hint = donor_build_hint(pack_id)
+                    return (
+                        "Required tools are not installed in this environment yet."
+                        f"{hint} "
+                        "Ask an operator to finish sandbox setup, then retry the command."
+                    )
+            if not donor_available:
+                logger.warning(
+                    "Pack image %s missing; apt/pip bootstrap on live %s",
+                    spec.image,
+                    self.image,
                 )
-            logger.warning(
-                "Pack image %s missing; apt/pip bootstrap on live %s",
-                spec.image,
-                self.image,
-            )
 
         logger.info(
             "Ensuring pack '%s' additively into %s (%s)",
@@ -836,6 +901,28 @@ class DockerSandbox:
             if d not in self.extra_path_dirs:
                 self.extra_path_dirs.append(d)
 
+    def _pack_state_bind_strings(self) -> list[str]:
+        """RW host binds for pack scratch that must outlive the container.
+
+        Mounted for every pack that declares ``state_dirs`` (not only prefetched
+        ones) so an on-demand ``ensure_pack`` still reuses an earlier build.
+        Session-scoped unless the pack sets ``shared_state`` (blutter Dart VMs).
+        """
+        from backend.tool_router import PACK_SPECS, pack_state_dir
+
+        out: list[str] = []
+        sid = (self.session_id or "").strip() or None
+        for pack_id, spec in PACK_SPECS.items():
+            for container_path in spec.state_dirs:
+                host = pack_state_dir(pack_id, container_path, session_id=sid)
+                try:
+                    host.mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    logger.warning("Pack %s state dir %s unusable: %s", pack_id, host, e)
+                    continue
+                out.append(f"{host.resolve()}:{container_path}:rw")
+        return out
+
     def _pack_bind_strings(self, cache: Path, pack_id: str) -> list[str]:
         """Build Docker bind specs for a pack's host-cache trees."""
         from backend.tool_router import PACK_SPECS, pack_cache_item
@@ -884,10 +971,12 @@ class DockerSandbox:
                 await asyncio.to_thread(_release_pack_flock, fd)
 
     async def _finish_ready_pack_cache(self, pack_id: str) -> Path:
+        from backend.sandbox.setup_bake import maybe_upgrade_ready_marker
         from backend.tool_router import evict_pack_cache, pack_cache_dir, touch_pack_cache
 
         cache = pack_cache_dir(pack_id)
         await self._finalize_pack_cache(pack_id, cache)
+        maybe_upgrade_ready_marker(pack_id)
         touch_pack_cache(pack_id)
         evict_pack_cache(protect={pack_id})
         return cache
@@ -900,11 +989,36 @@ class DockerSandbox:
         marker = cache / ".ready"
 
         cache.mkdir(parents=True, exist_ok=True)
+        # Ensure donor exists before docker create (prefetch materialize path
+        # used to fail hard when the image was missing).
+        from backend.sandbox.donor_build import DONOR_BUILD_SPECS, ensure_donor_image
+
+        if pack_id in DONOR_BUILD_SPECS:
+            ok, build_msg = await ensure_donor_image(pack_id)
+            if not ok:
+                raise RuntimeError(build_msg)
+
         # One global extract container name per pack — safe because the
         # cross-process flock guarantees a single extractor.
         name = f"ctf-pack-extract-{pack_id}"
         await _docker_cli("rm", "-f", name, timeout_s=60)
-        rc, _, err = await _docker_cli("create", "--name", name, spec.image, "sleep", "infinity")
+        # Label it like a sandbox so orphan cleanup reclaims it if we are killed
+        # mid-extract (docker cp of a big tree can run for minutes).
+        rc, _, err = await _docker_cli(
+            "create",
+            "--name",
+            name,
+            "--label",
+            f"{CONTAINER_LABEL}=true",
+            "--label",
+            f"{OWNER_PID_LABEL}={os.getpid()}",
+            "--label",
+            f"{SESSION_ID_LABEL}="
+            f"{(os.environ.get('ARTEMIS_SESSION_ID') or '').strip() or '_default'}",
+            spec.image,
+            "sleep",
+            "infinity",
+        )
         if rc != 0:
             raise RuntimeError(f"docker create {spec.image} failed: {err.strip()}")
         try:
@@ -927,6 +1041,12 @@ class DockerSandbox:
                 if rc != 0:
                     raise RuntimeError(f"docker cp {src} from {spec.image} failed: {err.strip()}")
             marker.write_text("ok\n", encoding="utf-8")
+            try:
+                from backend.sandbox.setup_bake import write_pack_ready_marker
+
+                write_pack_ready_marker(cache, pack_id)
+            except Exception:
+                logger.debug("write_pack_ready_marker failed", exc_info=True)
             logger.info("Pack %s: host cache materialized at %s", pack_id, cache)
         finally:
             await _docker_cli("rm", "-f", name, timeout_s=60)
@@ -1267,6 +1387,10 @@ class DockerSandbox:
             raise TimeoutError(f"Timed out writing {path}") from e
 
     async def stop(self) -> None:
+        async with self._lock:
+            await self._stop_unlocked()
+
+    async def _stop_unlocked(self) -> None:
         if self._container:
             try:
                 await self._container.delete(force=True)

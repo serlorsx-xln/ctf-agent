@@ -68,31 +68,55 @@ if [[ ! -f "$ENGINE/blutter.py" ]]; then
   exit 127
 fi
 
+# Build outputs that make a Dart version cheap to reuse. They do not exist in
+# the read-only install tree, so a plain mirror would delete them every run.
+CACHED_DIRS=(dartsdk build bin packages .build.lock)
+
 if [[ ! -w "$ENGINE" ]] || ! touch "$ENGINE/.blutter_write_test" 2>/dev/null; then
   mkdir -p "$BLUTTER_HOME"
-  # Refresh sources; keep dartsdk/build so version caches survive re-runs.
+  # Swarm agents share this cache across containers; two Dart VM builds writing
+  # the same tree would corrupt it, so serialize whole runs.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$BLUTTER_HOME/.build.lock" || true
+    if ! flock -n 9; then
+      echo "blutter: another run holds the shared cache — waiting" >&2
+      flock 9 || true
+    fi
+  fi
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete \
-      --exclude dartsdk --exclude build --exclude .blutter_write_test \
-      "$ENGINE"/ "$BLUTTER_HOME"/
+    excludes=(--exclude .blutter_write_test --exclude .build.lock)
+    for d in "${CACHED_DIRS[@]}"; do
+      excludes+=(--exclude "$d")
+    done
+    rsync -a --delete "${excludes[@]}" "$ENGINE"/ "$BLUTTER_HOME"/
   else
-    # Portable fallback: copy tree then restore cached build dirs if any.
-    tmp="$(mktemp -d "${TMPDIR:-/tmp}/blutter-src.XXXXXX")"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
-    cp -a "$ENGINE"/. "$tmp"/
-    rm -rf "$tmp/dartsdk" "$tmp/build" "$tmp/.blutter_write_test"
-    if [[ -d "$BLUTTER_HOME/dartsdk" ]]; then
-      mv "$BLUTTER_HOME/dartsdk" "$tmp/dartsdk"
-    fi
-    if [[ -d "$BLUTTER_HOME/build" ]]; then
-      mv "$BLUTTER_HOME/build" "$tmp/build"
-    fi
-    rm -rf "$BLUTTER_HOME"
-    mkdir -p "$BLUTTER_HOME"
-    cp -a "$tmp"/. "$BLUTTER_HOME"/
+    # Portable fallback. BLUTTER_HOME may be a bind mount, so clear its
+    # contents instead of removing the directory itself.
+    for entry in "$BLUTTER_HOME"/* "$BLUTTER_HOME"/.[!.]*; do
+      [[ -e "$entry" ]] || continue
+      keep=0
+      for d in "${CACHED_DIRS[@]}"; do
+        [[ "$(basename "$entry")" == "$d" ]] && keep=1
+      done
+      [[ "$keep" == 1 ]] || rm -rf "$entry"
+    done
+    for entry in "$ENGINE"/* "$ENGINE"/.[!.]*; do
+      [[ -e "$entry" ]] || continue
+      name="$(basename "$entry")"
+      [[ "$name" == ".blutter_write_test" ]] && continue
+      skip=0
+      for d in "${CACHED_DIRS[@]}"; do
+        [[ "$name" == "$d" ]] && skip=1
+      done
+      [[ "$skip" == 1 ]] || cp -a "$entry" "$BLUTTER_HOME"/
+    done
   fi
   ENGINE="$BLUTTER_HOME"
+  if [[ -d "$ENGINE/bin" ]] && compgen -G "$ENGINE/bin/blutter_dartvm*" >/dev/null; then
+    echo "blutter: reusing cached Dart VM build(s) in $ENGINE/bin" >&2
+  else
+    echo "blutter: no cached Dart VM yet — first run for this Dart version compiles it" >&2
+  fi
   echo "blutter: /opt/blutter is read-only; using writable engine at $ENGINE" >&2
 else
   rm -f "$ENGINE/.blutter_write_test"

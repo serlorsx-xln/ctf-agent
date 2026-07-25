@@ -12,13 +12,22 @@ def test_pyghidra_maps_to_ghidra_pack():
     assert infer_pack_from_command("monodis --output=il.txt app.dll") == "ghidra"
 
 
-def test_elf_prefetch_includes_ghidra(tmp_path: Path):
+def test_elf_prefetch_pwn_not_ghidra(tmp_path: Path):
     # Minimal ELF magic so _looks_like_elf trips without a real binary.
     elf = tmp_path / "chal"
     elf.write_bytes(b"\x7fELF" + b"\x00" * 60)
     (tmp_path / "challenge.txt").write_text("reverse me\n", encoding="utf-8")
     packs = detect_packs(tmp_path)
     assert "pwn" in packs
+    # Ghidra stays lazy unless Tags:rev / .NET — keeps cold start light.
+    assert "ghidra" not in packs
+
+
+def test_rev_tag_prefetch_ghidra(tmp_path: Path):
+    elf = tmp_path / "chal"
+    elf.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    (tmp_path / "challenge.txt").write_text("Tags: rev\n", encoding="utf-8")
+    packs = detect_packs(tmp_path)
     assert "ghidra" in packs
 
 

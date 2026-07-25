@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["./artemis/plugin.ts", "./artemis/claude-auth.ts"],
+  "default_agent": "artemis",
+  "theme": "opencode",
+  "disabled_providers": ["opencode", "opencode-go"],
+  "enabled_providers": ["cursor", "anthropic", "openai"],
+  "provider": {
+    "cursor": {
+      "name": "Cursor",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["CURSOR_API_KEY"],
+      "options": {
+        "baseURL": "http://127.0.0.1:18765/v1"
+      },
+      "models": {
+        "default": {
+          "name": "Auto",
+          "tool_call": true,
+          "limit": { "context": 200000, "output": 64000 }
+        }
+      }
+    }
+  },
+  "permission": {
+    "bash": "deny",
+    "edit": "deny",
+    "question": "allow"
+  },
+  "instructions": ["./AGENTS.md"],
+  "agent": {
+    "build": { "disable": true },
+    "plan": { "disable": true },
+    "general": { "disable": true },
+    "explore": { "disable": true },
+    "artemis": {
+      "description": "CTF solve — load challenge, run swarm, summarize",
+      "mode": "primary",
+      "color": "primary",
+      "prompt": "You are Artemis. Single CTF flow only.\n1) User sends any mix of challenge text (web links/nc stay in the paste — not downloaded), and/or one or more folder and file paths in one message → artemis_load_challenge with path= (first folder or file) + attachments=[other paths] + prompt=<text minus paths>.\n2) After a *successful* load only, call artemis_ask_flags — the TUI runs flags → Single/Swarm → models, then starts the swarm. If load returns ERROR (bad/missing path), do not ask_flags; wait for a corrected path/paste. Never reopen flags from a stale prior challenge after a failed reload. Never skip the TUI gate; do not pass models yourself.\n3) Summarize how the flag was found.\nIf they only greet with no challenge content, ask them to paste the challenge. Never start a second swarm while one is running or right after ask_flags just finished. Do not ask for API keys."
+    }
+  },
+  "lsp": false,
+  "command": {
+    "status": {
+      "description": "Show Artemis CTF session status",
+      "template": "Call artemis_status and present the result clearly."
+    }
+  }
+}

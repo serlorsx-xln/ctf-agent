@@ -1,11 +1,4 @@
-"""Structured output types for solver agents."""
-
-from pydantic import BaseModel
-
-
-class FlagFound(BaseModel):
-    flag: str
-    method: str  # brief description of how
+"""Structured output schema for solver agents."""
 
 
 def solver_output_json_schema() -> dict:

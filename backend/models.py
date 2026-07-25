@@ -1,18 +1,9 @@
-"""Model resolution — Bedrock, Azure OpenAI, Zen, Google AI Studio."""
+"""Model spec helpers — Cursor / Claude SDK / Codex / Gemini."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-
-import boto3
-from pydantic_ai.models import Model
-from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
-from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
-from pydantic_ai.providers.bedrock import BedrockProvider
-from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.settings import ModelSettings
 
 if TYPE_CHECKING:
     from backend.config import Settings
@@ -24,109 +15,16 @@ DEFAULT_MODELS: list[str] = [
 ]
 
 # Stronger options for hard crypto/rev (same Cursor key, or other backends).
-# Example:
-#   uv run ctf-solve --challenge ./challenges/X --models cursor/claude-4-sonnet -v
-#   uv run ctf-solve --challenge ./challenges/X --models claude-sdk/claude-opus-4-6 -v
 HARDER_MODELS: list[str] = [
     "cursor/claude-4-sonnet",
     "claude-sdk/claude-opus-4-6",
     "codex/gpt-5.4",
 ]
 
-# Models that support vision
-VISION_MODELS: set[str] = {
-    "us.anthropic.claude-opus-4-6-v1",
-    "claude-opus-4-6",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gemini-3-flash-preview",
-    "composer-2.5",
-    "claude-4-sonnet",
-    "auto",
-}
-
-
-def resolve_model(spec: str, settings: Settings) -> Model:
-    """Resolve a 'provider/model_id' spec to a Pydantic AI Model."""
-    provider = provider_from_spec(spec)
-    model_id = model_id_from_spec(spec)
-    match provider:
-        case "bedrock":
-            if settings.aws_bearer_token:
-                return BedrockConverseModel(
-                    model_id,
-                    provider=BedrockProvider(
-                        api_key=settings.aws_bearer_token,
-                        region_name=settings.aws_region,
-                    ),
-                )
-            else:
-                session = boto3.Session()
-                client = session.client("bedrock-runtime", region_name=settings.aws_region)
-                return BedrockConverseModel(
-                    model_id,
-                    provider=BedrockProvider(bedrock_client=client),
-                )
-        case "azure":
-            return OpenAIChatModel(
-                model_id,
-                provider=OpenAIProvider(
-                    base_url=settings.azure_openai_endpoint,
-                    api_key=settings.azure_openai_api_key,
-                ),
-            )
-        case "zen":
-            return OpenAIChatModel(
-                model_id,
-                provider=OpenAIProvider(
-                    base_url="https://opencode.ai/zen/v1",
-                    api_key=settings.opencode_zen_api_key,
-                ),
-            )
-        case "google":
-            return GoogleModel(
-                model_id,
-                provider=GoogleProvider(api_key=settings.gemini_api_key),
-            )
-        case "cursor" | "claude-sdk" | "codex":
-            raise ValueError(
-                f"Provider '{provider}' uses its own solver backend, not Pydantic AI. "
-                f"resolve_model() should not be called for {spec}."
-            )
-        case _:
-            raise ValueError(f"Unknown provider: {provider}")
-
-
-def resolve_model_settings(spec: str) -> ModelSettings:
-    """Get provider-specific model settings with caching enabled."""
-    provider = spec.split("/", 1)[0]
-    match provider:
-        case "bedrock":
-            return BedrockModelSettings(
-                max_tokens=128_000,
-                bedrock_cache_instructions=True,
-                bedrock_cache_tool_definitions=True,
-                bedrock_cache_messages=True,
-            )
-        case "azure" | "zen":
-            # Azure/Zen use OpenAI chat completions — server-side prompt caching
-            # is automatic, no explicit config needed. Set max_tokens to avoid
-            # reserving the full context window.
-            return OpenAIChatModelSettings(
-                max_tokens=128_000,
-            )
-        case "google":
-            from google.genai.types import ThinkingLevel
-
-            return GoogleModelSettings(
-                max_tokens=64_000,
-                google_thinking_config={
-                    "thinking_level": ThinkingLevel.HIGH,
-                    "include_thoughts": True,
-                },
-            )
-        case _:
-            return ModelSettings(max_tokens=128_000)
+# Product swarm providers (TUI /connect → cursor, anthropic, openai, google).
+SUPPORTED_PROVIDERS = frozenset({"cursor", "claude-sdk", "codex", "gemini-sdk"})
+# Legacy alias — same set as SUPPORTED_PROVIDERS.
+_RACE_PROVIDERS = SUPPORTED_PROVIDERS
 
 
 def model_id_from_spec(spec: str) -> str:
@@ -138,6 +36,112 @@ def model_id_from_spec(spec: str) -> str:
 def provider_from_spec(spec: str) -> str:
     """Extract the provider from a spec."""
     return spec.split("/", 1)[0]
+
+
+def agent_display_key(runner_id: str, spec: str) -> str:
+    """Label the TUI puts on this runner's agent box (live-log ``shortAgent``).
+
+    Duplicate runners keep their ``#N`` suffix; unique ones show the model id.
+    """
+    label = runner_id.split("/", 1)[-1]
+    return label if "#" in label else model_id_from_spec(spec)
+
+
+# TUI /connect provider ids → swarm solver prefixes
+_TUI_PROVIDER_ALIASES: dict[str, str] = {
+    "anthropic": "claude-sdk",
+    "claude": "claude-sdk",
+    "openai": "codex",
+    "codex": "codex",
+    "cursor": "cursor",
+    "google": "gemini-sdk",
+    "gemini": "gemini-sdk",
+}
+
+
+def normalize_swarm_spec(spec: str) -> str:
+    """Normalize a model spec for swarm (TUI ids → solver prefixes).
+
+    Accepts flexible forms:
+    - ``cursor/composer-2`` / ``cursor/auto``
+    - ``anthropic/claude-sonnet-4-6`` → ``claude-sdk/claude-sonnet-4-6``
+    - ``openai/gpt-5.4`` → ``codex/gpt-5.4``
+    - ``claude-sdk/...`` / ``codex/...`` unchanged
+    - Bare model id with no provider → ``cursor/<id>`` (Cursor is primary)
+    """
+    raw = (spec or "").strip()
+    if not raw:
+        raise ValueError("Empty model spec")
+    if "/" not in raw:
+        return f"cursor/{raw}"
+    provider, rest = raw.split("/", 1)
+    provider = _TUI_PROVIDER_ALIASES.get(provider, provider)
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(
+            f"Unknown swarm provider {provider!r} in {spec!r}. "
+            f"Use cursor/, claude-sdk/ (or anthropic/), codex/ (or openai/), gemini-sdk/ (or google/)…"
+        )
+    return f"{provider}/{rest}"
+
+
+def normalize_swarm_specs(specs: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Expand CLI args then normalize each spec for swarm."""
+    expanded = expand_model_cli_args(list(specs or []))
+    return [normalize_swarm_spec(s) for s in expanded]
+
+
+def missing_swarm_credentials(specs: list[str], settings: Settings | None = None) -> list[str]:
+    """Return human-readable missing-key messages for the given swarm specs."""
+    import os
+
+    from backend.shell.credentials import apply_tui_credentials
+
+    apply_tui_credentials(overwrite=True)
+    needed: set[str] = set()
+    for spec in specs:
+        needed.add(provider_from_spec(normalize_swarm_spec(spec)))
+
+    def _has(env_name: str, field: str) -> bool:
+        if (os.environ.get(env_name) or "").strip():
+            return True
+        return settings is not None and bool((getattr(settings, field, "") or "").strip())
+
+    missing: list[str] = []
+    if "cursor" in needed and not _has("CURSOR_API_KEY", "cursor_api_key"):
+        missing.append("Cursor: /connect → Cursor API key (CURSOR_API_KEY)")
+    if "claude-sdk" in needed and not _has("ANTHROPIC_API_KEY", "anthropic_api_key"):
+        missing.append("Claude: /connect → Anthropic API key (ANTHROPIC_API_KEY)")
+    if "codex" in needed and not _has("OPENAI_API_KEY", "openai_api_key"):
+        missing.append("Codex: /connect → OpenAI / ChatGPT (OPENAI_API_KEY)")
+    if "gemini-sdk" in needed:
+        # API key optional — ADC fallback. Only flag if neither key nor ADC.
+        has_key = _has("GEMINI_API_KEY", "gemini_api_key")
+        has_adc = (Path.home() / ".config/gcloud/application_default_credentials.json").exists()
+        if not has_key and not has_adc:
+            missing.append(
+                "Gemini: /connect → Google API key (GEMINI_API_KEY), "
+                "or run `gcloud auth application-default login` for ADC"
+            )
+    return missing
+
+
+# Legacy aliases — prefer normalize_swarm_* / missing_swarm_credentials.
+normalize_race_spec = normalize_swarm_spec
+normalize_race_specs = normalize_swarm_specs
+missing_race_credentials = missing_swarm_credentials
+
+
+def missing_models_error() -> str:
+    """Shared error string for 'no models passed' (bridge + daemon parity)."""
+    return (
+        "ERROR: pass models e.g. cursor/composer-2, anthropic/claude-sonnet-4-6, "
+        "openai/gpt-5.4, google/gemini-2.5-flash (TUI provider ids are accepted)"
+    )
+
+
+def missing_credentials_error(missing: list[str]) -> str:
+    """Shared error string for missing credentials (bridge + daemon parity)."""
+    return "ERROR: missing credentials for swarm:\n- " + "\n- ".join(missing)
 
 
 def expand_model_cli_args(models: list[str] | tuple[str, ...]) -> list[str]:
@@ -221,5 +225,6 @@ def effort_from_spec(spec: str) -> EffortLevel | None:
 
 
 def supports_vision(spec: str) -> bool:
-    """Check if a model spec supports vision."""
-    return model_id_from_spec(spec) in VISION_MODELS
+    """Always attempt multimodal view_image; fall back to bash tools if needed."""
+    _ = spec
+    return True

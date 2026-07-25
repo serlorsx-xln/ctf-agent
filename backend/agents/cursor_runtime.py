@@ -156,7 +156,7 @@ def resolve_api_key(settings: Any) -> str:
         return key
     raise RuntimeError(
         "CURSOR_API_KEY is required for the Cursor backend. "
-        "Set it in .env or the environment (Cursor Dashboard → Integrations)."
+        "Add it in the Artemis TUI via /connect (Cursor), or set CURSOR_API_KEY for CI."
     )
 
 
@@ -169,6 +169,8 @@ def is_infra_error_message(message: str | None) -> bool:
     # Treat those as session/transport poison so swarm recovers instead of
     # counting toward the consecutive-ERROR give-up limit.
     if err in {"error", "run error", "unknown error", "failed"}:
+        return True
+    if err.startswith("run error (no detail"):
         return True
     needles = (
         "bridge request timed out",
@@ -188,3 +190,86 @@ def is_infra_error_message(message: str | None) -> bool:
         "connecterror",
     )
     return any(n in err for n in needles)
+
+
+def format_cursor_run_error(
+    *,
+    result_text: str | None = None,
+    status_message: str | None = None,
+) -> str:
+    """Prefer SDK detail over opaque ``run error`` placeholders."""
+    placeholders = {"error", "run error", "unknown error", "failed"}
+    real: list[str] = []
+    seen: set[str] = set()
+    for raw in (result_text, status_message):
+        text = (raw or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in placeholders or key in seen:
+            continue
+        seen.add(key)
+        real.append(text)
+    if real:
+        joined = real[0] if len(real) == 1 else " | ".join(real)
+        return humanize_cursor_error(joined)
+    for raw in (result_text, status_message):
+        text = (raw or "").strip()
+        if text:
+            return humanize_cursor_error(text)
+    return "run error (no detail from Cursor SDK)"
+
+
+def is_quota_error_message(message: str | None) -> bool:
+    if not message:
+        return False
+    err = message.lower()
+    return any(
+        k in err
+        for k in (
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "capacity",
+            "usage limit",
+            "usage_limit",
+            "billing",
+            "spend limit",
+            "overloaded",
+            "switch to auto",
+            "hit your usage",
+        )
+    )
+
+
+def humanize_cursor_error(message: str | None) -> str:
+    """Collapse long Cursor billing/quota SDK dumps into a short operator line.
+
+    The raw SDK text often includes marketing ("You've saved $N…") which is
+    noise in the TUI swarm log — keep one actionable sentence instead.
+    """
+    text = (message or "").strip()
+    if not text:
+        return text
+    if not is_quota_error_message(text):
+        # Still trim runaway single-line SDK dumps.
+        if len(text) > 220:
+            return text[:200].rstrip() + "…"
+        return text
+
+    lower = text.lower()
+    # Prefer the monthly usage-cap phrasing when both "usage limit" and
+    # "spend limit" appear (Cursor's Ultra dump mentions both).
+    if "hit your usage" in lower or "usage limit" in lower or "usage_limit" in lower:
+        reset = ""
+        import re
+
+        m = re.search(r"reset[^\d]{0,40}?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)", text, re.I)
+        if m:
+            reset = f" (resets {m.group(1)})"
+        return f"Cursor usage limit reached — switch model or wait for reset{reset}"
+    if "spend limit" in lower:
+        return "Cursor spend limit reached — raise the limit or switch model"
+    if "rate limit" in lower or "rate_limit" in lower or "overloaded" in lower:
+        return "Cursor rate-limited — wait a moment or switch model"
+    return "Cursor usage limit reached — switch model or wait for reset"

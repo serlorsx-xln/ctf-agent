@@ -8,8 +8,16 @@ androguard           python -c "from androguard.misc import AnalyzeAPK"
 blutter              Dump Dart AOT objects/asm. Typical:
                        blutter /path/to/lib/arm64-v8a/ ./blutter_out
                      Needs matching libapp.so + libflutter.so in that directory.
-                     First run may fetch/build Dart SDK (writable cache).
+                     First run for a Dart version fetches + compiles that SDK
+                     (can take 10-30 min); the build is cached on the host and
+                     shared across every Artemis session, so later runs and
+                     later APKs on the same version are fast.
+                     Run it with a long timeout and let it stream — piping to
+                     `tail`/`head` buffers output and hides live progress.
+                     Meanwhile keep working: jadx/strings/assets in parallel.
                      blutter --help for usage. Wrapper validates inputs.
+                     Operator tip: `artemis setup` warms packs; first Flutter
+                     APK of a new Dart version still compiles once.
 reflutter            Flutter reverse helpers
 strings / objdump       Baseline string + disasm on libapp.so
 pyelftools           Parse ELF / Dart snapshot sections

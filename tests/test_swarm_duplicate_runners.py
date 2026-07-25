@@ -75,6 +75,10 @@ def test_swarm_creates_distinct_solver_keys(monkeypatch):
     swarm.solvers = {}
     swarm.findings = {}
     swarm.winner = None
+    swarm.winner_runner_id = ""
+    swarm.flag_credits = {}
+    swarm.flag_notes = {}
+    swarm._steps_by_runner = {}
     swarm.confirmed_flag = None
     swarm.confirmed_flags = []
     swarm._flag_lock = asyncio.Lock()

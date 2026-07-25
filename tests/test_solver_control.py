@@ -31,6 +31,7 @@ def test_classify_quota() -> None:
     assert classify_turn_error("You have exceeded your quota") == QUOTA_ERROR
     assert classify_turn_error("rate limit exceeded") == QUOTA_ERROR
     assert classify_turn_error("billing issue") == QUOTA_ERROR
+    assert classify_turn_error("Switch to Auto or increase usage") == QUOTA_ERROR
 
 
 def test_classify_generic_error() -> None:

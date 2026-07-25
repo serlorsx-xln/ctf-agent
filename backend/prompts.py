@@ -1,4 +1,10 @@
-"""System prompt builder + ChallengeMeta."""
+"""System prompt builder + ChallengeMeta.
+
+Skeleton follows upstream Veria: challenge header, description, files, then a short
+instruction list. Artemis differs in two places only — a human confirms flags
+(no CTFd), and the pyghidra block appears when a decompilable file is attached
+(Veria keyed that off category, which we do not have).
+"""
 
 from __future__ import annotations
 
@@ -15,8 +21,71 @@ class ChallengeMeta:
     name: str = "Unknown"
     description: str = ""
     connection_info: str = ""
-    # Distinct flags needed before CORRECT (default 1). Set via flags_required: N in challenge.txt.
+    # Distinct flags needed before CORRECT (default 1).
     flags_required: int = 1
+
+
+#: Compiled/packed artefacts a decompiler can actually open.
+_BINARY_EXTS = frozenset(
+    {
+        ".elf",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".obj",
+        ".a",
+        ".lib",
+        ".exp",
+        ".pdb",
+        ".bin",
+        ".out",
+        ".axf",
+        ".ko",
+        ".sys",
+        ".efi",
+        ".wasm",
+        ".apk",
+        ".aab",
+        ".dex",
+        ".jar",
+        ".class",
+        ".pyc",
+        ".ipa",
+        ".nro",
+        ".nes",
+        ".gba",
+    }
+)
+
+_TAG_LINE = re.compile(
+    r"^[ \t]*(?:tags?|category|categories)[ \t]*:[ \t]*(.+?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def has_binary_distfiles(names: list[str]) -> bool:
+    """True when an attachment could plausibly be decompiled.
+
+    Extensionless names count — CTF binaries are often shipped as bare ``chall``.
+    """
+    for name in names:
+        suffix = Path(name).suffix.lower()
+        if not suffix or suffix in _BINARY_EXTS:
+            return True
+    return False
+
+
+def parse_tag_labels(description: str) -> list[str]:
+    """Lift a ``Tags:`` / ``Category:`` line for the header only — never gates hints."""
+    tags: list[str] = []
+    for match in _TAG_LINE.finditer(description or ""):
+        for raw in re.split(r"[,/|]", match.group(1)):
+            tag = raw.strip().strip("`*_[]()").lower()
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tags
 
 
 def list_distfiles(challenge_dir: str) -> list[str]:
@@ -33,21 +102,29 @@ def _rewrite_connection_info(conn: str) -> str:
     return conn
 
 
-def _has_non_image_distfiles(names: list[str]) -> bool:
-    return any(Path(n).suffix.lower() not in IMAGE_EXTS for n in names)
-
-
 def build_prompt(
     meta: ChallengeMeta,
     distfile_names: list[str],
     container_arch: str = "unknown",
     has_named_tools: bool = True,
 ) -> str:
-    """Category-neutral prompt: description + files + operational hints (Veria-style)."""
+    """Veria-shaped prompt, adapted for human flag confirmation."""
     conn_info = _rewrite_connection_info((meta.connection_info or "").strip())
+    tags = parse_tag_labels(meta.description or "")
+    # Prefer an explicit Category: spelling for the header; otherwise the first tag.
+    category = ""
+    for match in re.finditer(
+        r"^[ \t]*categor(?:y|ies)[ \t]*:[ \t]*(.+?)[ \t]*$",
+        meta.description or "",
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        category = match.group(1).strip().strip("`*_[]()")
+        break
+    if not category and len(tags) == 1:
+        category = tags[0]
 
     lines: list[str] = [
-        "You are an expert CTF solver. Recover the real flag.",
+        "You are an expert CTF solver. Find the real flag for the challenge below.",
         "",
     ]
 
@@ -60,8 +137,15 @@ def build_prompt(
         ]
 
     lines += [
-        f"**Challenge**: {meta.name}",
-        f"**Arch**: {container_arch}",
+        "## Challenge",
+        f"**Name**    : {meta.name}",
+    ]
+    if category:
+        lines.append(f"**Category**: {category}")
+    lines.append(f"**Arch**    : {container_arch}")
+    if tags:
+        lines.append(f"**Tags**    : {', '.join(tags)}")
+    lines += [
         "",
         "## Description",
         meta.description or "_No description provided._",
@@ -89,7 +173,7 @@ def build_prompt(
         lines += ["## Service Connection", "```", conn_info, "```", hint, ""]
 
     if distfile_names:
-        lines.append("## Attached files (`/challenge/distfiles/`)")
+        lines.append("## Attached Files")
         for name in distfile_names:
             ext = Path(name).suffix.lower()
             is_img = ext in IMAGE_EXTS
@@ -103,13 +187,13 @@ def build_prompt(
         lines.append("")
     elif conn_info:
         lines += [
-            "## Attached files",
+            "## Attached Files",
             "_None — remote/web challenge. Work against the endpoint above._",
             "",
         ]
 
-    if distfile_names and _has_non_image_distfiles(distfile_names):
-        # Same push as upstream Veria — packs install on first use if missing.
+    # Veria keyed this off category; we key it off the files — same intent, no guess.
+    if has_binary_distfiles(distfile_names):
         lines += [
             "## Binary Analysis",
             "**pyghidra** is available for decompilation. Use it via bash:",
@@ -129,43 +213,29 @@ def build_prompt(
             "Web: fuzz params, check JS source, cookies, robots.txt. "
             "For XSS/SSRF: use `webhook_create`."
         )
-        submit = "call `submit_flag`"
-        submit_hint = "**Submit every candidate with `submit_flag`** (human confirms)."
+        submit_hint = (
+            "**Submit every candidate with `submit_flag`** — a human confirms; "
+            "CORRECT ends the run."
+        )
     else:
         image_hint = "**Images: use `exiftool`, `steghide`, `zsteg`, `strings`, `xxd` via bash.**"
         web_hint = (
             "Web: fuzz params, check JS source, cookies, robots.txt. "
             "For XSS/SSRF: use `curl` to webhook.site."
         )
-        submit = "run `submit_flag '<flag>'`"
         submit_hint = (
-            "**Submit every candidate with `submit_flag '<flag>'`** (bash; human confirms)."
+            "**Submit every candidate with `submit_flag '<flag>'`** (bash) — a human "
+            "confirms; CORRECT ends the run."
         )
 
     req = normalize_flags_required(getattr(meta, "flags_required", 1))
-    if req <= 1:
-        flag_note = (
-            f"- When you have a candidate answer, {submit} with the exact string. "
-            "A human confirms; CORRECT ends the run."
-        )
-    else:
-        flag_note = (
-            f"- This challenge needs {req} distinct flags. When you find each one, {submit}. "
-            "A human confirms each. ACCEPTED (n/m) means continue; only CORRECT ends the run."
+    if req > 1:
+        submit_hint = (
+            f"**Submit each of the {req} distinct flags with `submit_flag`** — a human "
+            "confirms each; ACCEPTED (n/m) means continue; only CORRECT ends the run."
         )
 
     lines += [
-        "## Notes",
-        "- Work in `/challenge/workspace`. Local files (if any) are under `/challenge/distfiles`.",
-        "- Start with `cat /challenge/TOOLS.txt` and use what is installed.",
-        "- Packages are per interpreter (`python3` ≠ `sage`); follow TOOLS.txt.",
-        "- Solve from local files and/or any live service. Do not search writeups.",
-        "- Ignore decoys (`CTF{flag}`, `CTF{placeholder}`, `*fake_flag*`, `TRYHARDER`).",
-        "- Submit the exact awarded string (any format). Do not rewrite to look like `…{…}`.",
-        flag_note,
-        "- Before finishing a turn without CORRECT: briefly state candidates (if any), "
-        "confidence, and the top blocker — even if submit was rejected.",
-        "",
         "## Instructions",
         "**Use tools immediately. Do not describe — execute.**",
         "",
@@ -184,5 +254,12 @@ def build_prompt(
         f"5. {submit_hint}",
         "6. Once CORRECT: output `FLAG: <value>` on its own line.",
         "7. Do not guess. Do not ask. Cover maximum surface area.",
+        (
+            "8. Exit 124/137 → do not immediately retry the same heavy command; "
+            "shrink scope or change approach. Prefer `submit_flag` once you have "
+            "a concrete candidate before starting unrelated heavy jobs."
+        ),
+        "",
+        "Work in `/challenge/workspace`. Installed tools: `cat /challenge/TOOLS.txt`.",
     ]
     return "\n".join(lines)

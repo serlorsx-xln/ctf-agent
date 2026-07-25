@@ -23,14 +23,18 @@ from cursor_sdk import (
     CustomToolContext,
     LocalAgentOptions,
     SDKAssistantMessage,
+    SDKStatusMessage,
     SDKThinkingMessage,
     SDKToolUseMessage,
+    SDKUsageMessage,
 )
 
 from backend.agents.cursor_runtime import (
     acquire_client,
     current_client,
     force_recreate_client,
+    format_cursor_run_error,
+    humanize_cursor_error,
     release_client,
     resolve_api_key,
 )
@@ -60,10 +64,12 @@ from backend.solver_base import (
     SolverResult,
 )
 from backend.tools.core import (
+    VISION_BASH_FALLBACK,
     do_bash,
     do_list_files,
     do_read_file,
     do_view_image,
+    do_web_fetch,
     do_webhook_create,
     do_webhook_get_requests,
     do_write_file,
@@ -71,6 +77,43 @@ from backend.tools.core import (
 from backend.tracing import SolverTracer
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_args_preview(name: str, args: Mapping[str, Any]) -> str:
+    """Human-readable tool args for live chat (not raw Cursor SDK dumps)."""
+    if name == "bash":
+        cmd = args.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            return cmd.strip()
+    if name in ("read_file", "write_file", "list_files"):
+        path = args.get("path")
+        if path:
+            return str(path)
+    if name == "submit_flag":
+        flag = args.get("flag")
+        if flag:
+            return str(flag)
+    try:
+        return json.dumps(args, ensure_ascii=False, default=str)
+    except Exception:
+        return str(args)
+
+
+def _flag_candidate_hint(output: str) -> str | None:
+    """If bash output looks like a lone flag, return it so we can nudge submit_flag."""
+    import re
+
+    text = (output or "").strip()
+    if not text or len(text) > 200:
+        return None
+    # Prefer flag{…} / CTF{…} forms
+    m = re.search(r"\b([A-Za-z0-9_]+\{[^\s|]{4,120}\})", text)
+    if m:
+        return m.group(1)
+    # Single-line hex / token
+    if re.fullmatch(r"[A-Za-z0-9_\-]{16,80}", text):
+        return text
+    return None
 
 
 def _image_tool_result(image_bytes: bytes, mime_type: str, *, label: str = "") -> dict:
@@ -103,6 +146,7 @@ Available tools:
 - bash — run a command in the sandbox
 - read_file / write_file / list_files — file I/O in the sandbox
 - submit_flag — submit a recovered flag (operator confirms; CORRECT = done)
+- web_fetch — fetch a URL from the host network
 - webhook_create / webhook_get_requests — out-of-band HTTP callbacks
 - view_image — inspect an image file in the sandbox
 - notify_coordinator — send a strategic note to the coordinator
@@ -123,6 +167,10 @@ Long-running bash (factoring, scans, compiles, remote loops): always set
 timeout_seconds explicitly (300–900+) and print progress so the session stays
 healthy. Prefer writing a script to /challenge/workspace and running it once
 over many interactive one-liners.
+If a command exits 124 (timeout) or 137 (OOM), do not immediately retry the
+same heavy command — shrink the work or change approach.
+When you already recovered a concrete flag/candidate, call submit_flag before
+starting unrelated heavy jobs (e.g. sage factor after a stereotypic decrypt).
 
 When you recover a candidate answer, call submit_flag with the exact string
 (any format the challenge awards — do not rewrite to fit a pattern).
@@ -146,6 +194,8 @@ class CursorSolver:
         submit_fn=None,
         message_bus=None,
         notify_coordinator=None,
+        *,
+        emit_global_quota: bool = True,
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
@@ -157,6 +207,9 @@ class CursorSolver:
         self.submit_fn = submit_fn
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
+        # True for single-agent or all-Cursor swarms — mixed soft-race must not
+        # emit a global [artemis] outcome (would unlock TUI while Claude continues).
+        self.emit_global_quota = emit_global_quota
 
         self.sandbox = DockerSandbox(
             image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
@@ -178,10 +231,13 @@ class CursorSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
+        self._action_log: list[str] = []
         self._bump_insights: str | None = None
         self._infra_recovery = False
         self._started = False
         self._api_key = ""
+        # In-turn usage from SDKUsageMessage (absolute for this turn; not yet committed).
+        self._turn_usage_pending: Any | None = None
 
     async def start(self) -> None:
         from backend.agents.solver_control import start_sandbox_basics
@@ -302,7 +358,10 @@ class CursorSolver:
             self._step_count += 1
             step = self._step_count
             self.tracer.tool_call(name, args, step)
-            args_preview = json.dumps(args, ensure_ascii=False, default=str)
+            from backend.action_log import append_action
+
+            append_action(self._action_log, name, args)
+            args_preview = _tool_args_preview(name, args)
             _live(f"{self.agent_name} tool#{step} → {name}", args_preview, limit=1500)
 
             loop_status = self.loop_detector.check(name, args)
@@ -317,12 +376,22 @@ class CursorSolver:
                 result = await runner()
                 if isinstance(result, tuple):
                     image_bytes, mime_type = result
-                    text: str | dict = _image_tool_result(
-                        image_bytes,
-                        mime_type,
-                        label=f"view_image {args.get('filename', '')}".strip(),
-                    )
-                    preview = f"image:{mime_type}:{len(image_bytes)}b"
+                    try:
+                        text = _image_tool_result(
+                            image_bytes,
+                            mime_type,
+                            label=f"view_image {args.get('filename', '')}".strip(),
+                        )
+                        preview = f"image:{mime_type}:{len(image_bytes)}b"
+                    except Exception as img_err:
+                        logger.warning(
+                            "[%s] view_image payload failed: %s", self.agent_name, img_err
+                        )
+                        text = (
+                            f"Loaded {mime_type} ({len(image_bytes)} bytes) but could not "
+                            f"attach pixels to the model. {VISION_BASH_FALLBACK}"
+                        )
+                        preview = text
                 elif isinstance(result, dict) and "content" in result:
                     text = result
                     preview = json.dumps(result, ensure_ascii=False, default=str)[:500]
@@ -391,12 +460,12 @@ class CursorSolver:
                     if parsed.has_expansion:
                         return SUBMIT_EXPANSION_ERROR
                     if self.submit_fn:
-                        display, _confirmed = await self.submit_fn(parsed.value)
+                        display, is_confirmed = await self.submit_fn(parsed.value)
                     else:
                         from backend.flags import normalize_flags_required
                         from backend.tools.core import do_submit_flag
 
-                        display, _confirmed = await do_submit_flag(
+                        display, is_confirmed = await do_submit_flag(
                             self.meta.name,
                             parsed.value,
                             already_accepted=list(self._accepted_flags),
@@ -405,6 +474,30 @@ class CursorSolver:
                             ),
                             challenge_dir=self.challenge_dir,
                             auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
+                        )
+                    flag_val = (parsed.value or "").strip()
+                    if (
+                        display.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
+                        and flag_val
+                        and flag_val not in self._accepted_flags
+                    ):
+                        self._accepted_flags.append(flag_val)
+                        try:
+                            from backend.flags import normalize_flags_required
+                            from backend.shell.sandbox_session import sync_accepted_flags
+
+                            sync_accepted_flags(
+                                self._accepted_flags,
+                                flags_required=normalize_flags_required(
+                                    getattr(self.meta, "flags_required", 1)
+                                ),
+                            )
+                        except Exception:
+                            pass
+                    if is_confirmed:
+                        self._confirmed = True
+                        self._flag = (
+                            " | ".join(self._accepted_flags) if self._accepted_flags else flag_val
                         )
                     suffix = submit_flag_suffix(command, parsed)
                     if suffix:
@@ -417,7 +510,17 @@ class CursorSolver:
                 if notify_msg is not None and self.notify_coordinator:
                     await self.notify_coordinator(notify_msg)
                     return "Message sent to coordinator."
-                return await do_bash(self.sandbox, command, timeout)
+                out = await do_bash(self.sandbox, command, timeout)
+                # Hint: recovered flag-looking text must go through submit_flag for TUI confirm
+                hint = _flag_candidate_hint(out)
+                if hint:
+                    from backend.agents.live_log import live as _live_hint
+
+                    _live_hint(
+                        f"{self.agent_name} ai",
+                        f"Possible flag in command output — call submit_flag({hint!r}) so the TUI can confirm.",
+                    )
+                return out
 
             return await _wrap("bash", args, _run)
 
@@ -465,6 +568,18 @@ class CursorSolver:
                     and flag not in self._accepted_flags
                 ):
                     self._accepted_flags.append(flag)
+                    try:
+                        from backend.flags import normalize_flags_required
+                        from backend.shell.sandbox_session import sync_accepted_flags
+
+                        sync_accepted_flags(
+                            self._accepted_flags,
+                            flags_required=normalize_flags_required(
+                                getattr(self.meta, "flags_required", 1)
+                            ),
+                        )
+                    except Exception:
+                        pass
                 if is_confirmed:
                     self._confirmed = True
                     self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag
@@ -482,6 +597,17 @@ class CursorSolver:
                 return display
 
             return await _wrap("submit_flag", args, _run)
+
+        async def web_fetch(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
+            return await _wrap(
+                "web_fetch",
+                args,
+                lambda: do_web_fetch(
+                    args.get("url", ""),
+                    args.get("method", "GET"),
+                    args.get("body", ""),
+                ),
+            )
 
         async def webhook_create(args: Mapping[str, Any], _ctx: CustomToolContext) -> str | dict:
             return await _wrap("webhook_create", args, do_webhook_create)
@@ -582,6 +708,19 @@ class CursorSolver:
                 },
                 execute=submit_flag,
             ),
+            "web_fetch": CustomTool(
+                description="Fetch a URL from the host network.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "method": {"type": "string", "default": "GET"},
+                        "body": {"type": "string", "default": ""},
+                    },
+                    "required": ["url"],
+                },
+                execute=web_fetch,
+            ),
             "webhook_create": CustomTool(
                 description="Create a webhook.site token for out-of-band HTTP callbacks.",
                 input_schema={"type": "object", "properties": {}},
@@ -653,14 +792,60 @@ class CursorSolver:
 
         try:
             _live(self.agent_name, "── turn start ──")
+            self._turn_usage_pending = None
             run = await self._agent.send(prompt)
+            status_detail = ""
             async for message in run.stream():
                 if self.cancel_event.is_set():
                     if run.supports("cancel"):
                         await run.cancel()
                     break
 
-                if isinstance(message, SDKThinkingMessage):
+                if isinstance(message, SDKStatusMessage):
+                    if (message.message or "").strip():
+                        status_detail = humanize_cursor_error(message.message.strip())
+                        from backend.agents.cursor_runtime import is_quota_error_message
+
+                        if is_quota_error_message(message.message):
+                            # Print immediately — waiting for turn teardown made the
+                            # TUI sit on "waiting · 0 events" for a long time.
+                            if not getattr(self, "_quota_live_printed", False):
+                                self._quota_live_printed = True
+                                short = status_detail or (
+                                    "Cursor usage limit reached — switch model or wait for reset"
+                                )
+                                print(
+                                    f"[{self.agent_name}] {short}",
+                                    flush=True,
+                                )
+                                if self.emit_global_quota:
+                                    from backend.agents.quota_dedupe import (
+                                        claim_quota_outcome_print,
+                                    )
+
+                                    if claim_quota_outcome_print(self.cancel_event):
+                                        print(
+                                            f"[artemis] outcome ERROR — {short}",
+                                            flush=True,
+                                        )
+                                    try:
+                                        from backend.flags import cancel_flag_confirmation
+
+                                        cancel_flag_confirmation()
+                                    except Exception:
+                                        pass
+                                    self.cancel_event.set()
+                                    if run.supports("cancel"):
+                                        await run.cancel()
+                                    break
+                        else:
+                            _live(
+                                f"{self.agent_name} status",
+                                f"{message.status}: {status_detail}",
+                                limit=240,
+                            )
+
+                elif isinstance(message, SDKThinkingMessage):
                     if message.text.strip():
                         _live(f"{self.agent_name} think", message.text)
 
@@ -672,17 +857,34 @@ class CursorSolver:
                             self._maybe_parse_flag_json(text)
                             _live(f"{self.agent_name} ai", text)
 
+                elif isinstance(message, SDKUsageMessage):
+                    # Provider-reported only — preview sidebar mid-turn (commit at turn end).
+                    u = message.usage
+                    if u is not None:
+                        self._turn_usage_pending = u
+                        self.cost_tracker.publish_with_pending(
+                            input_tokens=int(getattr(u, "input_tokens", 0) or 0),
+                            output_tokens=int(getattr(u, "output_tokens", 0) or 0),
+                            cache_read_tokens=int(getattr(u, "cache_read_tokens", 0) or 0),
+                        )
+
                 elif isinstance(message, SDKToolUseMessage):
-                    # Custom tools also log in _wrap; this catches built-in tool events.
+                    # Custom tools already log in _wrap — skip SDK duplicate dumps.
+                    if message.name and "custom" in str(message.name).lower():
+                        continue
                     if message.status == "running":
+                        preview = _tool_args_preview(
+                            str(message.name),
+                            message.args if isinstance(message.args, Mapping) else {},
+                        )
                         _live(
-                            f"{self.agent_name} cursor-tool → {message.name}",
-                            json.dumps(message.args, ensure_ascii=False, default=str),
+                            f"{self.agent_name} tool → {message.name}",
+                            preview,
                             limit=1200,
                         )
                     elif message.status in ("completed", "error") and message.result is not None:
                         _live(
-                            f"{self.agent_name} cursor-tool ← {message.name} ({message.status})",
+                            f"{self.agent_name} tool ← {message.name} ({message.status})",
                             str(message.result),
                             limit=1500,
                         )
@@ -692,20 +894,22 @@ class CursorSolver:
             duration = time.monotonic() - t0
             self.tracer.event("turn_complete", duration=round(duration, 1), steps=self._step_count)
 
-            if result.usage is not None:
+            usage = result.usage if result.usage is not None else self._turn_usage_pending
+            self._turn_usage_pending = None
+            if usage is not None:
                 self.cost_tracker.record_tokens(
                     self.agent_name,
                     self.model_id,
-                    input_tokens=result.usage.input_tokens,
-                    output_tokens=result.usage.output_tokens,
-                    cache_read_tokens=result.usage.cache_read_tokens,
+                    input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+                    output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+                    cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
                     provider_spec="cursor",
                     duration_seconds=duration,
                 )
                 self.tracer.usage(
-                    result.usage.input_tokens,
-                    result.usage.output_tokens,
-                    result.usage.cache_read_tokens,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                    int(getattr(usage, "cache_read_tokens", 0) or 0),
                 )
 
             if result.result:
@@ -714,16 +918,21 @@ class CursorSolver:
 
             status = str(result.status)
             if status == "error":
-                err = result.result or "run error"
+                err = format_cursor_run_error(
+                    result_text=result.result,
+                    status_message=status_detail,
+                )
                 self.tracer.event("error", error=err)
                 from backend.agents.solver_control import classify_turn_error
 
                 classified = classify_turn_error(err)
                 if classified == QUOTA_ERROR:
+                    self._findings = status_detail or humanize_cursor_error(err)
                     return self._result(QUOTA_ERROR)
                 if classified == INFRA_ERROR:
                     self._findings = f"Infra: {err}"
                     return self._result(INFRA_ERROR)
+                self._findings = f"Error: {err}"
                 return self._result(ERROR)
 
             if self._confirmed and self._flag:
@@ -772,7 +981,7 @@ class CursorSolver:
             stripped = stripped[start : end + 1]
         try:
             parsed = json.loads(stripped)
-        except json.JSONDecodeError, ValueError:
+        except (json.JSONDecodeError, ValueError):
             return
         if isinstance(parsed, dict) and parsed.get("type") == "flag_found":
             flag = parsed.get("flag")
@@ -808,9 +1017,39 @@ class CursorSolver:
             findings_summary=self._findings[:2000],
             step_count=run_steps if run_steps is not None else self._step_count,
             # Cursor does not report USD; leave unknown.
-            cost_usd=0.0,
+            cost_usd=None,
             log_path=self.tracer.path,
         )
+
+    async def produce_writeup(self) -> str:
+        """One more turn: narrative writeup for the operator recap (no tools expected)."""
+        from backend.writeup import WRITEUP_PROMPT
+
+        if self._agent is None:
+            return ""
+        # Swarm may have cancelled siblings; if we are already cancelled, skip the
+        # extra Cursor turn — it hangs easily and the sticky summary already ran.
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            return ""
+        parts: list[str] = []
+        _live(self.agent_name, "── writeup ──")
+        run = await self._agent.send(WRITEUP_PROMPT)
+        async for message in run.stream():
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                break
+            if isinstance(message, SDKAssistantMessage):
+                for block in message.message.content:
+                    text = getattr(block, "text", None)
+                    if text and str(text).strip():
+                        parts.append(str(text).strip())
+                        # Do not stream token deltas to the live log — hundreds of
+                        # ``[agent writeup] x`` lines drown CORRECT / summary and
+                        # invent phantom status on the main page.
+        try:
+            await asyncio.wait_for(run.wait(), timeout=5.0)
+        except TimeoutError:
+            pass
+        return "\n\n".join(parts).strip()
 
     async def stop(self) -> None:
         if self._step_count == 0 and not getattr(self, "_started", False):
@@ -827,7 +1066,8 @@ class CursorSolver:
         self.tracer.close()
         if self._agent is not None:
             try:
-                await self._agent.close()
+                # Hung writeup/close left Stopping for hours — hard-cap teardown.
+                await asyncio.wait_for(self._agent.close(), timeout=8.0)
             except Exception:
                 pass
             self._agent = None
@@ -841,4 +1081,10 @@ class CursorSolver:
                 pass
             self._workdir = None
         if self.sandbox:
-            await self.sandbox.stop()
+            try:
+                await asyncio.wait_for(self.sandbox.stop(), timeout=15.0)
+            except Exception:
+                logger.warning(
+                    "[%s] sandbox.stop timed out or failed during cleanup",
+                    self.agent_name,
+                )

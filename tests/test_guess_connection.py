@@ -26,7 +26,18 @@ def test_nc_line() -> None:
     assert guess_connection("nc chall.example.com 1337") == "nc chall.example.com 1337"
 
 
+def test_ssh_line() -> None:
+    assert guess_connection(
+        "ssh kcrc@pwnable.kr -p2222 (pw: guest)"
+    ) == "ssh kcrc@pwnable.kr -p2222"
+
+
+def test_ssh_without_port() -> None:
+    assert guess_connection("ssh user@chal.example.com") == "ssh user@chal.example.com"
+
+
 def test_real_http_endpoint() -> None:
     assert guess_connection("Open https://chal.example.com:8443/login") == (
         "https://chal.example.com:8443/login"
     )
+

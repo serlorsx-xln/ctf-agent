@@ -127,17 +127,22 @@ async def do_submit_flag(
     required: int = 1,
     challenge_dir: str | None = None,
     auto_confirm: bool = False,
-    confirm_fn: Callable[[str], bool] | None = None,
+    confirm_fn: Callable[[str], bool | tuple[bool, str]] | None = None,
+    by: str = "",
 ) -> tuple[str, bool]:
     """Submit a flag locally with human confirmation.
 
     Returns (display_message, challenge_complete). Hard rejects (empty/decoy/
     artifact) skip the prompt. Other candidates ask the operator (or
     ``confirm_fn`` / auto-confirm) before counting toward ``required``.
+    A confirm may answer ``(ok, reason)``; a rejection reason is relayed to the
+    solver so it can tell a wrong flag from a wrong technique.
     ``_challenge_name`` is kept for call-site compatibility / logging only.
+    ``by`` names the submitting runner in the accept message.
     """
     from backend.flags import (
         accept_flag,
+        normalize_confirm,
         normalize_flags_required,
         prompt_flag_confirmation,
     )
@@ -155,11 +160,15 @@ async def do_submit_flag(
         return preview, done
 
     confirm = confirm_fn or (lambda f: prompt_flag_confirmation(f, auto_confirm=auto_confirm))
-    ok = await asyncio.to_thread(confirm, (flag or "").strip())
+    ok, reason = normalize_confirm(await asyncio.to_thread(confirm, (flag or "").strip()))
     if not ok:
         f = (flag or "").strip()
+        # Relay the operator's reason verbatim — a bare "no" leaves the solver
+        # unable to tell a wrong flag from a wrong technique, and it starts
+        # resubmitting variants or doubting the checker instead of moving on.
+        why = f" Operator says: {reason}" if reason else ""
         return (
-            f'REJECTED by operator — "{f}" not confirmed. Continue hunting.',
+            f'REJECTED by operator — "{f}" not confirmed.{why} Continue hunting.',
             False,
         )
     return accept_flag(
@@ -168,6 +177,7 @@ async def do_submit_flag(
         required=req,
         challenge_dir=challenge_dir,
         human_confirmed=True,
+        by=by,
     )
 
 
@@ -184,7 +194,7 @@ def _is_internal_url(url: str) -> bool:
             second_octet = int(host.split(".")[1])
             if 16 <= second_octet <= 31:
                 return True
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             pass
     return False
 
@@ -270,6 +280,11 @@ IMAGE_MAGIC: dict[str, list[int]] = {
 
 MAX_IMAGE_BYTES = 4 * 1024 * 1024  # 4 MB
 
+# When pixels cannot be delivered (too large / corrupt / bridge), steer to local tools.
+VISION_BASH_FALLBACK = (
+    "Use bash tools on the file instead: steghide, zsteg, exiftool, strings, xxd, binwalk."
+)
+
 
 def _has_valid_magic(data: bytes, mime_type: str) -> bool:
     magic = IMAGE_MAGIC.get(mime_type)
@@ -278,17 +293,20 @@ def _has_valid_magic(data: bytes, mime_type: str) -> bool:
     return all(i < len(data) and data[i] == b for i, b in enumerate(magic))
 
 
-async def do_view_image(sandbox, filename: str, use_vision: bool) -> tuple[bytes, str] | str:
-    """Returns (image_bytes, media_type) on success, or error string."""
+async def do_view_image(sandbox, filename: str, use_vision: bool = True) -> tuple[bytes, str] | str:
+    """Load image bytes for multimodal delivery (or an error string).
+
+    ``use_vision`` is kept for call-site compatibility; we always attempt to
+    load bytes. Callers that cannot attach pixels should surface
+    ``VISION_BASH_FALLBACK`` rather than blocking on a model allowlist.
+    """
+    _ = use_vision  # no allowlist gate — try deliver, else bash tools
     # Strip leading path if model passes full container path
     basename = Path(filename).name
     ext = Path(basename).suffix.lower()
     mime_type = IMAGE_EXTS_FOR_VISION.get(ext)
     if not mime_type:
         return f"Not a supported image type: {filename}"
-
-    if not use_vision:
-        return "Vision not available for this model. Use bash tools (steghide, zsteg, exiftool, strings) instead."
 
     # Try the filename as-is first (if it's an absolute path), then search standard dirs
     search_paths = []
@@ -303,12 +321,12 @@ async def do_view_image(sandbox, filename: str, use_vision: bool) -> tuple[bytes
                 return (
                     "Cannot load image: file appears invalid or corrupted. "
                     "Fix the magic bytes in the sandbox first, save to /challenge/workspace/, "
-                    "then call view_image again."
+                    f"then call view_image again. {VISION_BASH_FALLBACK}"
                 )
             if len(data) > MAX_IMAGE_BYTES:
                 return (
                     f"Image too large for vision ({len(data) / 1024 / 1024:.1f} MB > 4 MB limit). "
-                    "Use bash tools (steghide, zsteg, binwalk, exiftool, strings, xxd) instead."
+                    f"{VISION_BASH_FALLBACK}"
                 )
             return (data, mime_type)
         except Exception:

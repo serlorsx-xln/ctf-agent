@@ -1,8 +1,8 @@
 # Artemis
 
-Multi-model CTF solver swarm: race several AI models against a challenge in parallel, each in an isolated Docker sandbox with CTF tooling.
+CTF **agent CLI** — paste a challenge into the TUI, confirm flags interactively, and run a multi-model solver swarm in Docker sandboxes.
 
-Forked from [Veria Labs](https://verialabs.com) [CTF Agent](https://github.com/verialabs/ctf-agent) (BSidesSF 2026: 52/52, 1st place). Artemis keeps the race harness and extends it (Cursor backend, lazy packs, local flag confirm / sealed eval).
+Forked from [Veria Labs](https://verialabs.com) [CTF Agent](https://github.com/verialabs/ctf-agent) (BSidesSF 2026: 52/52, 1st place). Artemis keeps the swarm harness and adds the Cursor/Claude/Codex/Gemini TUI product surface.
 
 ## Results (upstream Veria)
 
@@ -12,47 +12,25 @@ Forked from [Veria Labs](https://verialabs.com) [CTF Agent](https://github.com/v
 
 Solves across pwn, rev, crypto, forensics, web, and misc.
 
-## How It Works
+## How It Works (TUI)
 
-A **coordinator** LLM manages local challenges under `challenges/` while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to finish the required flag(s) wins.
+One flow inside the Artemis TUI:
 
-```
-                        +-----------------+
-                        | challenges/     |
-                        | (local dirs)    |
-                        +--------+--------+
-                                 |
-                        +--------v--------+
-                        | Local poller    |
-                        +--------+--------+
-                                 |
-                        +--------v--------+
-                        | Coordinator LLM |
-                        | (Cursor/Claude) |
-                        +--------+--------+
-                                 |
-              +------------------+------------------+
-              |                  |                  |
-     +--------v--------+ +------v---------+ +------v---------+
-     | Swarm:          | | Swarm:         | | Swarm:         |
-     | challenge-1     | | challenge-2    | | challenge-N    |
-     |                 | |                | |                |
-     |  composer-2.5   | |  composer-2.5  | |     ...        |
-     |  (Cursor SDK)   | |  (Cursor SDK)  | |                |
-     +--------+--------+ +--------+-------+ +----------------+
-              |                    |
-     +--------v--------+  +-------v--------+
-     | Docker Sandbox  |  | Docker Sandbox |
-     | (isolated)      |  | (isolated)     |
-     |                 |  |                |
-     | pwntools, r2,   |  | pwntools, r2,  |
-     | gdb, python...  |  | gdb, python... |
-     +-----------------+  +----------------+
+1. Paste challenge text / path / `@files` → `artemis_load_challenge`
+2. If `flags_required` unknown → digits dialog → starts swarm
+3. Solvers stream think / bash / tools into the chat; confirm flag candidates in a TUI dialog
+4. Summarize how the flag was found
+
+```bash
+./chassis/bin/artemis
+# or: uv run artemis
 ```
 
-Each solver runs in an isolated Docker container with CTF tools. Flag candidates are submitted **locally**; you confirm each one (`y/N`) — there is no external scoreboard. Confirmed flags count toward `CORRECT`. Multi-flag challenges set `flags_required: N` in `challenge.txt`. Use `--auto-confirm-flags` (or `CTF_AUTO_CONFIRM_FLAGS=1`) only for unattended/tests.
+Connect providers with `/connect` (Cursor, Claude, Codex, Gemini). Host bash/edit are denied — challenge work goes through `artemis_*` tools and the Docker sandbox.
 
-## Quick Start (Cursor API key)
+Headless / coordinator multi-challenge mode remains available for batch runs (`uv run artemis swarm --challenge …`). In the TUI, flag confirm is a dialog (not stdin `y/N`). Multiple TUI windows share one daemon; each OpenCode chat is an isolated session slot (see `docs/TUI-PRODUCT-FLOW.md`).
+
+## Quick Start
 
 ```bash
 # Install
@@ -70,18 +48,17 @@ docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
 # docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
 # docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
 
-# Configure credentials
-cp .env.example .env
-# Set CURSOR_API_KEY from https://cursor.com/dashboard/integrations
+# Launch Artemis TUI (Bun required). Configure providers via /connect — not .env:
+#   Cursor / Claude / Codex / Gemini — paste challenge text or a path to solve (swarm + live logs)
+uv run artemis
+# or: chassis/bin/artemis
 
-# Drop a challenge folder, then solve:
-#   challenges/my-chal/challenge.txt   ← paste from the CTF page
-#   challenges/my-chal/...files...     ← attachments (or under distfiles/)
-uv run artemis --challenge ./challenges/my-chal --models cursor/composer-2.5 -v
+# Optional once: warm L0 + common pack caches (faster first solve)
+# uv run artemis setup
+
+# Headless swarm (optional CI). Keys from TUI auth.json, or env for automation:
+# uv run artemis swarm --challenge ./challenges/my-chal --models cursor/composer-2.5 -v
 # alias: uv run ctf-solve …
-
-# Harder challenges (same key / other backends):
-# uv run artemis --challenge ./challenges/my-chal --models cursor/claude-4-sonnet -v
 ```
 
 L0 includes common helpers (see `/challenge/TOOLS.txt`). Packs load additively
@@ -93,20 +70,20 @@ playbook.
 Coordinator over all local challenges:
 
 ```bash
-uv run artemis --challenges-dir challenges --max-challenges 10 -v
+uv run artemis swarm --challenges-dir challenges --max-challenges 10 -v
 ```
 
 ## Coordinator Backends
 
 ```bash
 # Cursor SDK coordinator (default) — uses CURSOR_API_KEY
-uv run artemis --coordinator cursor --coordinator-model composer-2.5 ...
+uv run artemis swarm --coordinator cursor --coordinator-model composer-2.5 ...
 
 # Claude SDK coordinator
-uv run artemis --coordinator claude ...
+uv run artemis swarm --coordinator claude ...
 
 # Codex coordinator (GPT-5.4 via JSON-RPC)
-uv run artemis --coordinator codex ...
+uv run artemis swarm --coordinator codex ...
 ```
 
 ## Solver Models
@@ -119,8 +96,9 @@ Default model lineup (configurable in `backend/models.py`):
 | auto | Cursor SDK | Server-selected Cursor model |
 | Claude Opus 4.6 (medium/max) | Claude SDK | Optional — needs `ANTHROPIC_API_KEY` |
 | GPT-5.4 / mini / codex | Codex | Optional — needs `OPENAI_API_KEY` + `codex` CLI |
+| Gemini 2.5 Flash / Pro | Gemini (`gemini-sdk/`) | Optional — `/connect` Google key, or `GEMINI_API_KEY` / ADC |
 
-Model specs use `provider/model` form, e.g. `cursor/composer-2.5` or `cursor/auto`.
+Model specs use `provider/model` form, e.g. `cursor/composer-2.5`, `google/gemini-2.5-flash`. After `CORRECT`, the winning solver is asked for a short IDE-style writeup for the recap.
 
 ## Sandbox Tooling
 
@@ -165,29 +143,23 @@ kept intact (timeout auto-extends). No manual Colima routes or `pf` NAT.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your keys:
+**Interactive:** open Artemis TUI and run `/connect` for Cursor, Claude, Codex, and Gemini.
+Keys are stored in `~/.local/share/artemis/auth.json`. Do not put API keys in `.env` for day-to-day use — the TUI launcher ignores those secrets so providers stay unchecked until you connect.
 
-```bash
-cp .env.example .env
-```
+**CI / headless swarm:** set `CURSOR_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment (or copy `.env.example` → `.env` for Docker/sandbox non-secrets only).
 
-```env
-CURSOR_API_KEY=cursor_...
-# Optional alternate backends:
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
-```
-
-All settings can also be passed as environment variables or CLI flags.
 Flags are accepted locally via `submit_flag` (no external scoreboard URL/token required).
 
 ## Requirements
 
 - Python 3.14+
+- Bun (for Artemis TUI)
 - Docker
-- `CURSOR_API_KEY` (primary) — from [Cursor Dashboard → Integrations](https://cursor.com/dashboard/integrations)
-- Optional: Anthropic / OpenAI / Google keys for non-Cursor backends
+- Provider credentials via TUI `/connect` (or env for headless swarm)
+  - Cursor — [Dashboard → API Keys / Integrations](https://cursor.com/dashboard)
+  - Claude — Anthropic API key, `claude setup-token`, or import Claude Code
+  - Codex — ChatGPT OAuth or OpenAI API key
+  - Gemini — Google AI Studio / Gemini API key
 - `codex` CLI (only for Codex solver/coordinator)
 - `claude` CLI (only for Claude SDK backend; bundled with claude-agent-sdk)
 

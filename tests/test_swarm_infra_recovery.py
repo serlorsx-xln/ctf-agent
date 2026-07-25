@@ -79,6 +79,10 @@ def _swarm() -> ChallengeSwarm:
     swarm.solvers = {}
     swarm.findings = {}
     swarm.winner = None
+    swarm.winner_runner_id = ""
+    swarm.flag_credits = {}
+    swarm.flag_notes = {}
+    swarm._steps_by_runner = {}
     swarm.confirmed_flag = "CTF{ok}"
     swarm.confirmed_flags = ["CTF{ok}"]
     swarm._flag_lock = asyncio.Lock()

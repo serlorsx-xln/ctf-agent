@@ -1,9 +1,10 @@
-"""Click CLI entry point."""
+"""Artemis CLI — interactive TUI (default) + swarm harness."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,8 @@ console = Console()
 
 
 def _setup_logging(verbose: bool = False) -> None:
+    from backend.log_context import AgentTagFilter
+
     level = logging.DEBUG if verbose else logging.INFO
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -27,21 +30,105 @@ def _setup_logging(verbose: bool = False) -> None:
     handler.setFormatter(
         logging.Formatter("[%(asctime)s] %(levelname)-8s %(message)s", datefmt="%X")
     )
+    # Parallel solvers share this stream; without the tag their sandbox/boot
+    # lines are indistinguishable in the TUI.
+    handler.addFilter(AgentTagFilter())
     logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
-@click.command()
+def _apply_common_settings(
+    settings: Settings,
+    *,
+    image: str | None,
+    auto_confirm_flags: bool,
+    packs: tuple[str, ...],
+    eval_out: str,
+    eval_max_wall_s: float | None,
+    eval_max_usd: float | None,
+    eval_strict_packs: bool,
+    max_challenges: int,
+) -> None:
+    if image:
+        settings.sandbox_image = image
+        settings.sandbox_image_locked = True
+    else:
+        settings.sandbox_image_locked = False
+    settings.max_concurrent_challenges = max_challenges
+    settings.auto_confirm_flags = auto_confirm_flags or settings.auto_confirm_flags
+    if packs:
+        settings.force_packs = list(packs)
+    if eval_out:
+        settings.eval_out = eval_out
+    if eval_max_wall_s is not None:
+        settings.eval_max_wall_s = eval_max_wall_s
+    if eval_max_usd is not None:
+        settings.eval_max_usd = eval_max_usd
+    if eval_strict_packs:
+        settings.eval_strict_packs = True
+
+
+def _expand_models(models: tuple[str, ...]) -> list[str]:
+    if not models:
+        return list(DEFAULT_MODELS)
+    from backend.models import normalize_swarm_specs
+
+    return normalize_swarm_specs(list(models))
+
+
+@click.group(invoke_without_command=True)
+@click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
+@click.pass_context
+def main(ctx: click.Context, verbose: bool) -> None:
+    """Artemis — interactive TUI + Python CTF swarm/sandbox.
+
+    \b
+      artemis                  Interactive TUI (requires Bun)
+      artemis swarm …          Multi-model swarm harness
+      artemis chassis …        Pass-through args to TUI
+
+    Paste a challenge (text and/or path) — Artemis loads it and runs the swarm.
+    API keys: /connect in the TUI — do not edit .env by hand.
+
+    \b
+      artemis setup            Warm L0 + common packs once (Phase 3 bake)
+    """
+    _setup_logging(verbose)
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from backend.shell.chassis_launch import (
+        bun_missing_message,
+        chassis_paths,
+        find_bun,
+        try_launch_chassis,
+    )
+
+    _repo, _chassis, launcher = chassis_paths()
+    if not launcher.is_file():
+        console.print("[red]Chassis missing:[/red] chassis/bin/artemis not found in this repo.")
+        sys.exit(1)
+    if find_bun() is None:
+        console.print(f"[red]{bun_missing_message()}[/red]")
+        sys.exit(1)
+
+    try_launch_chassis([])
+    console.print("[red]Failed to exec Artemis TUI.[/red]")
+    sys.exit(1)
+
+
+@main.command("swarm")
 @click.option(
     "--image",
     default=None,
-    help="Force sandbox image (optional). Default: auto-select from challenge files (L0 + packs).",
+    help="Force sandbox image (optional). Default: L0 + packs.",
 )
 @click.option(
     "--models",
     multiple=True,
-    help="Model specs (repeatable, or comma-separated in one arg). "
-    "Same model multiple times = parallel instances. "
-    "Shorthand: cursor/grok-4.5*3",
+    help="Model specs (repeatable). Shorthand: cursor/grok-4.5*3",
 )
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
@@ -91,8 +178,15 @@ def _setup_logging(verbose: bool = False) -> None:
     is_flag=True,
     help="Fail closed if pack preflight/bootstrap errors (default: fail-soft)",
 )
-@click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
-def main(
+@click.option(
+    "--flags-required",
+    default=None,
+    type=int,
+    help="Distinct accepted flags needed (default from challenge or 1)",
+)
+@click.pass_context
+def swarm_cmd(
+    ctx: click.Context,
     image: str | None,
     models: tuple[str, ...],
     challenge: str | None,
@@ -107,42 +201,27 @@ def main(
     eval_max_wall_s: float | None,
     eval_max_usd: float | None,
     eval_strict_packs: bool,
-    verbose: bool,
+    flags_required: int | None,
 ) -> None:
-    """Artemis — multi-model CTF solver swarm.
-
-    Flag candidates are confirmed by you locally (no external scoreboard).
-    Run without --challenge to start the full coordinator over challenges/
-    (Ctrl+C to stop).
-    """
+    """Multi-model swarm (CORRECT kills siblings)."""
+    verbose = bool(ctx.obj.get("verbose")) if ctx.obj else False
     _setup_logging(verbose)
 
     settings = Settings()
-    if image:
-        settings.sandbox_image = image
-        settings.sandbox_image_locked = True
-    else:
-        settings.sandbox_image_locked = False
-    settings.max_concurrent_challenges = max_challenges
-    settings.auto_confirm_flags = auto_confirm_flags or settings.auto_confirm_flags
-    if packs:
-        settings.force_packs = list(packs)
-    if eval_out:
-        settings.eval_out = eval_out
-    if eval_max_wall_s is not None:
-        settings.eval_max_wall_s = eval_max_wall_s
-    if eval_max_usd is not None:
-        settings.eval_max_usd = eval_max_usd
-    if eval_strict_packs:
-        settings.eval_strict_packs = True
+    _apply_common_settings(
+        settings,
+        image=image,
+        auto_confirm_flags=auto_confirm_flags,
+        packs=packs,
+        eval_out=eval_out,
+        eval_max_wall_s=eval_max_wall_s,
+        eval_max_usd=eval_max_usd,
+        eval_strict_packs=eval_strict_packs,
+        max_challenges=max_challenges,
+    )
+    model_specs = _expand_models(models)
 
-    model_specs = list(models) if models else list(DEFAULT_MODELS)
-    if models:
-        from backend.models import expand_model_cli_args
-
-        model_specs = expand_model_cli_args(list(models))
-
-    console.print("[bold]Artemis[/bold]")
+    console.print("[bold]Artemis Swarm[/bold]")
     console.print(f"  Models: {', '.join(model_specs)}")
     if image:
         console.print(f"  Image: {settings.sandbox_image} (forced via --image)")
@@ -175,12 +254,14 @@ def main(
         console.print(f"  Eval: {', '.join(bits)}")
     if settings.auto_confirm_flags:
         console.print("  Flag submit: local + auto-confirm (no human prompt)")
+    elif os.environ.get("ARTEMIS_FLAG_CONFIRM", "").strip() in ("1", "true", "yes"):
+        console.print("  Flag submit: local + TUI dialog confirm")
     else:
         console.print("  Flag submit: local + human confirm (y/N on each candidate)")
     console.print()
 
     if challenge:
-        asyncio.run(_run_single(settings, challenge, model_specs, max_challenges))
+        asyncio.run(_run_single(settings, challenge, model_specs, max_challenges, flags_required))
     else:
         asyncio.run(
             _run_coordinator(
@@ -195,16 +276,224 @@ def main(
         )
 
 
+@main.command("chassis")
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def chassis_cmd(args: tuple[str, ...]) -> None:
+    """Pass-through to Artemis TUI with extra args."""
+    from backend.shell.chassis_launch import bun_missing_message, find_bun, try_launch_chassis
+
+    if find_bun() is None:
+        console.print(f"[red]{bun_missing_message()}[/red]")
+        sys.exit(1)
+    if not try_launch_chassis(list(args)):
+        console.print("[red]Chassis launch failed (missing chassis/bin/artemis).[/red]")
+        sys.exit(1)
+
+
+
+# Legacy alias for older scripts/docs (``artemis race`` → same as ``swarm``)
+main.add_command(swarm_cmd, "race")
+
+
+def race_main() -> None:
+    """Entry for ``ctf-solve`` — flat swarm CLI (backward compatible)."""
+    swarm_cmd.main(args=sys.argv[1:], prog_name="ctf-solve", standalone_mode=True)
+
+
+def _harden_supervised_swarm() -> None:
+    """When spawned by the daemon (ARTEMIS_DAEMON_SOCK set), make the swarm
+    survive a broken stdout pipe.
+
+    The supervising daemon holds the swarm's stdout pipe; if the daemon dies,
+    the pipe breaks. Without this, writes (``print``) raise BrokenPipeError /
+    SIGPIPE and can kill the swarm mid-solve. Ignore SIGPIPE and let
+    ``live_log._emit`` swallow pipe errors so the swarm keeps running detached
+    and keeps teeing to the disk log for adopt-on-restart.
+    """
+    if not os.environ.get("ARTEMIS_DAEMON_SOCK"):
+        return
+    import signal
+
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    except (AttributeError, ValueError):
+        pass
+
+
+def _ask_flags_via_daemon(challenge_name: str) -> int | None:
+    """Ask the TUI (via the daemon socket) how many flags are required.
+
+    Returns the count, or None if the daemon is unreachable (caller falls back
+    to the challenge default). Synchronous blocking socket — runs before the
+    swarm event loop starts.
+    """
+    import json as _json
+    import select
+    import socket
+    import time
+    import uuid
+
+    from backend.flags import normalize_flags_required
+
+    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
+    if not sock_path:
+        return None
+    session = os.environ.get("ARTEMIS_SESSION_ID")
+    req_id = uuid.uuid4().hex[:12]
+    deadline = time.monotonic() + 1800
+
+    from backend.agents.live_log import live
+
+    live("artemis", f"FLAGS_ASK id={req_id} default=1 challenge={challenge_name or 'loaded'}")
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        s.connect(sock_path)
+    except OSError:
+        return None
+
+    try:
+        s.sendall(
+            _json.dumps({"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}).encode()
+            + b"\n"
+        )
+        s.sendall(
+            _json.dumps(
+                {
+                    "v": 1,
+                    "id": req_id,
+                    "type": "flags_ask_request",
+                    "request_id": req_id,
+                    "default": 1,
+                    "challenge": challenge_name,
+                    "session": session,
+                }
+            ).encode()
+            + b"\n"
+        )
+        buf = b""
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([s], [], [], 0.25)
+            if not r:
+                continue
+            try:
+                chunk = s.recv(4096)
+            except (TimeoutError, OSError):
+                continue
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                if not raw.strip():
+                    continue
+                try:
+                    msg = _json.loads(raw)
+                except _json.JSONDecodeError:
+                    continue
+                if msg.get("id") == req_id and msg.get("type") in (
+                    "flags_ask_request",
+                    "error",
+                ):
+                    if msg.get("type") == "error" or msg.get("ok") is False:
+                        return None
+                    n = msg.get("n")
+                    if n is not None:
+                        return normalize_flags_required(int(n))
+                    return None
+        return None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _print_writeup(lines: list[str]) -> None:
+    """Emit the solve recap on a channel the TUI renders in the main chat.
+
+    Uses ``emit_line`` so lines are teed to the swarm disk log. The TUI colors
+    Solved-by / headers / steps; keep this channel plain for reliable parsing.
+    """
+    from backend.agents.live_log import emit_line
+
+    for line in lines:
+        emit_line(f"[artemis] summary {line}")
+
+
+def print_swarm_outcome(swarm, result, *, out: Console | None = None) -> None:
+    """Report how the run ended, on lines the TUI can parse.
+
+    ``soft_wrap`` throughout: rich's 80-column wrap used to push the flag onto
+    its own line, leaving the TUI showing a bare ``FLAG FOUND:``.
+    """
+    import os
+
+    from backend.solver_base import FLAG_FOUND, GAVE_UP, QUOTA_ERROR
+
+    con = out or console
+    under_daemon = bool(os.environ.get("ARTEMIS_DAEMON_SOCK", "").strip())
+    if result and result.status == FLAG_FOUND:
+        # Under the TUI daemon, CORRECT already carries the flag — another
+        # FLAG FOUND line just repeats it. Keep the banner for bare CLI runs.
+        if not under_daemon:
+            flag = result.flag or " | ".join(swarm.confirmed_flags)
+            winners = ", ".join(swarm.solved_by_labels())
+            con.print(
+                f"\n[bold green]FLAG FOUND:[/bold green] {flag}"
+                + (f" [dim](solved by {winners})[/dim]" if winners else ""),
+                soft_wrap=True,
+            )
+        if not getattr(swarm, "_how_emitted", False):
+            _print_writeup(swarm.solve_writeup())
+            swarm._how_emitted = True
+    elif result and result.flag and result.status == GAVE_UP:
+        con.print(f"\n[bold yellow]Partial progress:[/bold yellow] {result.flag}", soft_wrap=True)
+        if result.findings_summary:
+            con.print(result.findings_summary[:1500])
+        if not getattr(swarm, "_how_emitted", False):
+            _print_writeup(swarm.solve_writeup())
+            swarm._how_emitted = True
+    elif result and result.status == QUOTA_ERROR:
+        from backend.agents.cursor_runtime import humanize_cursor_error
+
+        msg = humanize_cursor_error(result.findings_summary) or (
+            "Cursor usage limit reached — switch model or wait for reset"
+        )
+        con.print(f"\n[bold yellow]Stopped:[/bold yellow] {msg}")
+    elif result and result.findings_summary:
+        from backend.agents.cursor_runtime import humanize_cursor_error, is_quota_error_message
+
+        summary = result.findings_summary.strip()
+        if is_quota_error_message(summary):
+            con.print(f"\n[bold yellow]Stopped:[/bold yellow] {humanize_cursor_error(summary)}")
+        else:
+            con.print("\n[bold red]No flag accepted.[/bold red]")
+            con.print("[dim]Last findings:[/dim]")
+            con.print(summary[:1500])
+    else:
+        con.print("\n[bold red]No flag found.[/bold red]")
+
+    if swarm.confirmed_flags and not (result and result.status == FLAG_FOUND):
+        con.print(
+            f"[dim]Accepted this run: {' | '.join(swarm.confirmed_flags)}[/dim]", soft_wrap=True
+        )
+
+
 async def _run_single(
     settings: Settings,
     challenge_dir: str,
     model_specs: list[str],
     max_challenges: int,
+    flags_required: int | None = None,
 ) -> None:
     """Run a single challenge with a swarm."""
+    _harden_supervised_swarm()
     from backend.agents.swarm import ChallengeSwarm
     from backend.challenge import load_challenge
     from backend.cost_tracker import CostTracker
+    from backend.flags import normalize_flags_required
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
     max_containers = max_challenges * len(model_specs)
@@ -222,6 +511,16 @@ async def _run_single(
         console.print(f"[red]Failed to load challenge: {e}[/red]")
         sys.exit(1)
 
+    if flags_required is not None:
+        meta.flags_required = normalize_flags_required(flags_required)
+    elif os.environ.get("ARTEMIS_DAEMON_SOCK"):
+        # Daemon-supervised swarm with unknown flags_required: ask the TUI via a
+        # digits dialog pushed through the daemon, then proceed.
+        asked = _ask_flags_via_daemon(meta.name)
+        if asked is not None:
+            meta.flags_required = asked
+            flags_required = asked
+
     console.print(f"[bold]Challenge:[/bold] {meta.name}")
     if meta.connection_info:
         console.print(f"  Endpoint: {meta.connection_info}")
@@ -237,23 +536,7 @@ async def _run_single(
     )
 
     result = await swarm.run()
-    from backend.solver_base import FLAG_FOUND, GAVE_UP
-
-    if result and result.status == FLAG_FOUND:
-        console.print(f"\n[bold green]FLAG FOUND:[/bold green] {result.flag}")
-    elif result and result.flag and result.status == GAVE_UP:
-        console.print(f"\n[bold yellow]Partial progress:[/bold yellow] {result.flag}")
-        if result.findings_summary:
-            console.print(result.findings_summary[:1500])
-    elif result and result.findings_summary:
-        console.print("\n[bold red]No flag accepted.[/bold red]")
-        console.print("[dim]Last findings:[/dim]")
-        console.print(result.findings_summary[:1500])
-    else:
-        console.print("\n[bold red]No flag found.[/bold red]")
-
-    if swarm.confirmed_flags and not (result and result.status == FLAG_FOUND):
-        console.print(f"[dim]Accepted this run: {' | '.join(swarm.confirmed_flags)}[/dim]")
+    print_swarm_outcome(swarm, result, out=console)
 
     console.print("\n[bold]Usage Summary:[/bold]")
     for agent_name in cost_tracker.by_agent:
@@ -315,7 +598,47 @@ async def _run_coordinator(
     console.print(f"\n[bold]Total usage: {results.get('usage_summary', 'n/a')}[/bold]")
 
 
-@click.command()
+@main.command("setup")
+@click.option(
+    "--pack",
+    "packs",
+    multiple=True,
+    help="Pack id to bake (repeatable). Default: common Jeopardy set.",
+)
+@click.option("--skip-core", is_flag=True, help="Do not build/check L0 core image")
+@click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
+def setup_cmd(packs: tuple[str, ...], skip_core: bool, verbose: bool) -> None:
+    """Phase 3: warm L0 + common tool packs on this machine (once).
+
+    \b
+      artemis setup
+      artemis setup --pack mobile --pack pwn
+
+    Extracts donor trees into ~/.cache/ctf-agent/packs so the first solve is
+    faster. Blutter Dart VMs still compile once per Dart version, then are
+    shared across every Artemis session.
+    """
+    _setup_logging(verbose)
+    from backend.sandbox.setup_bake import run_setup
+
+    lines = asyncio.run(run_setup(packs=list(packs) or None, skip_core=skip_core))
+    failed = False
+    for line in lines:
+        if line.startswith("FAIL"):
+            failed = True
+            console.print(f"[red]{line}[/red]")
+        elif line.startswith("INFO "):
+            console.print(f"[cyan]{line[5:]}[/cyan]")
+        else:
+            console.print(f"[green]{line}[/green]")
+    if failed:
+        sys.exit(1)
+    console.print(
+        "[bold]Setup done.[/bold] Start Artemis as usual; packs load from cache."
+    )
+
+
+@main.command("msg")
 @click.argument("message")
 @click.option("--port", default=9400, type=int, help="Coordinator message port")
 @click.option("--host", default="127.0.0.1", help="Coordinator host")

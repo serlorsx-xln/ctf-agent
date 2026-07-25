@@ -21,6 +21,13 @@ build/
 .ruff_cache/
 uv.lock
 
+# Node / Bun (chassis TUI)
+node_modules/
+**/node_modules/
+.turbo/
+*.tsbuildinfo
+*.heapsnapshot
+
 # OS junk
 .DS_Store
 

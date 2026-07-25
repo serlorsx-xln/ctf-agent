@@ -82,6 +82,7 @@ async def main() -> int:
         "forensics",
         "steg",
         "pwn",
+        "ghidra",
         "containers",
         "crypto",
         "mobile",

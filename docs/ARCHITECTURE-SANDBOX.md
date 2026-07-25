@@ -11,10 +11,10 @@
 | 0 local flag accept / tools.txt | ทำแล้ว |
 | 1 L0 `Dockerfile.core` + additive `ensure_pack` + host cache + prefetch | ทำแล้ว |
 | 2 packs (mobile / pwn / crypto / crypto-tools / steg / linux / forensics / web / ml / containers) | ทำแล้ว — ครอบคลุมชุดต้นฉบับ + linux box เบา |
-| 3 Customer CLI setup / bake | ยังไม่ |
+| 3 Customer CLI setup / bake | ทำแล้ว — ``artemis setup`` (L0 + common packs; blutter VM shared) |
 
 **ยกเลิกแล้ว (ไม่ทำ):** L2 Customer Kali bridge · L3 cloud rental worker  
-เหตุผล: ไม่คุ้ม / ไม่ตรงผลิตภัณฑ์ — ลูกค้าใช้ L0+L1 บนเครื่องตัวเอง; แผนไกลเรื่องขาย = **brain บนเซิร์ฟเวอร์เรา + tools บนเครื่องลูกค้า** (ดู `docs/FUTURE-CLI.md` §7) ไม่ใช่ bridge ไป Kali หรือย้าย sandbox ขึ้นคลาวด์
+เหตุผล: ไม่คุ้ม / ไม่ตรงผลิตภัณฑ์ — ลูกค้าใช้ L0+L1 บนเครื่องตัวเอง; แผนไกลเรื่องขาย = **brain บนเซิร์ฟเวอร์เรา + tools บนเครื่องลูกค้า** (deferred SaaS) ไม่ใช่ bridge ไป Kali หรือย้าย sandbox ขึ้นคลาวด์
 
 โค้ดหลัก: `backend/tool_router.py`, `backend/sandbox/` (`ensure_pack`, governor, packs), `sandbox/Dockerfile.core`  
 Cache: `~/.cache/ctf-agent/packs/` (หรือ `CTF_PACK_CACHE`)
@@ -31,13 +31,13 @@ Cache: `~/.cache/ctf-agent/packs/` (หรือ `CTF_PACK_CACHE`)
 1. Agent แก้โจทย์ CTF ได้หลายหมวด: crypto, pwn, web, rev, mobile, forensics, misc
 2. เครื่องลูกค้าต้อง **เบา** — ไม่บังคับโหลด Kali/tools เต็ม (~10–20GB+) ทุกคน
 3. ความสามารถครบผ่าน **L0 + L1 lazy packs** บนเครื่องลูกค้า (ไม่พึ่ง Kali ของลูกค้า)
-4. แผนไกล (CLI/SaaS) แยก brain/hands — ดู `docs/FUTURE-CLI.md` ไม่ใช่ชั้น sandbox L2/L3
+4. แผนไกล (hosted brain / SaaS) แยก brain/hands — deferred; ไม่ใช่ชั้น sandbox L2/L3
 5. **ไม่เปลี่ยน logic ระบบหลัก** ที่ใช้อยู่ตอนนี้
 
 ### 1.2 สิ่งที่ระบบปัจจุบันเป็นอยู่ (ต้องคงไว้)
 
 ```
-ctf-solve / coordinator
+artemis swarm / coordinator
   → สร้าง Docker sandbox ใบเดียวต่อ challenge (หรือ shared ตาม config)
   → agent เรียก tools: bash, read_file, write_file, list_files, submit_flag, …
   → คำสั่งรันใน sandbox
@@ -48,7 +48,7 @@ ctf-solve / coordinator
 
 - Agent ยังคิดว่ามี **sandbox เดียว** และพูดกับมันผ่าน bash/MCP เหมือนเดิม
 - ไม่บังคับให้ agent เลือก image หลายใบตอน runtime (`--image crypto` / `--image pwn` สลับไปมา)
-- Flow `ctf-solve --challenge …` / multi-challenge หลัง setup แล้วยังใช้คำสั่งเดิมได้
+- Flow `artemis swarm --challenge …` / multi-challenge หลัง setup แล้วยังใช้คำสั่งเดิมได้
 
 ### 1.3 ปัญหาที่เจอจากการทดลองจริง
 
@@ -197,7 +197,7 @@ Prefetch สำคัญมาก — ไม่งั้นโจทย์แร
 
 ### 5.1 ไม่เปลี่ยน (คง logic)
 
-- CLI: `ctf-solve` / `artemis`, coordinator loop, `--challenge`, `--models`
+- CLI: `artemis` / `artemis swarm` (alias `ctf-solve`), coordinator loop, `--challenge`, `--models`
   (flags accepted locally — no external scoreboard)
 - Tool surface ของ agent: `bash`, `read_file`, `write_file`, `list_files`, `submit_flag`, …
 - หนึ่ง logical sandbox ต่อบริบทการแก้โจทย์
@@ -231,7 +231,7 @@ Prefetch สำคัญมาก — ไม่งั้นโจทย์แร
 
 ### 6.1 PWNKnight (Flutter APK)
 
-1. `ctf-solve --challenge ./challenges/pwnknight`
+1. `artemis swarm --challenge ./challenges/pwnknight`
 2. Prefetch: เห็น `.apk` → ดึง pack `mobile` (+ `rev` ถ้าจำเป็น)
 3. Agent ใน L0+mobile: `jadx` / blutter / strings ตามปกติ
 4. ไม่ต้องมี Kali เต็มบนเครื่อง
@@ -258,21 +258,22 @@ Prefetch สำคัญมาก — ไม่งั้นโจทย์แร
 [1] ตรวจ Docker / Colima
 [2] pull / bake L0 + donor images ที่โปรไฟล์เลือก (ครั้งเดียวตอนติดตั้ง)
 [3] (optional) prefetch packs ยอดนิยมเข้า host cache: pwn, web, …
-[4] พร้อมรัน artemis / ctf-solve
+[4] พร้อมรัน artemis swarm
 ```
 
 ลูกค้า**ไม่** bake ตอนเปิด challenge — bake/pull อยู่ในขั้นติดตั้งเท่านั้น  
-(ตอนนี้ operator ใช้ `docker build` ตาม README; อนาคต = CLI setup ดู Phase 3)
+(ใช้ ``uv run artemis setup`` หรือ `docker build` ตาม README เป็น fallback)
 
-แผน UX ระยะถัดไป (interactive shell, paste challenge, Flags required?) อยู่ที่ `docs/FUTURE-CLI.md`
+แผน UX ระยะถัดไปเดิม (interactive shell) **shipped แล้ว** เป็น Artemis TUI —
+ดู `README.md` / `chassis/AGENTS.md`
 
-### 7.2 รายวัน (ปัจจุบัน — race)
+### 7.2 รายวัน (ปัจจุบัน — swarm)
 
 ```bash
 export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 cd /path/to/ctf
 set -a && source .env && set +a
-uv run artemis --challenge ./challenges/foo --models cursor/composer-2.5 -v
+uv run artemis swarm --challenge ./challenges/foo --models cursor/composer-2.5 -v
 ```
 
 ไม่ต้องจำว่า image ไหน — default คือ L0 + router
@@ -328,29 +329,29 @@ Lazy packs (L0 + L1) ชนะเพราะครบเงื่อนไข�
 - [x] `containers` (podman / buildah — best-effort)
 - [x] `pwn` ขยาย angr + radare2
 - [x] `linux` (linpeas / pspy / ffuf / katana / smbclient / sshpass / impacket / ldap-utils / certipy-ad / bloodhound-python / NetExec)
-- [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev (local: bake `pwn`/`ghidra` แล้ว; CI + CLI setup → Phase 3)
+- [ ] ทดสอบโจทย์จริงทีละหมวด + build donors บน CI/เครื่อง dev (local bake ผ่าน ``artemis setup`` ได้แล้ว; CI automation ยังไม่บังคับ)
 - [x] ขนาด cache + eviction (`CTF_PACK_CACHE_MAX_GB`, LRU via `.accessed`)
 - [x] RAM floor ต่อ pack + ลบ fat image / `Dockerfile.sage` ออกจาก tree
 
-### Phase 3 — Customer CLI setup / bake (อนาคต)
+### Phase 3 — Customer CLI setup / bake
 เป้าหมาย: ลูกค้าไม่ต้องจำ `docker build -f …` — คำสั่งติดตั้งครั้งเดียวจบ
 
-- [ ] CLI setup ใหม่ (เช่น `uv run artemis-setup` หรือ `artemis --setup`) แยกจาก solve loop
-- [ ] ตรวจ Docker / Colima + แนะนำ `DOCKER_HOST` บน Mac
-- [ ] Bake หรือ pull ตามโปรไฟล์:
-      - ขั้นต่ำ: `ctf-sandbox-core` (L0)
-      - Standard: + donors ที่ใช้บ่อย (`pwn`, `ghidra`, `mobile`, …)
-      - Full (optional): + `crypto` / `crypto-tools` / `steg` / `linux` (ใหญ่ / ช้า)
-- [ ] Progress ชัด + idempotent (มี image แล้ว skip; อัปเดตเมื่อ digest เปลี่ยน)
-- [ ] Lock ข้าม process ตอน bake/pull pack เดียวกัน (สอง CLI setup พร้อมกัน → ตัวหนึ่งทำ อีกตัวรอ) — ต่อจาก flock ของ pack cache ที่มีอยู่
-- [ ] ไม่ bake ตอน solve รายวัน — solve ใช้ image/cache ที่พร้อมแล้วเท่านั้น (missing donor = warning + fail-soft เหมือนปัจจุบัน จนกว่า setup จะบังคับ)
-- [ ] เอกสาร onboarding ลูกค้าชี้ไป CLI setup แทนรายการ `docker build` ใน README (README คงไว้เป็น fallback / CI)
+- [x] CLI setup: ``uv run artemis setup`` (และ ``--pack`` / ``--skip-core``) — แยกจาก solve loop
+- [x] ตรวจ Docker / Colima + แนะนำ `DOCKER_HOST` บน Mac (`probe_docker_env` ใน setup)
+- [x] Bake ตามรายการ pack: ขั้นต่ำ L0 + default common set (`mobile`/`pwn`/`ghidra`/…); ขยายด้วย ``--pack``
+- [x] Idempotent + digest stale check (Dockerfile hash ใน ``.ready``; mismatch → rematerialize)
+- [x] Lock ข้าม process ตอน bake (reuse pack extract flock — สอง `artemis setup` รอคิว)
+- [x] ไม่ bake ตอน solve รายวัน — solve ใช้ image/cache ที่พร้อมแล้ว (missing donor = warning + fail-soft)
+- [x] เอกสารชี้ ``artemis setup`` (README + `.env.example`); รายการ `docker build` คงเป็น fallback / CI
 
-Interactive Ask/Agent shell + hosted-brain SaaS = แผนผลิตภัณฑ์ใน `docs/FUTURE-CLI.md` (ไม่ใช่เฟส sandbox นี้)
+Interactive Ask/Agent shell is retired — product is the Artemis TUI single solve flow (`uv run artemis`). Hosted-brain SaaS remains deferred. CI bake automation still optional (local ``artemis setup`` is the customer path).
 
 ---
 
-## 10. Config ร่าง (อนาคต)
+## 10. Config ร่าง (อนาคต — ยังไม่มี reader ในโค้ด)
+
+ค่าด้านล่างเป็นร่างผลิตภัณฑ์เท่านั้น ยกเว้นที่ระบุว่า live แล้วใน `.env.example` /
+`backend/tool_router.py` (`CTF_PACK_CACHE`, `CTF_PACK_STATE`, `CTF_PACK_BIND`, …)
 
 ```bash
 # .env — ร่าง ไม่ได้บังคับใช้ตอนนี้
@@ -358,9 +359,8 @@ Interactive Ask/Agent shell + hosted-brain SaaS = แผนผลิตภัณ
 # L0
 SANDBOX_IMAGE=ctf-sandbox-core
 
-# L1 packs
+# L1 packs — NOT implemented yet (no os.environ readers):
 CTF_PACK_REGISTRY=https://example.com/ctf-packs   # หรือ ghcr.io/...
-CTF_PACK_CACHE=$HOME/.cache/ctf-agent/packs
 CTF_PACK_AUTO=1                                   # prefetch + ensure on missing
 CTF_PACK_PREFETCH=1
 ```
@@ -373,6 +373,12 @@ CTF_PACK_PREFETCH=1
 2. **Arch mismatch** — pack ต้องแยก `arm64` / `amd64`; blutter/Chrome อ่อนไหวมาก  
 3. **False sense of “ครบ”** — มี pack แล้วยังต้องโมเดลดี + ไม่ accept flag ปลอม  
 4. **blutter ต่อ Dart version** — pack `mobile` ต้อง version ตาม snapshot hash (เช่น `1ce86630…` ของ PWNKnight)
+   blutter จะ fetch + compile Dart SDK ของ version นั้นเองในรันแรก (10–30 นาที) ผลลัพธ์เก็บบน host ที่
+   `~/.cache/ctf-agent/pack-state/mobile/<arch>/var/cache/ctf-blutter` (**shared ข้าม session** —
+   ไม่แยกตาม `ses_…`) bind RW เข้า container ทุกตัว จึงคอมไพล์ครั้งเดียวต่อ Dart version
+   หลาย agent ที่รันพร้อมกัน share cache นี้ จึง serialize ด้วย `flock` ใน wrapper กัน build ชนกัน
+   ลบ cache ก้อนนี้ = กลับไปคอมไพล์ใหม่ (ตั้ง `CTF_PACK_STATE` เพื่อย้ายที่เก็บ)
+   Warm packs ล่วงหน้า: `artemis setup` (Phase 3)
 
 ---
 
@@ -452,7 +458,7 @@ Agent logic เดิม (บาง)
 - **ไม่เปลี่ยน** วิธีที่ agent คิดและเรียก tools  
 - **เปลี่ยน** ชั้นรันให้ฉลาด: เบาเป็นค่าเริ่ม ครบแบบ on-demand  
 - **ทุกคน** → L0 + L1 (ไม่มี Kali bridge / ไม่ย้าย sandbox ขึ้นคลาวด์)  
-- แผน CLI / hosted brain → `docs/FUTURE-CLI.md`  
+- แผน hosted brain / SaaS → deferred (ไม่ใช่เฟส sandbox นี้)  
 - Implement ตามเฟสในข้อ 9 — **อย่ากระโดดไปใส่ skill อ้วนแทน packs**
 
 ---
@@ -473,6 +479,6 @@ Agent logic เดิม (บาง)
 | Image ที่พิสูจน์ mobile | `ctf-sandbox-mobile` (blutter Dart 3.10.4 prebuilt) |
 | โจทย์ที่โชว์ช่องว่าง tools | `challenges/pwnknight`, `challenges/filtered-reality` |
 | โจทย์ที่แกนเบาพอ | `challenges/do-you-have-good-eyes` |
-| เอกสารนี้ | สถาปัตย์ล็อก L0+L1 — implement ตาม Phase 0→3; ผลิตภัณฑ์ CLI → `FUTURE-CLI.md` |
+| เอกสารนี้ | สถาปัตย์ล็อก L0+L1 — implement ตาม Phase 0→3; ผลิตภัณฑ์ TUI → `README.md` / `chassis/` |
 
 เมื่อ implement แล้ว ให้อัปเดตสถานะจริงของแต่ละ Phase และลิงก์ไปยัง Dockerfile / pack manifest ที่สร้างขึ้น

@@ -54,7 +54,7 @@ def write_eval_summary(
     steps: int,
     infra_recoveries: int,
     preflight_ms: float,
-    cost_usd: float,
+    cost_usd: float | None,
     flag: str | None,
 ) -> None:
     """Write JSON eval artifact; ``agent_failed`` excludes infra-only deaths."""
