@@ -82,6 +82,25 @@ def _release_donor_flock(fd: int) -> None:
         os.close(fd)
 
 
+async def _donor_image_functional(pack_id: str, image: str) -> bool:
+    """True when a runtime-capable donor image has the baked tools we expect."""
+    if pack_id != "pwn":
+        return True
+    from backend.sandbox.docker_client import _docker_cli
+
+    rc, _, _ = await _docker_cli(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "python3",
+        image,
+        "-c",
+        "import angr, pwn, keystone",
+        timeout_s=120,
+    )
+    return rc == 0
+
+
 async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
     """Ensure the donor Docker image for ``pack_id`` exists.
 
@@ -99,12 +118,25 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
     if not dockerfile.is_file():
         return False, f"Dockerfile missing: {dockerfile}"
 
+    if pack_id == "pwn":
+        from backend.sandbox.setup_bake import ensure_core_image
+
+        ok, msg = await ensure_core_image()
+        if not ok:
+            return False, msg
+
     from backend.sandbox.docker_client import _docker_cli
 
-    # Fast path: already built.
+    # Fast path: already built and (for pwn) has the baked runtime stack.
     rc, _, _ = await _docker_cli("image", "inspect", image, timeout_s=30)
     if rc == 0:
-        return True, f"donor {image} already present"
+        if await _donor_image_functional(pack_id, image):
+            return True, f"donor {image} already present"
+        logger.info(
+            "Donor %s exists but lacks baked pwn runtime — rebuilding",
+            image,
+        )
+        await _docker_cli("rmi", "-f", image, timeout_s=120)
 
     async with _lock_for(pack_id):
         fd = await asyncio.to_thread(_acquire_donor_flock, pack_id)
@@ -112,7 +144,13 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
             # Another waiter / process may have finished the build.
             rc, _, _ = await _docker_cli("image", "inspect", image, timeout_s=30)
             if rc == 0:
-                return True, f"donor {image} already present"
+                if await _donor_image_functional(pack_id, image):
+                    return True, f"donor {image} already present"
+                logger.info(
+                    "Donor %s exists but lacks baked pwn runtime — rebuilding",
+                    image,
+                )
+                await _docker_cli("rmi", "-f", image, timeout_s=120)
 
             timeout_s = int(
                 os.environ.get("ARTEMIS_DONOR_BUILD_TIMEOUT_S", str(_DEFAULT_BUILD_TIMEOUT_S))

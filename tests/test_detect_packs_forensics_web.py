@@ -143,6 +143,7 @@ def test_pwn_pack_includes_x86_cross_binutils():
     boot = bootstrap_script("pwn")
     assert "x86_64-linux-gnu-objdump" in boot
     assert "pip packages already present; skipping pip" in boot
+    assert "gem packages already present; skipping gem install" in boot
     assert "/usr/local/bin/objdump" in boot
     assert "gdb-multiarch" in boot
     assert "/lib/x86_64-linux-gnu/libc.so.6" in boot

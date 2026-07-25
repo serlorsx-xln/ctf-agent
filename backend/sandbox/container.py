@@ -270,7 +270,34 @@ class DockerSandbox:
 
             self._binds = binds
 
-            self.image = await self._resolve_l0_image(self.image)
+            from backend.tool_router import PREFETCH_RUNTIME_IMAGES, resolve_runtime_l0_image
+
+            runtime_pref = resolve_runtime_l0_image(prefetch, self.image)
+            if runtime_pref in PREFETCH_RUNTIME_IMAGES.values():
+                from backend.sandbox.donor_build import ensure_donor_image
+
+                pack_id = next(
+                    (p for p, img in PREFETCH_RUNTIME_IMAGES.items() if img == runtime_pref),
+                    None,
+                )
+                if pack_id:
+                    ok, build_msg = await ensure_donor_image(pack_id)
+                    if not ok:
+                        logger.warning(
+                            "Runtime image %s unavailable (%s); falling back to core",
+                            runtime_pref,
+                            build_msg,
+                        )
+                        runtime_pref = "ctf-sandbox-core"
+                    else:
+                        logger.info(
+                            "Using baked runtime %s for prefetch %s (%s)",
+                            runtime_pref,
+                            sorted(prefetch),
+                            build_msg,
+                        )
+            self._runtime_l0_image = runtime_pref
+            self.image = await self._resolve_l0_image(runtime_pref)
 
             from backend.host_proxy import (
                 acquire_host_proxy,
@@ -301,10 +328,18 @@ class DockerSandbox:
                 try:
                     for pack in prefetch:
                         pack_t0 = time.monotonic()
+                        if pack == "pwn" and "pwn" in (self.image or ""):
+                            hint = "baked pwn runtime (usually seconds)"
+                        elif pack == "ghidra":
+                            hint = "ghidra apt/pip ~3–5 min on fresh core"
+                        elif pack == "pwn":
+                            hint = "pwn pip/angr ~5–8 min on fresh core"
+                        else:
+                            hint = "usually under 2 min"
                         logger.info(
-                            "Prefetch bootstrap pack=%s (first container: pwn ~5–8 min, "
-                            "ghidra ~3–5 min; later packs usually faster)…",
+                            "Prefetch bootstrap pack=%s (%s)…",
                             pack,
+                            hint,
                         )
                         msg = await self.ensure_pack(pack, refresh_tools=False)
                         logger.info(

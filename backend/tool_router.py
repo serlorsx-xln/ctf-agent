@@ -540,6 +540,14 @@ _IMPORT_FAIL_RE = re.compile(
 # Default L0 image (packs attach on demand).
 DEFAULT_L0_CANDIDATES = ("ctf-sandbox-core",)
 
+# Prefetched packs whose donor image is also a valid L0 runtime (baked apt/pip/gem).
+# Copy-only donors (ghidra, crypto trees) stay additive on core.
+PREFETCH_RUNTIME_IMAGES: dict[str, str] = {
+    "pwn": "ctf-sandbox-pwn",
+}
+
+RUNTIME_L0_IMAGES = frozenset({"ctf-sandbox-core", *PREFETCH_RUNTIME_IMAGES.values()})
+
 # Python import name → pack (auto-ensure on ModuleNotFoundError).
 _IMPORT_TO_PACK: dict[str, str] = {
     "angr": "pwn",
@@ -1115,6 +1123,23 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
     return [p for p in _PACK_PRIORITY if p in packs]
 
 
+def resolve_runtime_l0_image(
+    prefetch: Iterable[str],
+    preferred: str | None = None,
+) -> str:
+    """Choose L0 runtime from prefetch — use baked pack runtimes when available."""
+    pref = {p.strip() for p in (prefetch or []) if (p or "").strip()}
+    base = (preferred or "").strip() or "ctf-sandbox-core"
+    if base not in RUNTIME_L0_IMAGES:
+        return base
+    for pack_id in _PACK_PRIORITY:
+        if pack_id in pref:
+            runtime = PREFETCH_RUNTIME_IMAGES.get(pack_id)
+            if runtime:
+                return runtime
+    return "ctf-sandbox-core"
+
+
 def resolve_sandbox_image(
     challenge_dir: str | Path,
     *,
@@ -1138,8 +1163,11 @@ def apply_router_to_settings(settings, challenge_dir: str | Path):
         return settings.sandbox_image, packs
 
     image = getattr(settings, "sandbox_image", None) or "ctf-sandbox-core"
-    # Any pack donor image — never use these as the live L0 runtime.
-    donor_only = {spec.image for spec in PACK_SPECS.values() if spec.image != "ctf-sandbox-core"}
+    donor_only = {
+        spec.image
+        for spec in PACK_SPECS.values()
+        if spec.image not in RUNTIME_L0_IMAGES
+    }
     if image in donor_only:
         logger.warning(
             "sandbox_image=%s looks like a pack donor; preferring L0 core",
@@ -1447,8 +1475,13 @@ def bootstrap_script(pack_id: str) -> str:
         ]
     if spec.gems:
         gems = " ".join(shlex.quote(g) for g in spec.gems)
+        gem_ok = " && ".join(f"command -v {shlex.quote(g)} >/dev/null 2>&1" for g in spec.gems)
         lines += [
-            f"command -v gem >/dev/null 2>&1 && gem install {gems} --no-document || true",
+            f"if {gem_ok}; then",
+            "  echo 'gem packages already present; skipping gem install'",
+            "else",
+            f"  command -v gem >/dev/null 2>&1 && gem install {gems} --no-document || true",
+            "fi",
         ]
     for dest, src in spec.symlinks:
         lines.append(f"ln -sfn {shlex.quote(src)} {shlex.quote(dest)} || true")
