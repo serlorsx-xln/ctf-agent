@@ -29,6 +29,7 @@ DONOR_BUILD_SPECS: dict[str, tuple[str, str]] = {
 _DEFAULT_BUILD_TIMEOUT_S = 1800
 
 _build_locks: dict[str, asyncio.Lock] = {}
+_donor_functional_cache: dict[str, bool] = {}
 
 
 def repo_root() -> Path:
@@ -86,6 +87,10 @@ async def _donor_image_functional(pack_id: str, image: str) -> bool:
     """True when a runtime-capable donor image has the baked tools we expect."""
     if pack_id != "pwn":
         return True
+    cache_key = f"{pack_id}:{image}"
+    cached = _donor_functional_cache.get(cache_key)
+    if cached is not None:
+        return cached
     from backend.sandbox.docker_client import _docker_cli
 
     rc, _, _ = await _docker_cli(
@@ -98,7 +103,9 @@ async def _donor_image_functional(pack_id: str, image: str) -> bool:
         "import angr, pwn, keystone",
         timeout_s=120,
     )
-    return rc == 0
+    ok = rc == 0
+    _donor_functional_cache[cache_key] = ok
+    return ok
 
 
 async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:

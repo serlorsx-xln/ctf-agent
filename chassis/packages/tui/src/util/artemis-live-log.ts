@@ -85,6 +85,9 @@ export function looksLikeWriteupDump(text: string): boolean {
   if (/(?:#{1,3}\s*)?Solution\s+Summary\b/i.test(t)) return true
   if (/\*\*FLAG\s*:/i.test(t) && /\d{1,2}\.\s/.test(t)) return true
   if (/FLAG\s*:\s*(?:flag|ctf|archa)\{/i.test(t) && /Solution\s+Summary/i.test(t)) return true
+  if (/^The flag was accepted\b/i.test(t)) return true
+  if (/\*\*XOR decryption\*\*/i.test(t)) return true
+  if (/(?:^|\s)\d{1,2}\.\s+\*\*[^*]+\*\*\s*[—\-–]/i.test(t)) return true
   return false
 }
 
@@ -564,6 +567,24 @@ export function isGlobalQuotaOutcome(ev: ArtemisEvent): boolean {
 
 export function hasGlobalQuotaOutcome(events: ArtemisEvent[]): boolean {
   return events.some(isGlobalQuotaOutcome)
+}
+
+/** After CORRECT the prose recap owns the summary — hide late ai/think noise. */
+export function dropPostSolveAgentChatter(events: ArtemisEvent[]): ArtemisEvent[] {
+  let cut = -1
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i]!
+    if (
+      ev.kind === "outcome" &&
+      ev.level === "success" &&
+      /CORRECT|Challenge complete/i.test(ev.text)
+    ) {
+      cut = i
+      break
+    }
+  }
+  if (cut < 0) return events
+  return events.filter((ev, i) => i <= cut || (ev.kind !== "ai" && ev.kind !== "think"))
 }
 
 /** Terminal solve outcome — spinner must stop even if swarm_exit is delayed.

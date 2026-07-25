@@ -375,10 +375,7 @@ class ChallengeSwarm:
             if display.startswith(("ACCEPTED", "CORRECT")):
                 self.confirmed_flags.append(normalized)
                 self.flag_credits[normalized] = model_spec
-                # Snapshot now: after the race is cut short the solver may be
-                # cancelled before it writes a prose summary. Prefer the model's
-                # own note when it wrote one; always fall back to the tool trail
-                # so "How the flag was found" is never just a name and a step count.
+                # Snapshot usable prose only — command trails never go in recap.
                 from backend.action_log import notes_from_actions
 
                 solver = self.solvers.get(model_spec)
@@ -512,46 +509,29 @@ class ChallengeSwarm:
                     await self.message_bus.post(runner_id, note[:500])
 
             if result.status == FLAG_FOUND and self.confirmed_flag:
-                # Solved-by already emitted on the completing submit. Try a short
-                # narrative writeup, but NEVER block teardown on Cursor SDK —
-                # a hung writeup left Stopping + empty main for hours.
-                from backend.writeup import capture_solver_writeup, is_usable_narrative
+                # Narrative writeup only — no command-trail recap.
+                from backend.writeup import (
+                    capture_solver_writeup,
+                    clean_how_lines,
+                    is_usable_narrative,
+                )
 
-                writeup = ""
                 existing = (self.flag_notes.get(runner_id) or "").strip()
-                # submit_flag often runs *before* the model emits its Solution
-                # Summary AI — so flag_notes may still be the command trail.
-                # Prefer late ``_findings`` when that is a usable narrative.
-                from backend.writeup import clean_how_lines
-
                 late = str(getattr(solver, "_findings", "") or "").strip()
                 if is_usable_narrative(late) and (
                     not is_usable_narrative(existing) or len(late) > len(existing) + 40
                 ):
                     existing = "\n".join(clean_how_lines(late)).strip()
                     self.flag_notes[runner_id] = existing
-                # Skip the extra Cursor turn only when we already have a usable
-                # *narrative*. A long command-trail note must not block writeup.
+
+                writeup = ""
                 if not is_usable_narrative(existing):
-                    writeup_task = asyncio.create_task(capture_solver_writeup(solver))
-                    done, _pending = await asyncio.wait({writeup_task}, timeout=12.0)
-                    if writeup_task in done:
-                        try:
-                            writeup = writeup_task.result() or ""
-                        except Exception:
-                            writeup = ""
-                    else:
-                        writeup_task.cancel()
-                        try:
-                            await asyncio.wait_for(writeup_task, timeout=0.5)
-                        except (TimeoutError, asyncio.CancelledError, Exception):
-                            pass
-                self.cancel_event.set()
+                    writeup = await capture_solver_writeup(solver)
                 if writeup and is_usable_narrative(writeup):
                     self.flag_notes[runner_id] = writeup
                     self.findings[runner_id] = writeup[:500]
-                # One How: block now so a hung exit path still leaves a trail.
                 self._emit_how_recap()
+                self.cancel_event.set()
                 if result.flag != self.confirmed_flag:
                     result = SolverResult(
                         flag=self.confirmed_flag,
@@ -909,7 +889,7 @@ class ChallengeSwarm:
         emit_line(f"[artemis] summary Solved by {who}")
 
     def _emit_how_recap(self) -> None:
-        """Stream How: once (narrative if usable, else command trail)."""
+        """Stream narrative writeup once (no command trail)."""
         if self._how_emitted:
             return
         from backend.agents.live_log import emit_line
@@ -924,15 +904,10 @@ class ChallengeSwarm:
         self._how_emitted = True
 
     def solve_writeup(self) -> list[str]:
-        """Operator recap: who solved it, and how (narrative XOR commands).
-
-        Flags are only on the CORRECT outcome — repeating them here cluttered
-        the TUI. Facts only — recorded state, never guessed.
-        """
+        """Operator recap: who solved it and a narrative writeup only."""
         flags = list(self.confirmed_flags)
         if not flags:
             return []
-        from backend.action_log import command_how_lines
         from backend.writeup import clean_how_lines, is_usable_narrative
 
         specs = dict(assign_runner_ids(self.model_specs))
@@ -942,7 +917,10 @@ class ChallengeSwarm:
         lines = [f"Solved by {who}"]
         shared = len(winners) > 1
         for rid in winners:
-            note = (self.flag_notes.get(rid) or self.findings.get(rid) or "").strip()
+            note = (self.flag_notes.get(rid) or "").strip()
+            finding = (self.findings.get(rid) or "").strip()
+            if not is_usable_narrative(note) and is_usable_narrative(finding):
+                note = finding
             if shared:
                 lines.append(f"How ({key[rid]}):")
             else:
@@ -954,28 +932,7 @@ class ChallengeSwarm:
                         continue
                     lines.append(f"  {piece}")
                 continue
-            # Unusable / missing narrative → command trail only.
-            solver = self.solvers.get(rid)
-            actions = list(getattr(solver, "_action_log", []) or []) if solver else []
-            cmds = command_how_lines(actions)
-            if not cmds and note:
-                import re as _re
-
-                for raw in note.splitlines():
-                    text = raw.strip()
-                    if _re.match(r"^\d+\.\s", text) and "submit_flag:" not in text:
-                        cmds.append(text)
-            if cmds:
-                for cmd in cmds:
-                    lines.append(f"  {cmd}")
-                continue
-            short = clean_how_lines(note) if note else []
-            if short:
-                for piece in short:
-                    if piece.strip():
-                        lines.append(f"  {piece}")
-            else:
-                lines.append("  (no writeup or command trail recorded)")
+            lines.append("  (no writeup recorded)")
         while lines and not lines[-1].strip():
             lines.pop()
         return lines[:120]

@@ -1,8 +1,7 @@
-"""Compact per-solver action log — fallback for the end-of-run solve recap.
+"""Compact per-solver action log — records tool calls during a solve.
 
-After CORRECT the swarm prefers a narrative writeup from the winning solver
-(``backend.writeup``). This module records tool calls so a silent writeup still
-has a factual trail for ``notes_from_actions``.
+Action lines are kept for debugging/tracing only. The operator recap uses
+narrative writeups from ``backend.writeup``, not numbered command dumps.
 """
 
 from __future__ import annotations
@@ -55,42 +54,21 @@ def append_action(log: list[str], name: str, args: Mapping[str, Any] | str | Non
         del log[: len(log) - _MAX_ENTRIES]
 
 
-def command_how_lines(actions: Sequence[str], *, limit: int = 24) -> list[str]:
-    """Numbered tool trail for How: — no submit_flag (flag already on CORRECT)."""
-    useful = [
-        a
-        for a in actions
-        if a and not a.startswith("submit_flag:") and not a.lower().startswith("submit_flag:")
-    ]
-    if not useful:
-        return []
-    shown = useful if len(useful) <= limit else useful[-limit:]
-    start = len(useful) - len(shown) + 1
-    return [f"{i}. {line}" for i, line in enumerate(shown, start=start)]
-
-
 def notes_from_actions(
     actions: Sequence[str],
     *,
     prose: str = "",
 ) -> str:
-    """Build the note block stored on an accepted flag.
-
-    Prefer a usable narrative XOR the command trail — never both. Mixing a
-    jammed model summary with Steps: dumps is what made the TUI look cluttered.
-    """
+    """Return early solver prose for flag_notes — never a command trail."""
     from backend.writeup import clean_how_lines, is_usable_narrative
 
     cleaned = _useful_prose(prose)
     if cleaned and is_usable_narrative(cleaned):
         return "\n".join(clean_how_lines(cleaned)).strip()
-
-    trail = command_how_lines(actions)
-    if trail:
-        return "\n".join(trail).strip()
-    # Last resort: keep non-usable prose if it is the only signal.
     if cleaned:
-        return "\n".join(clean_how_lines(cleaned) or [cleaned]).strip()
+        lines = clean_how_lines(cleaned)
+        if lines:
+            return "\n".join(lines).strip()
     return ""
 
 

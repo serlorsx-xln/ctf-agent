@@ -94,7 +94,7 @@ def test_writeup_credits_the_winner_with_the_box_label():
     assert not any("42 steps" in ln for ln in lines)
 
 
-def test_writeup_falls_back_to_commands_when_narrative_is_junk():
+def test_writeup_shows_no_writeup_when_only_commands_were_recorded():
     swarm = _swarm(["cursor/grok-4.5"])
     swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
     swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
@@ -108,9 +108,8 @@ def test_writeup_falls_back_to_commands_when_narrative_is_junk():
     lines = swarm.solve_writeup()
 
     assert "How:" in lines
-    assert "  1. bash: tshark -r cap.pcapng" in lines
-    assert not any("submit_flag:" in ln for ln in lines)
-    assert not any("CORRECT" in ln for ln in lines)
+    assert "  (no writeup recorded)" in lines
+    assert not any("bash:" in ln for ln in lines)
 
 
 def test_writeup_prefers_late_findings_over_command_trail():
@@ -179,12 +178,12 @@ def test_writeup_attributes_each_flag_when_two_agents_contributed():
     assert not any(ln.strip().startswith("Flag:") for ln in lines)
 
 
-def test_writeup_says_when_there_is_no_trail():
+def test_writeup_says_when_there_is_no_narrative():
     swarm = _swarm(["cursor/default"])
     swarm.confirmed_flags = ["flag{x}"]
     swarm.flag_credits = {"flag{x}": "cursor/default"}
     lines = swarm.solve_writeup()
-    assert "  (no writeup or command trail recorded)" in lines
+    assert "  (no writeup recorded)" in lines
 
 
 def test_writeup_keeps_duplicate_runner_suffix():

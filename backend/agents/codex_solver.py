@@ -699,7 +699,9 @@ class CodexSolver:
         if not text or text == (before or "").strip():
             return ""
         # Recap reaches the TUI via ``[artemis] summary`` — skip live writeup spam.
-        return text
+        from backend.writeup import normalize_writeup_text
+
+        return normalize_writeup_text(text)
 
     def _result(self, status: str) -> SolverResult:
         self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed)

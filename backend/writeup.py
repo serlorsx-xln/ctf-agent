@@ -13,8 +13,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Keep short — Cursor writeup turns have hung past wait_for and left Stopping.
-WRITEUP_TIMEOUT_S = 20.0
+# Cursor/Grok writeup turns need headroom; swarm waits the full timeout.
+WRITEUP_TIMEOUT_S = 45.0
 
 WRITEUP_PROMPT = """The flag was accepted (CORRECT). Write a CTF writeup for the human operator.
 
@@ -281,7 +281,7 @@ def is_command_trail(text: str) -> bool:
 
 
 def is_usable_narrative(text: str) -> bool:
-    """True when cleaned prose is worth showing instead of the command trail."""
+    """True when cleaned prose is worth showing in the operator recap."""
     if is_command_trail(text):
         return False
     collapsed = collapse_prose_fragments(text)

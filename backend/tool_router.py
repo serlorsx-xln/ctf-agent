@@ -1146,7 +1146,7 @@ def resolve_sandbox_image(
     default_image: str = "ctf-sandbox-core",
     locked_image: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Always keep L0 as the runtime image; packs are additive later."""
+    """Return default L0 tag and detected packs (runtime may upgrade at container start)."""
     packs = detect_packs(challenge_dir)
     if locked_image:
         return locked_image, packs
@@ -1155,7 +1155,7 @@ def resolve_sandbox_image(
 
 
 def apply_router_to_settings(settings, challenge_dir: str | Path):
-    """Record detected packs; do not swap sandbox_image to a pack image."""
+    """Record detected packs; runtime L0 may upgrade during container preflight."""
     locked = bool(getattr(settings, "sandbox_image_locked", False))
     packs = detect_packs(challenge_dir)
     settings.detected_packs = packs

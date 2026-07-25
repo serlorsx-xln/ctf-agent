@@ -43,7 +43,7 @@ import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { formatDuration } from "../../util/format"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { hasAgentActivity, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, parseArtemisEvents } from "../../util/artemis-live-log"
+import { hasAgentActivity, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, dropPostSolveAgentChatter, parseArtemisEvents } from "../../util/artemis-live-log"
 import {
   agentPreviews,
   globalSwarmEvents,
@@ -2415,11 +2415,13 @@ function ArtemisSwarm(props: ToolProps) {
 
   const feedEvents = createMemo(() => {
     const f = focus()
+    let list = visible()
     if (!f) {
-      if (!multiAgent()) return visible()
-      return globalSwarmEvents(visible())
+      list = multiAgent() ? globalSwarmEvents(list) : list
+    } else {
+      list = partitionEventsByAgent(list, f)
     }
-    return partitionEventsByAgent(visible(), f)
+    return dropPostSolveAgentChatter(list)
   })
   const emptyAgentHint = createMemo(() => {
     if (!focus()) return null

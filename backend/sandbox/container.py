@@ -296,7 +296,6 @@ class DockerSandbox:
                             sorted(prefetch),
                             build_msg,
                         )
-            self._runtime_l0_image = runtime_pref
             self.image = await self._resolve_l0_image(runtime_pref)
 
             from backend.host_proxy import (

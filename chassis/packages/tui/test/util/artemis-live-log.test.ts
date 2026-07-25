@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   coalesceEvents,
   dedupeEvents,
+  dropPostSolveAgentChatter,
   expandSummaryLine,
   hasAgentActivity,
   hasTerminalSolveOutcome,
@@ -153,6 +154,26 @@ describe("parseArtemisEvents", () => {
     const raw =
       "[composer-2.5 ai] The flag was accepted. **FLAG: flag{x}** ## Solution Summary 1. DNS 2. TCP"
     expect(parseArtemisEvents(raw).filter((e) => e.kind === "ai")).toHaveLength(0)
+  })
+
+  test("drops short post-accept AI lines (recap owns the summary)", () => {
+    const raw = "[composer-2.5 ai] The flag was accepted. I will output it on its own line."
+    expect(parseArtemisEvents(raw).filter((e) => e.kind === "ai")).toHaveLength(0)
+  })
+
+  test("drops post-solve ai/think after CORRECT on the main feed", () => {
+    const events = parseArtemisEvents(
+      'CORRECT — accepted "flag{x}". Challenge complete for this run.\n' +
+        "[composer-2.5 ai] The flag was accepted.\n" +
+        "[composer-2.5 think] **XOR decryption** — step detail\n" +
+        "[artemis] summary Solved by composer-2.5\n" +
+        "[artemis] summary How:\n" +
+        "[artemis] summary   Solution summary",
+    )
+    const trimmed = dropPostSolveAgentChatter(events)
+    expect(trimmed.some((e) => e.kind === "ai")).toBe(false)
+    expect(trimmed.some((e) => e.kind === "think")).toBe(false)
+    expect(trimmed.some((e) => e.kind === "summary")).toBe(true)
   })
 
   test("drops token-streamed writeup deltas (summary owns the recap)", () => {

@@ -1027,16 +1027,10 @@ class CursorSolver:
 
         if self._agent is None:
             return ""
-        # Swarm may have cancelled siblings; if we are already cancelled, skip the
-        # extra Cursor turn — it hangs easily and the sticky summary already ran.
-        if self.cancel_event is not None and self.cancel_event.is_set():
-            return ""
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
         run = await self._agent.send(WRITEUP_PROMPT)
         async for message in run.stream():
-            if self.cancel_event is not None and self.cancel_event.is_set():
-                break
             if isinstance(message, SDKAssistantMessage):
                 for block in message.message.content:
                     text = getattr(block, "text", None)
@@ -1046,7 +1040,9 @@ class CursorSolver:
                         # ``[agent writeup] x`` lines drown CORRECT / summary and
                         # invent phantom status on the main page.
         try:
-            await asyncio.wait_for(run.wait(), timeout=5.0)
+            from backend.writeup import WRITEUP_TIMEOUT_S
+
+            await asyncio.wait_for(run.wait(), timeout=WRITEUP_TIMEOUT_S)
         except TimeoutError:
             pass
         from backend.writeup import join_streamed_text_parts
