@@ -113,6 +113,50 @@ def test_writeup_falls_back_to_commands_when_narrative_is_junk():
     assert not any("CORRECT" in ln for ln in lines)
 
 
+def test_writeup_prefers_late_findings_over_command_trail():
+    """AI Solution Summary often arrives after submit_flag stored the trail."""
+    swarm = _swarm(["cursor/composer-2.5"])
+    swarm.confirmed_flags = ["flag{50fba}"]
+    swarm.flag_credits = {"flag{50fba}": "cursor/composer-2.5"}
+    swarm.flag_notes = {
+        "cursor/composer-2.5": "\n".join(
+            [
+                "1. bash: cat /challenge/TOOLS.txt",
+                "2. bash: tshark -r /challenge/distfiles/challenge.pcapng",
+            ]
+        )
+    }
+
+    class _Solver:
+        _findings = (
+            "**FLAG: flag{50fba}** ## Solution Summary "
+            "1. **DNS exfiltration** — mango "
+            "2. **TCP chat** — CIPHER_PART_1/2. "
+            "3. **ICMP noise** — decoy"
+        )
+        _action_log = [
+            "bash: cat /challenge/TOOLS.txt",
+            "bash: tshark -r /challenge/distfiles/challenge.pcapng",
+        ]
+
+    swarm.solvers = {"cursor/composer-2.5": _Solver()}  # type: ignore[assignment]
+
+    # Simulate the FLAG_FOUND late-findings promotion used in _run_solver.
+    from backend.writeup import clean_how_lines, is_usable_narrative
+
+    existing = swarm.flag_notes["cursor/composer-2.5"]
+    late = swarm.solvers["cursor/composer-2.5"]._findings
+    assert not is_usable_narrative(existing)
+    assert is_usable_narrative(late)
+    swarm.flag_notes["cursor/composer-2.5"] = "\n".join(clean_how_lines(late))
+
+    lines = swarm.solve_writeup()
+    joined = "\n".join(lines)
+    assert "DNS exfiltration" in joined
+    assert "bash: tshark" not in joined
+    assert "How:" in lines
+
+
 def test_writeup_attributes_each_flag_when_two_agents_contributed():
     swarm = _swarm(["cursor/grok-4.5", "cursor/composer-2.5"])
     swarm.confirmed_flags = ["CTF{user_aaaa}", "CTF{root_bbbb}"]

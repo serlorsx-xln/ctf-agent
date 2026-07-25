@@ -519,9 +519,20 @@ class ChallengeSwarm:
 
                 writeup = ""
                 existing = (self.flag_notes.get(runner_id) or "").strip()
-                # Action-log notes from submit are enough for How:; skip the
-                # extra Cursor turn when we already have a usable trail.
-                if not is_usable_narrative(existing) and len(existing) < 80:
+                # submit_flag often runs *before* the model emits its Solution
+                # Summary AI — so flag_notes may still be the command trail.
+                # Prefer late ``_findings`` when that is a usable narrative.
+                from backend.writeup import clean_how_lines
+
+                late = str(getattr(solver, "_findings", "") or "").strip()
+                if is_usable_narrative(late) and (
+                    not is_usable_narrative(existing) or len(late) > len(existing) + 40
+                ):
+                    existing = "\n".join(clean_how_lines(late)).strip()
+                    self.flag_notes[runner_id] = existing
+                # Skip the extra Cursor turn only when we already have a usable
+                # *narrative*. A long command-trail note must not block writeup.
+                if not is_usable_narrative(existing):
                     writeup_task = asyncio.create_task(capture_solver_writeup(solver))
                     done, _pending = await asyncio.wait({writeup_task}, timeout=12.0)
                     if writeup_task in done:

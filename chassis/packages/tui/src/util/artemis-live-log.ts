@@ -33,37 +33,64 @@ export function parseArtemisEvents(raw: string): ArtemisEvent[] {
 
 /** Split jammed numbered / section summary lines; strip markdown bold. */
 export function expandSummaryLine(line: string): string[] {
-  const stripped = (line || "").replace(/\*\*([^*]+)\*\*/g, "$1")
-  const lead = stripped.match(/^\s*/)?.[0] ?? ""
-  const text = stripped.trim()
+  let text = (line || "").replace(/\*\*([^*]+)\*\*/g, "$1").trim()
   if (!text) return []
-  const sectionRe = /(?=\b(?:Solution summary|Key insight|Challenge|How|Steps)\s*:)/i
+  const lead = (line || "").match(/^\s*/)?.[0] ?? ""
+  // `…} ## Solution Summary 1. …` → plain section label on its own line.
+  text = text
+    .replace(
+      /\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps)\b\s*:?)/gi,
+      "\n$1\n",
+    )
+    .trim()
+  const sectionRe =
+    /(?=\b(?:Solution summary|Key insight|Challenge)\b\s*:?|\b(?:How|Steps)\s*:)/i
   const sections = text
     .split(sectionRe)
-    .map((s) => s.trim())
+    .map((s) => s.replace(/^#{1,3}\s+/, "").trim())
     .filter(Boolean)
   const chunks = sections.length ? sections : [text]
   const out: string[] = []
-  const numberedRe = /(?<!\d)(\d{1,2})\.\s+/g
+  // Only treat "N. " as a list marker at start/after whitespace — not in
+  // CIPHER_PART_1/2. style tokens.
+  const numberedRe = /(?:^|(?<=\s))(\d{1,2})\.\s+/g
   for (const section of chunks) {
     const matches = [...section.matchAll(numberedRe)]
+    const pieces: string[] = []
     if (matches.length <= 1) {
-      out.push(section)
-      continue
+      pieces.push(section)
+    } else {
+      const first = matches[0]!
+      const head = section.slice(0, first.index).trim()
+      if (head) pieces.push(head)
+      for (let i = 0; i < matches.length; i++) {
+        const start = matches[i]!.index!
+        const end = i + 1 < matches.length ? matches[i + 1]!.index! : section.length
+        const piece = section.slice(start, end).trim()
+        if (piece) pieces.push(piece)
+      }
     }
-    const first = matches[0]!
-    const head = section.slice(0, first.index).trim()
-    if (head) out.push(head)
-    for (let i = 0; i < matches.length; i++) {
-      const start = matches[i]!.index!
-      const end = i + 1 < matches.length ? matches[i + 1]!.index! : section.length
-      const piece = section.slice(start, end).trim()
-      if (piece) out.push(piece)
+    for (const piece of pieces) {
+      const parts = piece.split(/(?=\bDecryption\s*:)/i).map((s) => s.trim()).filter(Boolean)
+      out.push(...parts)
     }
   }
-  // Preserve intentional indent when the line did not need splitting.
   if (out.length === 1 && out[0] === text && lead) return [lead + text]
   return out
+}
+
+/** Model post-solve walls that belong in ``[artemis] summary``, not AI/think. */
+export function looksLikeWriteupDump(text: string): boolean {
+  const t = text || ""
+  if (/(?:#{1,3}\s*)?Solution\s+Summary\b/i.test(t)) return true
+  if (/\*\*FLAG\s*:/i.test(t) && /\d{1,2}\.\s/.test(t)) return true
+  if (/FLAG\s*:\s*(?:flag|ctf|archa)\{/i.test(t) && /Solution\s+Summary/i.test(t)) return true
+  return false
+}
+
+function maybeExpandProse(text: string): string {
+  const pieces = expandSummaryLine(text)
+  return pieces.length > 1 ? pieces.join("\n") : text
 }
 
 /** Merge consecutive think/ai deltas from the same agent into one block. */
@@ -218,7 +245,9 @@ export function parseLine(line: string): ArtemisEvent | null {
     const text = m[2]?.trim()
     if (!text) return null
     if (isGarbledModelText(text)) return null
-    return { kind: "think", agent: shortAgent(m[1]!), text }
+    // Post-solve model dumps belong in ``[artemis] summary``, not think.
+    if (looksLikeWriteupDump(text)) return null
+    return { kind: "think", agent: shortAgent(m[1]!), text: maybeExpandProse(text) }
   }
 
   // Token-streamed writeup deltas — drop; the operator recap is ``[artemis] summary``.
@@ -229,7 +258,9 @@ export function parseLine(line: string): ArtemisEvent | null {
     const text = m[2]?.trim()
     if (!text) return null
     if (isGarbledModelText(text)) return null
-    return { kind: "ai", agent: shortAgent(m[1]!), text }
+    // Jammed FLAG / Solution Summary walls — How: owns the recap.
+    if (looksLikeWriteupDump(text)) return null
+    return { kind: "ai", agent: shortAgent(m[1]!), text: maybeExpandProse(text) }
   }
 
   m = trimmed.match(/^\[([^\]]+?)\s+tool#\d+\s*(?:→|->)\s*(\w+)\]\s*(.*)$/i)

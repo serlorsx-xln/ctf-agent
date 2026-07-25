@@ -80,6 +80,30 @@ ARCHA{test}
     assert "```" not in out
 
 
+def test_expand_splits_hash_solution_summary_and_cipher_part_slash():
+    from backend.writeup import clean_how_lines, expand_summary_line, is_usable_narrative
+
+    raw = (
+        "The flag was accepted. Cogitated **FLAG: flag{50fba860c6c53436cbaffe8391619e67}** "
+        "## Solution Summary 1. **DNS exfiltration** — TXT holds XOR key mango. "
+        "2. **TCP chat** — CIPHER_PART_1/2. 3. **ICMP \"noise\"** — decoy. "
+        "Decryption: `XOR(key=mango)` → flag{50fba860c6c53436cbaffe8391619e67}"
+    )
+    pieces = expand_summary_line(raw)
+    assert "Solution Summary" in pieces
+    assert any(p.startswith("1. DNS") for p in pieces)
+    assert any(p.startswith("2. TCP") and "CIPHER_PART_1/2." in p for p in pieces)
+    assert any(p.startswith("3. ICMP") for p in pieces)
+    assert any(p.lower().startswith("decryption:") for p in pieces)
+    assert not any(p == "#" for p in pieces)
+
+    cleaned = clean_how_lines(raw)
+    assert any(p.startswith("1. DNS") for p in cleaned)
+    assert any(p.startswith("2. TCP") for p in cleaned)
+    assert not any("The flag was accepted" in p for p in cleaned)
+    assert is_usable_narrative(raw)
+
+
 def test_expand_and_normalize_split_jammed_numbered_list():
     from backend.writeup import expand_summary_line, normalize_writeup_text
 

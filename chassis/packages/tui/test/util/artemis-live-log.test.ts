@@ -140,6 +140,21 @@ describe("parseArtemisEvents", () => {
     expect(texts.some((t) => t.startsWith("2. TCP"))).toBe(true)
   })
 
+  test("expands ## Solution Summary and does not split CIPHER_PART_1/2.", () => {
+    const raw =
+      "**FLAG: flag{50fba}** ## Solution Summary 1. **DNS** — mango 2. **TCP** — CIPHER_PART_1/2. 3. **ICMP** — decoy"
+    const pieces = expandSummaryLine(raw)
+    expect(pieces).toContain("Solution Summary")
+    expect(pieces.some((p) => p.startsWith("2. TCP") && p.includes("CIPHER_PART_1/2."))).toBe(true)
+    expect(pieces.some((p) => p === "2.")).toBe(false)
+  })
+
+  test("drops jammed FLAG/Solution Summary AI dumps (How owns recap)", () => {
+    const raw =
+      "[composer-2.5 ai] The flag was accepted. **FLAG: flag{x}** ## Solution Summary 1. DNS 2. TCP"
+    expect(parseArtemisEvents(raw).filter((e) => e.kind === "ai")).toHaveLength(0)
+  })
+
   test("drops token-streamed writeup deltas (summary owns the recap)", () => {
     expect(parseArtemisEvents("[chal/default writeup] How the flag")).toEqual([])
     expect(parseArtemisEvents("[chal/default writeup] was found")).toEqual([])

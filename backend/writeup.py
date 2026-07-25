@@ -41,11 +41,17 @@ Rules:
 
 
 _HEADING_RE = re.compile(r"^#{1,3}\s+")
-_NUMBERED_START_RE = re.compile(r"(?<!\d)(\d{1,2})\.\s+")
+_NUMBERED_START_RE = re.compile(r"(?:^|(?<=\s))(\d{1,2})\.\s+")
+# Colon required for How/Steps (avoid splitting "How the…"). Optional for
+# Solution summary / Key insight / Challenge which models often omit.
 _SECTION_SPLIT_RE = re.compile(
-    r"(?=\b(?:Solution summary|Key insight|Challenge|How|Steps)\s*:)",
+    r"(?=\b(?:Solution summary|Key insight|Challenge)\b\s*:?|\b(?:How|Steps)\s*:)",
     re.IGNORECASE,
 )
+_MD_SECTION_RE = re.compile(
+    r"(?i)\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps)\b\s*:?)"
+)
+_DECRYPT_BREAK_RE = re.compile(r"(?=\bDecryption\s*:)", re.IGNORECASE)
 _FLAG_TOKEN_RE = re.compile(r"(?i)\b(?:flag|ctf|archa)\{[^{}\n]{4,200}\}")
 _ACCEPT_NOISE_RE = re.compile(
     r"(?i)\b(?:the flag was accepted|CORRECT|FLAG FOUND|Confirmed —|"
@@ -58,24 +64,35 @@ def expand_summary_line(line: str) -> list[str]:
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", (line or "").strip())
     if not text:
         return []
-    # "… FLAG: x Solution summary: 1. a 2. b" → separate section + steps
+    # ``…} ## Solution Summary 1. …`` → section on its own line (no bare '#').
+    text = _MD_SECTION_RE.sub(r"\n\1\n", text).strip()
     sections = [s.strip() for s in _SECTION_SPLIT_RE.split(text) if s.strip()]
     if not sections:
         sections = [text]
     out: list[str] = []
     for section in sections:
-        matches = list(_NUMBERED_START_RE.finditer(section))
-        if len(matches) <= 1:
-            out.append(section)
+        section = _HEADING_RE.sub("", section).strip()
+        if not section:
             continue
-        head = section[: matches[0].start()].strip()
-        if head:
-            out.append(head)
-        for i, m in enumerate(matches):
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
-            chunk = section[m.start() : end].strip()
-            if chunk:
-                out.append(chunk)
+        matches = list(_NUMBERED_START_RE.finditer(section))
+        pieces: list[str]
+        if len(matches) <= 1:
+            pieces = [section]
+        else:
+            pieces = []
+            head = section[: matches[0].start()].strip()
+            if head:
+                pieces.append(head)
+            for i, m in enumerate(matches):
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
+                chunk = section[m.start() : end].strip()
+                if chunk:
+                    pieces.append(chunk)
+        for piece in pieces:
+            for part in _DECRYPT_BREAK_RE.split(piece):
+                part = part.strip()
+                if part:
+                    out.append(part)
     return out
 
 
@@ -95,8 +112,7 @@ def _is_accept_noise_line(text: str) -> bool:
         return True
     if _ACCEPT_NOISE_RE.search(t) and len(t) < 160:
         return True
-    return bool(re.fullmatch(r"(?i)(?:FLAG|Flag|Steps|Solution summary)\s*:?", t))
-
+    return bool(re.fullmatch(r"(?i)(?:FLAG|Flag|Steps)\s*:?", t))
 
 def narrative_body(text: str) -> str:
     """Prose only — drop a trailing ``Steps:`` tool trail if present."""
@@ -142,8 +158,25 @@ def clean_how_lines(text: str) -> list[str]:
     return out
 
 
+def is_command_trail(text: str) -> bool:
+    """True when the note is mostly numbered tool lines (bash: …), not prose."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    toolish = 0
+    for ln in lines:
+        if re.match(r"^\d+\.\s+\S+:\s", ln) or re.match(
+            r"^(?:bash|Bash|shell|read_file|write_file|list_files|submit_flag)\s*:",
+            ln,
+        ):
+            toolish += 1
+    return toolish >= max(1, (len(lines) + 1) // 2)
+
+
 def is_usable_narrative(text: str) -> bool:
     """True when cleaned prose is worth showing instead of the command trail."""
+    if is_command_trail(text):
+        return False
     lines = [ln for ln in clean_how_lines(text) if ln.strip()]
     if not lines:
         return False
