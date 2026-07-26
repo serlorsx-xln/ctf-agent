@@ -19,6 +19,7 @@ build/
 .venv/
 .mypy_cache/
 .ruff_cache/
+.pytest_cache/
 uv.lock
 
 # Node / Bun (chassis TUI)
