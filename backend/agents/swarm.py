@@ -376,12 +376,11 @@ class ChallengeSwarm:
                 self.confirmed_flags.append(normalized)
                 self.flag_credits[normalized] = model_spec
                 # Snapshot usable prose only — command trails never go in recap.
-                from backend.action_log import notes_from_actions
+                from backend.action_log import notes_from_prose
 
                 solver = self.solvers.get(model_spec)
                 prose = str(getattr(solver, "_findings", "") or "").strip()
-                actions = list(getattr(solver, "_action_log", []) or [])
-                notes = notes_from_actions(actions, prose=prose)
+                notes = notes_from_prose(prose)
                 if notes:
                     self.flag_notes[model_spec] = notes
                 logger.info(

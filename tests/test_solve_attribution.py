@@ -133,10 +133,6 @@ def test_writeup_prefers_late_findings_over_command_trail():
             "2. **TCP chat** — CIPHER_PART_1/2. "
             "3. **ICMP noise** — decoy"
         )
-        _action_log = [
-            "bash: cat /challenge/TOOLS.txt",
-            "bash: tshark -r /challenge/distfiles/challenge.pcapng",
-        ]
 
     swarm.solvers = {"cursor/composer-2.5": _Solver()}  # type: ignore[assignment]
 

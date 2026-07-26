@@ -123,7 +123,6 @@ class GeminiSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._action_log: list[str] = []
         self._step_count = 0
         self._bump_insights: str | None = None
         # Session continuity across bumps: keep the running contents list.
@@ -372,9 +371,6 @@ class GeminiSolver:
                 fc = fc_part.function_call
                 name = fc.name
                 args = dict(fc.args or {})
-                from backend.action_log import append_action
-
-                append_action(self._action_log, name, args)
                 _live_json(f"{self.agent_name} tool → {name}", args)
                 result_text = await self._exec_tool(name, args)
                 # Append the function response for the next turn.

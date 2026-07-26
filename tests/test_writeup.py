@@ -152,18 +152,14 @@ def test_usable_narrative_rejects_accept_spam():
 
 
 def test_notes_expand_jammed_prose_before_steps():
-    from backend.action_log import notes_from_actions
+    from backend.action_log import notes_from_prose
 
-    note = notes_from_actions(
-        ["bash: tshark -r cap.pcapng", "submit_flag: flag{x}"],
-        prose=(
-            "**Solution summary** 1. DNS key mango from TXT "
-            "2. TCP chat recovers CIPHER_PART 3. XOR decrypts the flag body"
-        ),
+    note = notes_from_prose(
+        "**Solution summary** 1. DNS key mango from TXT "
+        "2. TCP chat recovers CIPHER_PART 3. XOR decrypts the flag body"
     )
     assert "Solution summary" in note or "1. DNS key" in note
     assert "bash:" not in note
-    assert "submit_flag:" not in note
 
 
 def test_normalize_drops_single_line_error_envelope():

@@ -231,7 +231,6 @@ class CursorSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._action_log: list[str] = []
         self._bump_insights: str | None = None
         self._infra_recovery = False
         self._started = False
@@ -358,9 +357,6 @@ class CursorSolver:
             self._step_count += 1
             step = self._step_count
             self.tracer.tool_call(name, args, step)
-            from backend.action_log import append_action
-
-            append_action(self._action_log, name, args)
             args_preview = _tool_args_preview(name, args)
             _live(f"{self.agent_name} tool#{step} → {name}", args_preview, limit=1500)
 

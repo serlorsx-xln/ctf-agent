@@ -1,7 +1,7 @@
 """Post-solve narrative writeup — IDE-style summary for the operator recap.
 
 After CORRECT the winning solver still has session context. Asking it for a short
-prose writeup (no tools) beats dumping a numbered tool trail into the recap.
+prose writeup (no tools) powers the operator recap.
 """
 
 from __future__ import annotations

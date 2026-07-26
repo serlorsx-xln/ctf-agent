@@ -100,7 +100,6 @@ class ClaudeSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._action_log: list[str] = []
         self._cost_usd = 0.0
         self._cost_reported = False
         self._bump_insights: str | None = None
@@ -264,9 +263,6 @@ class ClaudeSolver:
             # Step counting and loop detection for all tools
             self._step_count += 1
             self.tracer.tool_call(tool_name, tool_input, self._step_count)
-            from backend.action_log import append_action
-
-            append_action(self._action_log, tool_name, tool_input)
             live_json(
                 f"{self.agent_name} tool#{self._step_count} → {tool_name}",
                 tool_input,

@@ -198,7 +198,6 @@ class CodexSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
-        self._action_log: list[str] = []
         self._bump_insights: str | None = None
         self._structured_output: dict | None = None
         self._turn_error: str | None = None
@@ -455,9 +454,6 @@ class CodexSolver:
 
         self._step_count += 1
         self.tracer.tool_call(tool_name, args, self._step_count)
-        from backend.action_log import append_action
-
-        append_action(self._action_log, tool_name, args)
         live_json(
             f"{self.agent_name} tool#{self._step_count} → {tool_name}",
             args,
