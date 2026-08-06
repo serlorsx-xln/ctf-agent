@@ -73,12 +73,17 @@ def child_daemon_env() -> dict[str, str]:
     if uses_tcp():
         port = daemon_tcp_port()
         if port <= 0:
-            port = int((os.environ.get("ARTEMIS_DAEMON_PORT") or "0") or 0)
+            env_port = (os.environ.get("ARTEMIS_DAEMON_PORT") or "").strip()
+            if env_port.isdigit():
+                port = int(env_port)
+        if port <= 0:
+            return {"ARTEMIS_DAEMON_TCP": "1"}
         endpoint = f"tcp:{DEFAULT_TCP_HOST}:{port}"
-        out = {"ARTEMIS_DAEMON_ENDPOINT": endpoint}
-        if port > 0:
-            out["ARTEMIS_DAEMON_PORT"] = str(port)
-        return out
+        return {
+            "ARTEMIS_DAEMON_ENDPOINT": endpoint,
+            "ARTEMIS_DAEMON_PORT": str(port),
+            "ARTEMIS_DAEMON_TCP": "1",
+        }
     sock = str(daemon_socket_path())
     return {
         "ARTEMIS_DAEMON_SOCK": sock,
@@ -89,6 +94,8 @@ def child_daemon_env() -> dict[str, str]:
 def _parse_endpoint() -> tuple[str, Any]:
     ep = (os.environ.get("ARTEMIS_DAEMON_ENDPOINT") or "").strip()
     if ep.startswith("unix:"):
+        if uses_tcp():
+            raise OSError("unix endpoint configured while ARTEMIS_DAEMON_TCP is active")
         return "unix", ep[5:]
     if ep.startswith("tcp:"):
         rest = ep[4:]
@@ -98,19 +105,30 @@ def _parse_endpoint() -> tuple[str, Any]:
 
     sock = (os.environ.get("ARTEMIS_DAEMON_SOCK") or "").strip()
     if sock:
+        if uses_tcp():
+            raise OSError("ARTEMIS_DAEMON_SOCK set while TCP daemon mode is active")
         return "unix", sock
 
     if uses_tcp():
         port = daemon_tcp_port()
+        env_port = (os.environ.get("ARTEMIS_DAEMON_PORT") or "").strip()
+        if port <= 0 and env_port.isdigit():
+            port = int(env_port)
         if port > 0:
             return "tcp", (DEFAULT_TCP_HOST, port)
+        raise OSError("daemon TCP port not configured")
 
     return "unix", str(daemon_socket_path())
 
 
 def sync_connect(timeout: float = 0.25) -> socket.socket:
     kind, addr = _parse_endpoint()
-    fam = socket.AF_INET if kind == "tcp" else socket.AF_UNIX
+    if kind == "tcp":
+        fam = socket.AF_INET
+    elif hasattr(socket, "AF_UNIX"):
+        fam = socket.AF_UNIX
+    else:
+        raise OSError("unix socket not supported on this platform")
     s = socket.socket(fam, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -130,10 +148,17 @@ async def open_connection() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]
     if kind == "tcp":
         host, port = addr
         return await asyncio.open_connection(host, port)
+    if not hasattr(socket, "AF_UNIX"):
+        raise OSError("unix socket not supported on this platform")
     return await asyncio.open_unix_connection(addr)
 
 
 def daemon_alive(timeout: float = 0.25) -> bool:
+    if uses_tcp():
+        port = daemon_tcp_port()
+        env_port = (os.environ.get("ARTEMIS_DAEMON_PORT") or "").strip()
+        if port <= 0 and not (env_port.isdigit() and int(env_port) > 0):
+            return False
     try:
         s = sync_connect(timeout=timeout)
         s.close()

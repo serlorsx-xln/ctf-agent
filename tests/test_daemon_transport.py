@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from backend.daemon.server import Daemon
 from backend.daemon.transport import daemon_alive, open_connection, uses_tcp
+from tests.daemon_fixtures import daemon_cache_dir
 
 
 @pytest.fixture
 def tcp_daemon_env(monkeypatch: pytest.MonkeyPatch):
-    cache = Path("/tmp") / f"artemis-tcp-{os.getpid()}"
-    cache.mkdir(parents=True, exist_ok=True)
+    cache = daemon_cache_dir("artemis-tcp")
     monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
     monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "1")
     monkeypatch.setenv("ARTEMIS_REPO_ROOT", str(Path(__file__).resolve().parents[1]))
@@ -53,6 +52,14 @@ def test_uses_tcp_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.daemon.transport.sys.platform", "win32")
     monkeypatch.delenv("ARTEMIS_DAEMON_TCP", raising=False)
     assert uses_tcp() is True
+
+
+def test_daemon_alive_false_before_tcp_bind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "1")
+    monkeypatch.delenv("ARTEMIS_DAEMON_PORT", raising=False)
+    cache = daemon_cache_dir("artemis-alive")
+    monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
+    assert daemon_alive() is False
 
 
 def test_tcp_daemon_roundtrip(tcp_daemon_env: Path) -> None:

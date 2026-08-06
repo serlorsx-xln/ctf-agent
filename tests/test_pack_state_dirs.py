@@ -7,8 +7,10 @@ snapshot version — tens of minutes before the agent sees a single symbol.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
+from backend.platform_paths import docker_volume_path
 from backend.sandbox.container import DockerSandbox
 from backend.tool_router import (
     PACK_SPECS,
@@ -30,7 +32,7 @@ def test_state_root_is_outside_evictable_pack_cache(tmp_path: Path, monkeypatch)
     monkeypatch.delenv("CTF_PACK_STATE", raising=False)
     root = pack_state_root()
     assert not str(root).startswith(str(tmp_path / "packs"))
-    assert str(pack_state_dir("mobile", "/var/cache/ctf-blutter")).endswith(
+    assert str(pack_state_dir("mobile", "/var/cache/ctf-blutter")).replace("\\", "/").endswith(
         "var/cache/ctf-blutter"
     )
 
@@ -42,7 +44,7 @@ def test_state_dirs_bind_rw_and_are_created(tmp_path: Path, monkeypatch) -> None
 
     host = pack_state_dir("mobile", "/var/cache/ctf-blutter", session_id=sandbox.session_id)
     assert host.is_dir()
-    assert f"{host.resolve()}:/var/cache/ctf-blutter:rw" in binds
+    assert f"{docker_volume_path(host)}:/var/cache/ctf-blutter:rw" in binds
     assert all(b.endswith(":rw") for b in binds)
 
 
@@ -98,7 +100,8 @@ def test_blutter_wrapper_written_by_bootstrap_not_bound_readonly() -> None:
     script = bootstrap_script("mobile")
     assert "cat > /usr/local/bin/blutter <<'CTF_BLUTTER_WRAPPER_EOF'" in script
     assert "chmod +x /usr/local/bin/blutter" in script
-    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    if sys.platform != "win32":
+        subprocess.run(["bash", "-n"], input=script, text=True, check=True)
 
 
 def test_marker_tracks_wrapper_changes(monkeypatch) -> None:

@@ -355,9 +355,12 @@ def test_fresh_go_after_failed_reload_does_not_ask_flags(monkeypatch) -> None:
     assert "Load failed" in (msg.get("content") or "")
 
 
-def test_same_path_fresh_turn_reloads(monkeypatch) -> None:
+def test_same_path_fresh_turn_reloads(monkeypatch, tmp_path: Path) -> None:
     """Re-paste of the same folder on a fresh turn → reload."""
-    chal = str(REPO_ROOT / "challenges/tctt-junior-cipher-puzzle")
+    chal_dir = tmp_path / "tctt-junior-cipher-puzzle"
+    chal_dir.mkdir()
+    (chal_dir / "challenge.txt").write_text("test\n", encoding="utf-8")
+    chal = str(chal_dir)
     monkeypatch.setattr(
         "backend.shell.sandbox_session.load_session_state",
         lambda *_a, **_k: {"challenge_dir": chal, "challenge_name": "tctt-junior-cipher-puzzle"},

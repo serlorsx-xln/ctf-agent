@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 WRAPPER = REPO / "sandbox" / "scripts" / "pip3_ctf_wrapper.sh"
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="bash wrapper tests require Unix shell")
 
 
 def test_pip3_wrapper_script_exists_and_executable_bits():

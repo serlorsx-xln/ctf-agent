@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -12,12 +11,12 @@ import pytest
 from backend.daemon.server import Daemon
 from backend.daemon.transport import open_connection
 from backend.shell.sandbox_session import save_session_state
+from tests.daemon_fixtures import daemon_cache_dir
 
 
 @pytest.fixture
 def daemon_env(monkeypatch: pytest.MonkeyPatch):
-    cache = Path("/tmp") / f"artemis-refresh-{os.getpid()}"
-    cache.mkdir(parents=True, exist_ok=True)
+    cache = daemon_cache_dir("artemis-refresh")
     monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
     monkeypatch.setenv("ARTEMIS_REPO_ROOT", str(Path(__file__).resolve().parents[1]))
     sock = cache / "daemon.sock"

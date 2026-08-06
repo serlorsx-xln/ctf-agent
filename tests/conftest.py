@@ -9,9 +9,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _force_unix_daemon_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CI/dev on macOS/Linux: keep unix-socket daemon unless explicitly testing TCP."""
+    """CI/dev: unix socket on macOS/Linux; TCP on Windows."""
     monkeypatch.delenv("ARTEMIS_DAEMON_SOCK", raising=False)
     monkeypatch.delenv("ARTEMIS_DAEMON_ENDPOINT", raising=False)
     monkeypatch.delenv("ARTEMIS_DAEMON_PORT", raising=False)
-    if sys.platform != "win32":
+    if sys.platform == "win32":
+        monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "1")
+    else:
         monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "0")
