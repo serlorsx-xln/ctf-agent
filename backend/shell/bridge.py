@@ -293,15 +293,25 @@ def _is_artemis_race_pid(pid: int) -> bool:
     )
 
 def _kill_pid_tree(pid: int) -> None:
-    """Best-effort kill process and children (macOS/Linux)."""
+    """Best-effort kill process and children (Unix + Windows)."""
     import signal
     import subprocess
+    import sys
 
     try:
-        # Kill process group if leader; also try children via pkill
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+            )
+        except OSError:
+            pass
+        return
     try:
         subprocess.run(
             ["pkill", "-TERM", "-P", str(pid)],
@@ -310,8 +320,9 @@ def _kill_pid_tree(pid: int) -> None:
         )
     except OSError:
         pass
+    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, sigkill)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
@@ -589,6 +600,7 @@ async def _swarm_direct(payload: dict) -> str:
 
     # TUI owns the keyboard — solvers ask via FLAG_CONFIRM file handshake + dialog.
     from backend.shell.sandbox_session import swarm_log_path_for_session
+    from backend.subprocess_platform import detached_subprocess_kwargs
 
     env = {
         **os.environ,
@@ -605,8 +617,8 @@ async def _swarm_direct(payload: dict) -> str:
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
         env=env,
+        **detached_subprocess_kwargs(),
     )
     chunks: list[str] = []
     try:

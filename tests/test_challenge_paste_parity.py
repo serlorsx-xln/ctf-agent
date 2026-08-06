@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.challenge_paste import _SPEC_PATH, looks_like_challenge_paste
+from backend.challenge_paste import _SPEC_PATH, extract_challenge_paths, looks_like_challenge_paste
 
 
 def test_ssh_password_paste():
@@ -58,3 +58,8 @@ def test_shared_spec_file_is_canonical():
     assert _SPEC_PATH.resolve() == (
         Path(__file__).resolve().parents[1] / "shared" / "challenge_paste.json"
     ).resolve()
+
+
+def test_extract_windows_drive_path():
+    paths = extract_challenge_paths(r"C:\Users\me\challenges\glass please solve")
+    assert paths == [r"C:\Users\me\challenges\glass"]

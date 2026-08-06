@@ -32,6 +32,24 @@ Headless / coordinator multi-challenge mode remains available for batch runs (`u
 
 ## Quick Start
 
+**One-shot install (all OS):**
+
+```bash
+# macOS / Linux / WSL
+bash scripts/install.sh          # deps + L0 Docker image
+bash scripts/install.sh --full   # + donor images + pack warm (slow, ~20GB cache)
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Full
+
+# QA (must pass before prod)
+bash scripts/qa.sh                        # macOS/Linux
+powershell -File scripts/qa.ps1           # Windows
+```
+
+Manual steps (equivalent):
+
 ```bash
 # Install
 uv sync

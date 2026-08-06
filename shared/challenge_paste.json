@@ -1,7 +1,7 @@
 {
   "challenge_hint": "\\b(nc|ncat|socat|ssh|telnet)\\b|\\bhttps?:\\/\\/\\S+:\\d{2,5}\\b|\\bconnect\\s+(at|to)\\b|\\bflag\\s*\\{|\\bjail\\s*\\{|\\bctf\\s*\\{|\\bpw\\s*:|\\bpassword\\s*:|\\bport\\s+\\d{2,5}\\b",
   "ctf_prose": "\\b(flag|ctf|challenge|pwn|crypto|reverse|forensic|writeup|points|author|attachment|distfile)\\b",
-  "path_re": "(\\/(?:Users|home|var|tmp|opt|Volumes)\\/[^\\s\"']+|~\\/[^\\s\"']+|\\.\\/challenges\\/[^\\s\"']+|challenges\\/[^\\s\"']+)",
+  "path_re": "(/(?:Users|home|var|tmp|opt|Volumes)/[^\\s\"']+|~/(?:[^\\s\"']+)|\\./challenges/[^\\s\"']+|challenges/[^\\s\"']+|[A-Za-z]:\\\\[^\\s\"']+)",
   "min_lines": 2,
   "min_chars": 60
 }

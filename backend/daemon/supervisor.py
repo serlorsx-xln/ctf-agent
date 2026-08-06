@@ -18,6 +18,7 @@ from typing import Any
 
 from backend.daemon.session_id import DEFAULT_SESSION_ID, normalize_session_id
 from backend.daemon.state import DaemonState
+from backend.subprocess_platform import detached_subprocess_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -380,8 +381,8 @@ class SwarmSupervisor:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
             env=env,
+            **detached_subprocess_kwargs(),
         )
         slot.proc = proc
         slot.challenge_dir = challenge

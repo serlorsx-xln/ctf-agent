@@ -43,9 +43,10 @@ def fake_swarm_script(tmp_path: Path, repo_root: str) -> str:
 @pytest.fixture(autouse=True)
 def _patch_subprocess_exec(monkeypatch: pytest.MonkeyPatch, fake_swarm_script: str) -> None:
     """Replace the swarm CLI spawn with the fake swarm script."""
-    import backend.daemon.supervisor as sup
+    import backend.daemon.supervisor as sup_mod
+    from backend.subprocess_platform import detached_subprocess_kwargs
 
-    orig = sup.asyncio.create_subprocess_exec
+    orig = sup_mod.asyncio.create_subprocess_exec
 
     async def fake_exec(*cmd, **kw):
         return await orig(
@@ -53,11 +54,11 @@ def _patch_subprocess_exec(monkeypatch: pytest.MonkeyPatch, fake_swarm_script: s
             fake_swarm_script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
             env=kw.get("env", os.environ.copy()),
+            **detached_subprocess_kwargs(),
         )
 
-    monkeypatch.setattr(sup.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
 
 
 def test_spawn_writes_disk_log_and_replays(
