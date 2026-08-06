@@ -417,6 +417,8 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool |
         flush_stream()
     except Exception:
         pass
+    from backend.daemon.transport import daemon_configured_in_env
+
     _install_confirm_log_filter()
     _confirm_active = True
     try:
@@ -431,7 +433,7 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool |
         if tui_confirm:
             # Prefer daemon socket (single dialog channel). File handshake is
             # legacy fallback only when ARTEMIS_DAEMON_SOCK is unset.
-            if os.environ.get("ARTEMIS_DAEMON_SOCK"):
+            if daemon_configured_in_env():
                 return _prompt_flag_confirmation_daemon(f)
             return _prompt_flag_confirmation_tui(f)
         if not sys.stdin.isatty():
@@ -556,8 +558,9 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
     import time
     import uuid
 
-    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
-    if not sock_path:
+    from backend.daemon.transport import daemon_configured_in_env, sync_connect
+
+    if not daemon_configured_in_env():
         return _prompt_flag_confirmation_tui(flag)
 
     session = os.environ.get("ARTEMIS_SESSION_ID")
@@ -568,9 +571,7 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
     _emit_line(line)
 
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.25)
-        s.connect(sock_path)
+        s = sync_connect(timeout=0.25)
     except OSError:
         # Daemon unreachable — fall back to file handshake so the solve isn't lost.
         return _prompt_flag_confirmation_tui(flag)

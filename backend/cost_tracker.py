@@ -114,16 +114,15 @@ def _emit_usage_to_daemon(payload: dict) -> None:
     Uses role ``usage`` (not ``swarm``) so disconnects do not cancel pending
     flag-confirm dialogs owned by the real swarm peer.
     """
-    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
-    if not sock_path:
+    from backend.daemon.transport import daemon_configured_in_env, sync_connect
+
+    if not daemon_configured_in_env():
         return
 
     global _DAEMON_USAGE_SOCK
     try:
         if _DAEMON_USAGE_SOCK is None:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(1.0)
-            s.connect(sock_path)
+            s = sync_connect(timeout=1.0)
             session = os.environ.get("ARTEMIS_SESSION_ID")
             s.sendall(
                 json.dumps(

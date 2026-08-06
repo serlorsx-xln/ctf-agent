@@ -346,11 +346,12 @@ class SwarmSupervisor:
         if auto_confirm:
             cmd.append("--auto-confirm-flags")
 
-        sock = str(_daemon_sock_for_child())
+        from backend.daemon.transport import child_daemon_env
+
         env = {
             **os.environ,
+            **child_daemon_env(),
             "ARTEMIS_FLAG_CONFIRM": "1",
-            "ARTEMIS_DAEMON_SOCK": sock,
             "ARTEMIS_SWARM_LOG": str(log_path),
             "ARTEMIS_SESSION_ID": sid,
         }
@@ -696,8 +697,3 @@ def _read_tail(path: Path, n: int, *, end_offset: int | None = None) -> list[str
     lines = text.splitlines()
     return lines[-n:] if len(lines) > n else lines
 
-
-def _daemon_sock_for_child() -> Path:
-    from backend.daemon.socket_path import daemon_socket_path
-
-    return daemon_socket_path()

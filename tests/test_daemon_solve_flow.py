@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ def test_solve_flow_start_registered(daemon_env: str) -> None:
 
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )

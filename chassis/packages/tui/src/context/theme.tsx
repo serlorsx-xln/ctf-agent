@@ -156,6 +156,11 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     }
 
     onMount(() => {
+      // Artemis locks opencode/dark — skip palette + custom theme discovery.
+      if (process.env.ARTEMIS === "1") {
+        setStore("ready", true)
+        return
+      }
       void Promise.allSettled([resolveSystemTheme(store.mode), syncCustomThemes()]).finally(() => {
         setStore("ready", true)
       })

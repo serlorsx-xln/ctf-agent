@@ -28,9 +28,13 @@ def _docker_client() -> aiodocker.Docker:
     aiodocker prefers currentContext (e.g. desktop-linux) over DOCKER_HOST, which
     breaks Colima setups where the CLI sees images but the agent does not.
     """
+    import sys
+
     host = os.environ.get("DOCKER_HOST")
     if host:
         return aiodocker.Docker(url=host)
+    if sys.platform == "win32":
+        return aiodocker.Docker(url="npipe:////./pipe/docker_engine")
     return aiodocker.Docker()
 
 

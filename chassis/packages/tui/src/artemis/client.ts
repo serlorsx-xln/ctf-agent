@@ -10,6 +10,7 @@
  * subprocess reports; the client never estimates.
  */
 import net from "node:net"
+import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { createRoot, createSignal } from "solid-js"
@@ -57,10 +58,43 @@ type Envelope = {
   [k: string]: unknown
 }
 
+function cacheRoot(): string {
+  return process.env.ARTEMIS_CACHE || path.join(os.homedir(), ".cache", "artemis")
+}
+
 function socketPath(): string {
-  return process.env.ARTEMIS_CACHE
-    ? path.join(process.env.ARTEMIS_CACHE, "daemon.sock")
-    : path.join(os.homedir(), ".cache", "artemis", "daemon.sock")
+  return path.join(cacheRoot(), "daemon.sock")
+}
+
+function readDaemonPort(): number | null {
+  const env = process.env.ARTEMIS_DAEMON_PORT
+  if (env && /^\d+$/.test(env)) return parseInt(env, 10)
+  try {
+    const raw = fs.readFileSync(path.join(cacheRoot(), "daemon.port"), "utf8").trim()
+    const p = parseInt(raw, 10)
+    return Number.isFinite(p) ? p : null
+  } catch {
+    return null
+  }
+}
+
+function createDaemonConnection(): net.Socket {
+  const endpoint = (process.env.ARTEMIS_DAEMON_ENDPOINT || "").trim()
+  if (endpoint.startsWith("tcp:")) {
+    const rest = endpoint.slice(4)
+    const idx = rest.lastIndexOf(":")
+    const host = rest.slice(0, idx) || "127.0.0.1"
+    const port = parseInt(rest.slice(idx + 1), 10)
+    return net.createConnection({ host, port })
+  }
+  if (endpoint.startsWith("unix:")) {
+    return net.createConnection(endpoint.slice(5))
+  }
+  const port = readDaemonPort()
+  if (process.platform === "win32" && port) {
+    return net.createConnection({ host: "127.0.0.1", port })
+  }
+  return net.createConnection(socketPath())
 }
 
 /** Max lines held in the TUI swarm-log buffer (matches daemon REPLAY_TAIL_LINES). */
@@ -236,12 +270,10 @@ class DaemonClient {
 
   private connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const p = socketPath()
-      let attempts = 0
-      let settled = false
       const tryOnce = () => {
         if (this.closed) return reject(new Error("client closed"))
-        const s = net.createConnection(p, () => {
+        const s = createDaemonConnection()
+        s.on("connect", () => {
           this.sock = s
           // Wait for hello ack so the daemon has subscribed this socket before
           // we resolve (avoids missing early solve_flow_request pushes).

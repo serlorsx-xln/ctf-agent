@@ -11,6 +11,7 @@ import pytest
 
 from backend.daemon import handlers as handlers_mod
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 from backend.shell.sandbox_session import save_session_state
 
 
@@ -58,7 +59,7 @@ def test_usage_disconnect_does_not_cancel_pending_dialogs(daemon_env: str) -> No
             fut: asyncio.Future = loop.create_future()
             handlers_mod.register_dialog("confirm-1", fut)
 
-            ur, uw = await asyncio.open_unix_connection(daemon_env)
+            ur, uw = await open_connection()
             uw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "usage", "session": "s1"}) + "\n").encode()
             )
@@ -91,14 +92,14 @@ def test_usage_role_session_refresh_rehydrates(daemon_env: str) -> None:
         d, task = await _start()
         try:
             # Real TUI subscriber to observe the push.
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
             await tw.drain()
             await asyncio.wait_for(tr.readline(), 3)
 
-            ur, uw = await asyncio.open_unix_connection(daemon_env)
+            ur, uw = await open_connection()
             uw.write(
                 (json.dumps({"v": 1, "id": "hu", "type": "hello", "role": "usage", "session": "s1"}) + "\n").encode()
             )

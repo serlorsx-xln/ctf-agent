@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture
@@ -50,6 +51,7 @@ async def _stop(d: Daemon, task: asyncio.Task) -> None:
 
 def test_usage_report_forwards_to_tui(daemon_env: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # Run under the daemon so cost_tracker._emit_usage_to_daemon fires.
+    monkeypatch.setenv("ARTEMIS_DAEMON_ENDPOINT", f"unix:{daemon_env}")
     monkeypatch.setenv("ARTEMIS_DAEMON_SOCK", daemon_env)
     monkeypatch.setenv("ARTEMIS_SESSION_ID", "s1")
     # Force the publish throttle to fire.
@@ -60,7 +62,7 @@ def test_usage_report_forwards_to_tui(daemon_env: str, monkeypatch: pytest.Monke
     async def run() -> None:
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )

@@ -154,7 +154,7 @@ Flags are accepted locally via `submit_flag` (no external scoreboard URL/token r
 
 - Python 3.14+
 - Bun (for Artemis TUI)
-- Docker
+- Docker (Docker Desktop on Windows/macOS; Colima or Docker Desktop on Linux)
 - Provider credentials via TUI `/connect` (or env for headless swarm)
   - Cursor — [Dashboard → API Keys / Integrations](https://cursor.com/dashboard)
   - Claude — Anthropic API key, `claude setup-token`, or import Claude Code
@@ -162,6 +162,17 @@ Flags are accepted locally via `submit_flag` (no external scoreboard URL/token r
   - Gemini — Google AI Studio / Gemini API key
 - `codex` CLI (only for Codex solver/coordinator)
 - `claude` CLI (only for Claude SDK backend; bundled with claude-agent-sdk)
+
+### Launch
+
+| OS | Command |
+|---|---|
+| macOS / Linux | `uv run artemis` or `./chassis/bin/artemis` |
+| Windows (native) | `chassis\bin\artemis.cmd` or `powershell -File chassis\bin\artemis.ps1` |
+| WSL2 | same as Linux inside WSL |
+
+The control-plane daemon uses a Unix socket on macOS/Linux and **TCP localhost**
+on Windows (port written to `~/.cache/artemis/daemon.port`).
 
 ## Acknowledgements
 

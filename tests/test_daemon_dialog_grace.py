@@ -17,6 +17,7 @@ import pytest
 from backend.daemon import handlers as handlers_mod
 from backend.daemon import server as server_mod
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture
@@ -54,7 +55,7 @@ async def _stop(d: Daemon, task: asyncio.Task) -> None:
 
 
 async def _hello(sock: str, role: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    r, w = await asyncio.open_unix_connection(sock)
+    r, w = await open_connection()
     hello = {"v": 1, "id": "h", "type": "hello", "role": role, "session": "s1"}
     w.write((json.dumps(hello) + "\n").encode())
     await w.drain()

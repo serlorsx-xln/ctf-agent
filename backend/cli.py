@@ -310,7 +310,9 @@ def _harden_supervised_swarm() -> None:
     ``live_log._emit`` swallow pipe errors so the swarm keeps running detached
     and keeps teeing to the disk log for adopt-on-restart.
     """
-    if not os.environ.get("ARTEMIS_DAEMON_SOCK"):
+    from backend.daemon.transport import daemon_configured_in_env
+
+    if not daemon_configured_in_env():
         return
     import signal
 
@@ -333,10 +335,10 @@ def _ask_flags_via_daemon(challenge_name: str) -> int | None:
     import time
     import uuid
 
+    from backend.daemon.transport import daemon_configured_in_env, sync_connect
     from backend.flags import normalize_flags_required
 
-    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
-    if not sock_path:
+    if not daemon_configured_in_env():
         return None
     session = os.environ.get("ARTEMIS_SESSION_ID")
     req_id = uuid.uuid4().hex[:12]
@@ -347,9 +349,7 @@ def _ask_flags_via_daemon(challenge_name: str) -> int | None:
     live("artemis", f"FLAGS_ASK id={req_id} default=1 challenge={challenge_name or 'loaded'}")
 
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.25)
-        s.connect(sock_path)
+        s = sync_connect(timeout=0.25)
     except OSError:
         return None
 
@@ -430,10 +430,11 @@ def print_swarm_outcome(swarm, result, *, out: Console | None = None) -> None:
     """
     import os
 
+    from backend.daemon.transport import daemon_configured_in_env
     from backend.solver_base import FLAG_FOUND, GAVE_UP, QUOTA_ERROR
 
     con = out or console
-    under_daemon = bool(os.environ.get("ARTEMIS_DAEMON_SOCK", "").strip())
+    under_daemon = daemon_configured_in_env()
     if result and result.status == FLAG_FOUND:
         # Under the TUI daemon, CORRECT already carries the flag — another
         # FLAG FOUND line just repeats it. Keep the banner for bare CLI runs.
@@ -511,9 +512,11 @@ async def _run_single(
         console.print(f"[red]Failed to load challenge: {e}[/red]")
         sys.exit(1)
 
+    from backend.daemon.transport import daemon_configured_in_env
+
     if flags_required is not None:
         meta.flags_required = normalize_flags_required(flags_required)
-    elif os.environ.get("ARTEMIS_DAEMON_SOCK"):
+    elif daemon_configured_in_env():
         # Daemon-supervised swarm with unknown flags_required: ask the TUI via a
         # digits dialog pushed through the daemon, then proceed.
         asked = _ask_flags_via_daemon(meta.name)

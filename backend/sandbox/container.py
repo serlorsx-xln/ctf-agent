@@ -197,17 +197,20 @@ class DockerSandbox:
             challenge_root = Path(self.challenge_dir).resolve()
             from backend.challenge import distfiles_host_path
             from backend.pack_preflight import resolve_prefetch_packs
+            from backend.platform_paths import docker_volume_path
             from backend.tool_router import pack_binds_enabled
 
             dist_host = distfiles_host_path(challenge_root)
-            binds: list[str] = [f"{self.workspace_dir}:/challenge/workspace:rw"]
+            binds: list[str] = [
+                f"{docker_volume_path(self.workspace_dir)}:/challenge/workspace:rw"
+            ]
             if dist_host is not None:
-                binds.append(f"{dist_host}:/challenge/distfiles:ro")
+                binds.append(f"{docker_volume_path(dist_host)}:/challenge/distfiles:ro")
             else:
                 # Web/link-only: empty distfiles so the path still exists in-container.
                 empty_dist = tempfile.mkdtemp(prefix="ctf-dist-empty-")
                 self._temp_dirs.append(empty_dist)
-                binds.append(f"{empty_dist}:/challenge/distfiles:ro")
+                binds.append(f"{docker_volume_path(empty_dist)}:/challenge/distfiles:ro")
             for name in (
                 "challenge.txt",
                 "challenge.md",
@@ -217,7 +220,7 @@ class DockerSandbox:
             ):
                 p = challenge_root / name
                 if p.is_file():
-                    binds.append(f"{p}:/challenge/{p.name}:ro")
+                    binds.append(f"{docker_volume_path(p)}:/challenge/{p.name}:ro")
 
             # Prefetch packs before create so large trees can share RO host binds.
             self._bind_mounted_packs = set()
@@ -942,6 +945,7 @@ class DockerSandbox:
         ones) so an on-demand ``ensure_pack`` still reuses an earlier build.
         Session-scoped unless the pack sets ``shared_state`` (blutter Dart VMs).
         """
+        from backend.platform_paths import docker_volume_path
         from backend.tool_router import PACK_SPECS, pack_state_dir
 
         out: list[str] = []
@@ -954,11 +958,12 @@ class DockerSandbox:
                 except OSError as e:
                     logger.warning("Pack %s state dir %s unusable: %s", pack_id, host, e)
                     continue
-                out.append(f"{host.resolve()}:{container_path}:rw")
+                out.append(f"{docker_volume_path(host)}:{container_path}:rw")
         return out
 
     def _pack_bind_strings(self, cache: Path, pack_id: str) -> list[str]:
         """Build Docker bind specs for a pack's host-cache trees."""
+        from backend.platform_paths import docker_volume_path
         from backend.tool_router import PACK_SPECS, pack_cache_item
 
         spec = PACK_SPECS[pack_id]
@@ -968,7 +973,7 @@ class DockerSandbox:
             if not host.exists():
                 logger.warning("Pack %s bind skip missing %s", pack_id, host)
                 continue
-            out.append(f"{host}:{src}:ro")
+            out.append(f"{docker_volume_path(host)}:{src}:ro")
         return out
 
     async def _materialize_pack_cache(self, pack_id: str) -> Path:

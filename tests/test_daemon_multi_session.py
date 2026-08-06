@@ -12,6 +12,7 @@ import pytest
 
 from backend.daemon.handlers import cancel_pending_dialogs, register_dialog
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 from backend.daemon.state import DaemonState
 from backend.daemon.supervisor import SwarmSupervisor
 
@@ -106,8 +107,8 @@ def test_two_tui_sessions_isolated_pushes(daemon_env: str) -> None:
         task = asyncio.create_task(d.serve())
         await asyncio.sleep(0.15)
         try:
-            ra, wa = await asyncio.open_unix_connection(daemon_env)
-            rb, wb = await asyncio.open_unix_connection(daemon_env)
+            ra, wa = await open_connection()
+            rb, wb = await open_connection()
             for w, sid in ((wa, "win-a"), (wb, "win-b")):
                 w.write(
                     (
@@ -190,7 +191,7 @@ def test_two_sessions_load_isolated_disk(daemon_env: str, tmp_path: Path) -> Non
                 ("ses_aaa", chal_a, "la"),
                 ("ses_bbb", chal_b, "lb"),
             ):
-                r, w = await asyncio.open_unix_connection(daemon_env)
+                r, w = await open_connection()
                 w.write(
                     (
                         json.dumps(

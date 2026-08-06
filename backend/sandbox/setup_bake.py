@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import sys
 from pathlib import Path
 
 logger = logging.getLogger("ctf.setup")
@@ -73,11 +74,15 @@ def probe_docker_env() -> list[str]:
         lines.append(f"DOCKER_HOST={host}")
         return lines
 
-    candidates = (
-        Path.home() / ".colima" / "default" / "docker.sock",
-        Path.home() / ".docker" / "run" / "docker.sock",
-        Path("/var/run/docker.sock"),
-    )
+    if sys.platform == "win32":
+        lines.append("Docker: npipe:////./pipe/docker_engine (Docker Desktop)")
+        return lines
+
+    candidates: tuple[Path, ...] = (
+            Path.home() / ".colima" / "default" / "docker.sock",
+            Path.home() / ".docker" / "run" / "docker.sock",
+            Path("/var/run/docker.sock"),
+        )
     found = next((p for p in candidates if p.exists()), None)
     if found is not None:
         if "colima" in str(found):

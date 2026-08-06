@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ def test_hello_and_status(daemon_env: str) -> None:
     async def run() -> None:
         d, task = await _start()
         try:
-            r, w = await asyncio.open_unix_connection(daemon_env)
+            r, w = await open_connection()
             w.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
@@ -92,7 +93,7 @@ def test_flag_confirm_dialog_flow(daemon_env: str) -> None:
     async def run() -> None:
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
@@ -100,7 +101,7 @@ def test_flag_confirm_dialog_flow(daemon_env: str) -> None:
             await asyncio.wait_for(tr.readline(), 3)  # hello ack
 
             async def swarm_side() -> dict:
-                sr, sw = await asyncio.open_unix_connection(daemon_env)
+                sr, sw = await open_connection()
                 sw.write(
                     (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "swarm", "session": "s1"}) + "\n").encode()
                 )
@@ -171,7 +172,7 @@ def test_flag_confirm_rejection_carries_the_operator_reason(daemon_env: str) -> 
     async def run() -> None:
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
@@ -179,7 +180,7 @@ def test_flag_confirm_rejection_carries_the_operator_reason(daemon_env: str) -> 
             await asyncio.wait_for(tr.readline(), 3)
 
             async def swarm_side() -> dict:
-                sr, sw = await asyncio.open_unix_connection(daemon_env)
+                sr, sw = await open_connection()
                 sw.write(
                     (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "swarm", "session": "s1"}) + "\n").encode()
                 )
@@ -251,7 +252,7 @@ def test_flag_confirm_accept_relays_an_empty_reason(daemon_env: str) -> None:
     async def run() -> None:
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
@@ -259,7 +260,7 @@ def test_flag_confirm_accept_relays_an_empty_reason(daemon_env: str) -> None:
             await asyncio.wait_for(tr.readline(), 3)
 
             async def swarm_side() -> dict:
-                sr, sw = await asyncio.open_unix_connection(daemon_env)
+                sr, sw = await open_connection()
                 sw.write(
                     (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "swarm", "session": "s1"}) + "\n").encode()
                 )
@@ -325,7 +326,7 @@ def test_unknown_type_returns_error(daemon_env: str) -> None:
     async def run() -> None:
         d, task = await _start()
         try:
-            r, w = await asyncio.open_unix_connection(daemon_env)
+            r, w = await open_connection()
             w.write((json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui"}) + "\n").encode())
             await w.drain()
             await asyncio.wait_for(r.readline(), 3)

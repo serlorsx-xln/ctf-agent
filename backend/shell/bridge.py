@@ -394,38 +394,21 @@ async def _swarm(payload: dict) -> str:
 
 
 def _daemon_available() -> bool:
-    """True if a daemon is listening on the control-plane socket."""
-    import socket
+    """True if a daemon is listening on the control-plane endpoint."""
+    from backend.daemon.transport import daemon_alive
 
-    from backend.daemon.socket_path import daemon_socket_path
-
-    sock_path = daemon_socket_path()
-    if not sock_path.exists():
-        return False
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        s.settimeout(0.25)
-        s.connect(str(sock_path))
-        return True
-    except OSError:
-        return False
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
+    return daemon_alive()
 
 
 async def _swarm_via_daemon(payload: dict) -> str:
     """Stream a daemon-supervised swarm into this process's stdout."""
     import json as _json
 
-    from backend.daemon.socket_path import daemon_socket_path
+    from backend.daemon.transport import open_connection
     from backend.shell.sandbox_session import resolve_session_id
 
     sid = resolve_session_id(payload.get("session") or payload.get("session_id"))
-    sock_path = str(daemon_socket_path())
-    reader, writer = await asyncio.open_unix_connection(sock_path)
+    reader, writer = await open_connection()
     try:
         writer.write(
             _json.dumps(

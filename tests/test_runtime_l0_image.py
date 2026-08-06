@@ -11,7 +11,7 @@ def test_pwn_prefetch_uses_baked_runtime():
 
 def test_crypto_prefetch_stays_on_core():
     assert resolve_runtime_l0_image(["crypto"]) == "ctf-sandbox-core"
-    assert resolve_runtime_l0_image(["mobile"]) == "ctf-sandbox-core"
+    assert resolve_runtime_l0_image(["mobile"]) == "ctf-sandbox-mobile"
 
 
 def test_custom_l0_not_overridden():

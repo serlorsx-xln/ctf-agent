@@ -1,8 +1,7 @@
-"""Artemis control-plane daemon: NDJSON over a Unix socket.
+"""Artemis control-plane daemon: NDJSON over Unix socket or TCP (Windows).
 
-Lifecycle: started by ``chassis/bin/artemis`` alongside the cursor stub. Binds
-``~/.cache/artemis/daemon.sock`` (mode 0600). On start: hydrate state from
-``session.json`` and adopt any still-running swarm.
+Lifecycle: started by ``chassis/bin/artemis`` alongside the cursor stub.
+Unix: ``~/.cache/artemis/daemon.sock``. Windows: ``127.0.0.1`` + ``daemon.port``.
 
 Two client roles (distinguished by the initial ``hello`` message):
   - ``tui``   : the TUI. Sends requests, receives push events (subscribed).
@@ -20,14 +19,13 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 from typing import Any
 
 from backend.daemon import handlers as handlers_mod
 from backend.daemon import protocol
 from backend.daemon.handlers import Handlers
 from backend.daemon.session_id import normalize_session_id
-from backend.daemon.socket_path import daemon_socket_path
+from backend.daemon.transport import start_daemon_server
 from backend.daemon.state import DaemonState
 from backend.daemon.supervisor import SwarmSupervisor
 
@@ -95,25 +93,8 @@ class Daemon:
     # ---- lifecycle -------------------------------------------------------
     async def start(self) -> None:
         self.state.hydrate_all()
-        sock_path = daemon_socket_path()
-
-        # If a socket file exists, probe liveness; adopt-or-rebind.
-        if sock_path.exists():
-            if _socket_alive(sock_path):
-                logger.warning("daemon already running on %s — exiting", sock_path)
-                # Idempotent: another daemon owns it.
-                sys.exit(0)
-            try:
-                sock_path.unlink()
-            except OSError:
-                pass
-
-        self.server = await asyncio.start_unix_server(self._on_connect, path=str(sock_path))
-        try:
-            sock_path.chmod(0o600)
-        except OSError:
-            pass
-        logger.info("daemon listening on %s", sock_path)
+        self.server, addr = await start_daemon_server(self._on_connect)
+        logger.info("daemon listening on %s", addr)
 
         # Re-adopt a swarm that outlived a previous daemon instance.
         try:
@@ -520,24 +501,6 @@ class _PeerConn:
 
 
 # ---- helpers --------------------------------------------------------------
-
-
-def _socket_alive(sock_path: Path) -> bool:
-    """Probe whether a daemon is already listening on the socket."""
-    import socket
-
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        s.settimeout(0.25)
-        s.connect(str(sock_path))
-        return True
-    except OSError:
-        return False
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
 
 
 async def _async_main() -> None:

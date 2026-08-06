@@ -205,18 +205,17 @@ def sync_accepted_flags(
 
 def _notify_daemon_session_refresh(session_id: str | None = None) -> None:
     """Best-effort: tell the daemon to rehydrate session.json → TUI push."""
-    import socket
+    import json
     import uuid
 
-    sock_path = os.environ.get("ARTEMIS_DAEMON_SOCK")
-    if not sock_path:
+    from backend.daemon.transport import daemon_configured_in_env, sync_connect
+
+    if not daemon_configured_in_env():
         return
     session = resolve_session_id(session_id)
     req_id = uuid.uuid4().hex[:12]
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        s.connect(sock_path)
+        s = sync_connect(timeout=0.5)
         s.sendall(
             (
                 json.dumps(

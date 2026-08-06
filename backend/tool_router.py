@@ -544,6 +544,7 @@ DEFAULT_L0_CANDIDATES = ("ctf-sandbox-core",)
 # Copy-only donors (ghidra, crypto trees) stay additive on core.
 PREFETCH_RUNTIME_IMAGES: dict[str, str] = {
     "pwn": "ctf-sandbox-pwn",
+    "mobile": "ctf-sandbox-mobile",
 }
 
 RUNTIME_L0_IMAGES = frozenset({"ctf-sandbox-core", *PREFETCH_RUNTIME_IMAGES.values()})

@@ -9,16 +9,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Prefer an existing DOCKER_HOST; else Colima; else Docker Desktop / system sock.
+# Prefer an existing DOCKER_HOST; else platform defaults.
 if "DOCKER_HOST" not in os.environ:
-    for candidate in (
-        Path.home() / ".colima/default/docker.sock",
-        Path.home() / ".docker/run/docker.sock",
-        Path("/var/run/docker.sock"),
-    ):
-        if candidate.exists():
-            os.environ["DOCKER_HOST"] = f"unix://{candidate}"
-            break
+    if sys.platform == "win32":
+        os.environ["DOCKER_HOST"] = "npipe:////./pipe/docker_engine"
+    else:
+        for candidate in (
+            Path.home() / ".colima/default/docker.sock",
+            Path.home() / ".docker/run/docker.sock",
+            Path("/var/run/docker.sock"),
+        ):
+            if candidate.exists():
+                os.environ["DOCKER_HOST"] = f"unix://{candidate}"
+                break
 
 from backend.sandbox import DockerSandbox  # noqa: E402
 from backend.tool_router import PACK_SPECS  # noqa: E402

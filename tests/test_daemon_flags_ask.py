@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.daemon.server import Daemon
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture
@@ -54,7 +55,7 @@ def test_flags_ask_dialog_flow(daemon_env: str) -> None:
     async def run() -> None:
         d, task = await _start()
         try:
-            tr, tw = await asyncio.open_unix_connection(daemon_env)
+            tr, tw = await open_connection()
             tw.write(
                 (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s1"}) + "\n").encode()
             )
@@ -62,7 +63,7 @@ def test_flags_ask_dialog_flow(daemon_env: str) -> None:
             await asyncio.wait_for(tr.readline(), 3)  # hello ack
 
             async def swarm_side() -> dict:
-                sr, sw = await asyncio.open_unix_connection(daemon_env)
+                sr, sw = await open_connection()
                 sw.write(
                     (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "swarm", "session": "s1"}) + "\n").encode()
                 )
