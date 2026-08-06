@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
-import os
 from pathlib import Path
+
+from backend.file_lock import acquire as _file_lock_acquire
+from backend.file_lock import release as _file_lock_release
 
 logger = logging.getLogger("ctf.sandbox")
 
@@ -35,18 +36,14 @@ def _pack_cache_lock_path(pack_id: str) -> Path:
 def _acquire_pack_flock(pack_id: str) -> int:
     """Block until this process owns exclusive extract rights for ``pack_id``."""
     path = _pack_cache_lock_path(pack_id)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     logger.info("Pack %s: waiting for cross-process extract lock (%s)", pack_id, path)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    fd = _file_lock_acquire(path)
     logger.info("Pack %s: acquired cross-process extract lock", pack_id)
     return fd
 
 
 def _release_pack_flock(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    _file_lock_release(fd)
 
 
 def _pack_cache_is_ready(pack_id: str) -> bool:

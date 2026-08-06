@@ -7,10 +7,12 @@ them once instead of telling the operator to run docker by hand.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
 import os
 from pathlib import Path
+
+from backend.file_lock import acquire as _file_lock_acquire
+from backend.file_lock import release as _file_lock_release
 
 logger = logging.getLogger("ctf.sandbox.donor")
 
@@ -69,18 +71,14 @@ def _donor_flock_path(pack_id: str) -> Path:
 
 def _acquire_donor_flock(pack_id: str) -> int:
     path = _donor_flock_path(pack_id)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     logger.info("Donor %s: waiting for cross-process build lock (%s)", pack_id, path)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    fd = _file_lock_acquire(path)
     logger.info("Donor %s: acquired cross-process build lock", pack_id)
     return fd
 
 
 def _release_donor_flock(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    _file_lock_release(fd)
 
 
 async def _donor_image_functional(pack_id: str, image: str) -> bool:

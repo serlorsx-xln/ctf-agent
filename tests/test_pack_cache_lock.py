@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import platform
 import threading
 import time
 from pathlib import Path
@@ -43,7 +43,7 @@ def test_pack_flock_serializes_extract(tmp_path: Path, monkeypatch) -> None:
 def test_pack_cache_is_ready_requires_marker_and_paths(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CTF_PACK_CACHE", str(tmp_path))
     # Force arch dir used by pack_cache_dir
-    arch = "arm64" if os.uname().machine in ("arm64", "aarch64") else os.uname().machine
+    arch = platform.machine().replace("aarch64", "arm64")
     cache = tmp_path / "crypto" / arch
     assert sandbox._pack_cache_is_ready("crypto") is False
 
