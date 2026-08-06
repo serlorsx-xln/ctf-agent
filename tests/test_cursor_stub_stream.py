@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from backend.shell import cursor_llm_stub as stub
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_wants_stream() -> None:
@@ -354,7 +357,7 @@ def test_fresh_go_after_failed_reload_does_not_ask_flags(monkeypatch) -> None:
 
 def test_same_path_fresh_turn_reloads(monkeypatch) -> None:
     """Re-paste of the same folder on a fresh turn → reload."""
-    chal = "/Users/serlorsx/Downloads/ctf/challenges/tctt-junior-cipher-puzzle"
+    chal = str(REPO_ROOT / "challenges/tctt-junior-cipher-puzzle")
     monkeypatch.setattr(
         "backend.shell.sandbox_session.load_session_state",
         lambda *_a, **_k: {"challenge_dir": chal, "challenge_name": "tctt-junior-cipher-puzzle"},

@@ -29,8 +29,13 @@ node_modules/
 *.tsbuildinfo
 *.heapsnapshot
 
-# OS junk
+# OS junk (ExFAT/USB volumes recreate AppleDouble metadata)
 .DS_Store
+._*
+**/._*
+
+# Local challenge archives (not part of the product)
+challenges.zip
 
 # Local unpack / blutter test blobs (not part of the product)
 sandbox/fixtures/

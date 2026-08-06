@@ -15,3 +15,6 @@ uv.lock
 .env
 agent-transcripts
 **/.DS_Store
+**/._*
+challenges.zip
+challenges*.zip

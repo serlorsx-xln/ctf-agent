@@ -331,7 +331,6 @@ def _ask_flags_via_daemon(challenge_name: str) -> int | None:
     """
     import json as _json
     import select
-    import socket
     import time
     import uuid
 
@@ -428,7 +427,6 @@ def print_swarm_outcome(swarm, result, *, out: Console | None = None) -> None:
     ``soft_wrap`` throughout: rich's 80-column wrap used to push the flag onto
     its own line, leaving the TUI showing a bare ``FLAG FOUND:``.
     """
-    import os
 
     from backend.daemon.transport import daemon_configured_in_env
     from backend.solver_base import FLAG_FOUND, GAVE_UP, QUOTA_ERROR

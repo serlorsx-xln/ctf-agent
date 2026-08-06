@@ -17,7 +17,7 @@ Missing sealed flags upstream (no `writeup/flag.txt`): `tctt-junior-secret-or-se
 ## Run
 
 ```bash
-cd /Users/serlorsx/Downloads/ctf
+cd "$(git rev-parse --show-toplevel)"
 unset DOCKER_HOST
 uv run artemis swarm --challenge ./challenges/tctt-junior-very-ez-re --models 'cursor/grok-4.5' -v
 ```

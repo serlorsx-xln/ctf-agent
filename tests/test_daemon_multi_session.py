@@ -12,9 +12,9 @@ import pytest
 
 from backend.daemon.handlers import cancel_pending_dialogs, register_dialog
 from backend.daemon.server import Daemon
-from backend.daemon.transport import open_connection
 from backend.daemon.state import DaemonState
 from backend.daemon.supervisor import SwarmSupervisor
+from backend.daemon.transport import open_connection
 
 
 @pytest.fixture

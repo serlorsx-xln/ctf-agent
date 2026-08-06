@@ -554,7 +554,6 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
     """
     import json as _json
     import select
-    import socket
     import time
     import uuid
 

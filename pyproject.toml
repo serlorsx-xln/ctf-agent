@@ -42,6 +42,7 @@ packages = ["backend"]
 [tool.ruff]
 target-version = "py314"
 line-length = 100
+exclude = ["**/._*", ".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N", "C4", "PTH"]

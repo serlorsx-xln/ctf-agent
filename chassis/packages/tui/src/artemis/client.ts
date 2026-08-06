@@ -270,6 +270,8 @@ class DaemonClient {
 
   private connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      let attempts = 0
+      let settled = false
       const tryOnce = () => {
         if (this.closed) return reject(new Error("client closed"))
         const s = createDaemonConnection()

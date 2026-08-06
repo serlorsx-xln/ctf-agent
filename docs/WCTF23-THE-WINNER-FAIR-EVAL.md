@@ -11,7 +11,7 @@ Imported as `challenges/wctf23-the-winner/` with **binary only** (no GitHub/Driv
 ## Run
 
 ```bash
-cd /Users/serlorsx/Downloads/ctf
+cd "$(git rev-parse --show-toplevel)"
 unset DOCKER_HOST
 uv run artemis swarm --challenge ./challenges/wctf23-the-winner --models 'cursor/grok-4.5' -v
 ```

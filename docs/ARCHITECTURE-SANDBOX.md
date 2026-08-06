@@ -467,7 +467,7 @@ Agent logic เดิม (บาง)
 
 | รายการ | ที่อยู่ / หมายเหตุ |
 |--------|-------------------|
-| Repo | `/Users/serlorsx/Downloads/ctf` (branch Cursor backend) |
+| Repo | Artemis TUI repo root (branch `cursor-backend`) |
 | Sandbox ปัจจุบัน | L0 `Dockerfile.core`; packs `Dockerfile.pwn` / `crypto` / `crypto-tools` / `steg` / `linux` / `mobile`; apt/pip packs: forensics / web / ml / containers |
 | Sandbox package | `backend/sandbox/` — `container` / `packs` / `proxy` / `harden` / `governor` / `docker_client`; public facade `from backend.sandbox import DockerSandbox` |
 | Pack preflight | `backend/pack_preflight.py` — `force_packs` CLI `--pack` wins; else `detected_packs` / `detect_packs`; timings `preflight_ms`; `--eval-strict-packs` fail-closed |

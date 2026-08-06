@@ -11,7 +11,7 @@ Imported as `challenges/wctf23-saw-xi-ep2/` with **memory dump only** (no Drive 
 ## Run
 
 ```bash
-cd /Users/serlorsx/Downloads/ctf
+cd "$(git rev-parse --show-toplevel)"
 unset DOCKER_HOST
 uv run artemis swarm --challenge ./challenges/wctf23-saw-xi-ep2 --models 'cursor/grok-4.5' -v
 ```

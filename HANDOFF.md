@@ -1,7 +1,7 @@
 # Artemis Handoff
 
-**Updated:** 2026-07-26  
-**Repo:** `/Users/serlorsx/Downloads/ctf`  
+**Updated:** 2026-08-06  
+**Repo:** `/Volumes/UNITEK/project/artemis/tui` (or clone path)  
 **Branch:** `cursor-backend`
 
 **Product flow (source of truth):** [`docs/TUI-PRODUCT-FLOW.md`](docs/TUI-PRODUCT-FLOW.md)
@@ -10,21 +10,22 @@
 
 ## Product
 
-Artemis = CTF agent on OpenCode TUI (`chassis/`) + Python backend (`backend/`) + daemon socket.
+Artemis = CTF agent on OpenCode TUI (`chassis/`) + Python backend (`backend/`) + daemon (Unix socket on macOS/Linux, TCP localhost on Windows).
 
 Flow: auth (`/connect`) → drop challenge → dialogs (flags → single/swarm → models) → swarm via daemon → flag confirm → prose writeup recap → chat unlock.
 
 ---
 
-## Recent backend/TUI state (2026-07-26)
+## Recent backend/TUI state (2026-08-06)
 
 | Area | Status |
 |------|--------|
-| Pwn runtime | `ctf-sandbox-pwn` baked; bootstrap ~1s |
+| Cross-platform daemon | `backend/daemon/transport.py` — Unix socket + TCP `daemon.port` |
+| Windows launch | `chassis/bin/artemis.cmd`, `artemis.ps1` |
+| Pwn / mobile runtime | L0 images `ctf-sandbox-pwn`, `ctf-sandbox-mobile` |
 | Writeup recap | Prose-only via `produce_writeup()` (no command trail) |
 | Post-CORRECT TUI | `dropPostSolveAgentChatter` suppresses duplicate ai/think |
-| Action log | Removed unused per-tool `_action_log` chain |
-| Tests | 359+ pytest; TUI live-log tests green |
+| Tests | 359 pytest; daemon transport + dialog tests green |
 
 Latest commit on branch: see `git log -1`.
 
@@ -39,8 +40,9 @@ Latest commit on branch: see `git log -1`.
 | Live log / dedupe | `chassis/packages/tui/src/util/artemis-live-log.ts` |
 | Sandbox / packs | `backend/tool_router.py`, `backend/sandbox/` |
 | Multi-session daemon | `backend/daemon/` |
+| Docker bind paths | `backend/platform_paths.py` |
 
-Legacy aliases kept intentionally: `artemis race` / `normalize_race_spec` / `ctf-solve` → swarm.
+Legacy aliases kept intentionally: `artemis race` / `normalize_race_spec` / `ctf-solve` → swarm. `ctf-msg` → one-shot daemon RPC.
 
 ---
 
@@ -49,3 +51,4 @@ Legacy aliases kept intentionally: `artemis race` / `normalize_race_spec` / `ctf
 1. Do not claim 100% confidence / do not lie.
 2. Token/cost UI = provider SDK reported only.
 3. Do not commit or push unless the user asks.
+4. User handles video assets separately.

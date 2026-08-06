@@ -18,16 +18,15 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 from typing import Any
 
 from backend.daemon import handlers as handlers_mod
 from backend.daemon import protocol
 from backend.daemon.handlers import Handlers
 from backend.daemon.session_id import normalize_session_id
-from backend.daemon.transport import start_daemon_server
 from backend.daemon.state import DaemonState
 from backend.daemon.supervisor import SwarmSupervisor
+from backend.daemon.transport import start_daemon_server
 
 logger = logging.getLogger("backend.daemon")
 
