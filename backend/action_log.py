@@ -12,10 +12,6 @@ def notes_from_prose(prose: str) -> str:
     cleaned = _useful_prose(prose)
     if cleaned and is_usable_narrative(cleaned):
         return "\n".join(clean_how_lines(cleaned)).strip()
-    if cleaned:
-        lines = clean_how_lines(cleaned)
-        if lines:
-            return "\n".join(lines).strip()
     return ""
 
 

@@ -48,7 +48,7 @@ from backend.bash_intercept import (
     submit_flag_suffix,
 )
 from backend.continue_prompt import build_continue_prompt
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.flags import is_decoy_flag
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
@@ -865,10 +865,11 @@ class CursorSolver:
                     u = message.usage
                     if u is not None:
                         self._turn_usage_pending = u
+                        parsed = usage_from_provider(u)
                         self.cost_tracker.publish_with_pending(
-                            input_tokens=int(getattr(u, "input_tokens", 0) or 0),
-                            output_tokens=int(getattr(u, "output_tokens", 0) or 0),
-                            cache_read_tokens=int(getattr(u, "cache_read_tokens", 0) or 0),
+                            input_tokens=parsed["input"],
+                            output_tokens=parsed["output"],
+                            cache_read_tokens=parsed["cache_read"],
                         )
 
                 elif isinstance(message, SDKToolUseMessage):
@@ -900,20 +901,17 @@ class CursorSolver:
             usage = result.usage if result.usage is not None else self._turn_usage_pending
             self._turn_usage_pending = None
             if usage is not None:
+                parsed = usage_from_provider(usage)
                 self.cost_tracker.record_tokens(
                     self.agent_name,
                     self.model_id,
-                    input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-                    output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-                    cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+                    input_tokens=parsed["input"],
+                    output_tokens=parsed["output"],
+                    cache_read_tokens=parsed["cache_read"],
                     provider_spec="cursor",
                     duration_seconds=duration,
                 )
-                self.tracer.usage(
-                    int(getattr(usage, "input_tokens", 0) or 0),
-                    int(getattr(usage, "output_tokens", 0) or 0),
-                    int(getattr(usage, "cache_read_tokens", 0) or 0),
-                )
+                self.tracer.usage(parsed["input"], parsed["output"], parsed["cache_read"])
 
             if result.result:
                 self._findings = (result.result or self._findings)[:2000]
@@ -1024,7 +1022,7 @@ class CursorSolver:
             log_path=self.tracer.path,
         )
 
-    async def produce_writeup(self) -> str:
+    async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more turn: narrative writeup for the operator recap (no tools expected)."""
         from backend.writeup import WRITEUP_PROMPT
 
@@ -1032,7 +1030,7 @@ class CursorSolver:
             return ""
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
-        run = await self._agent.send(WRITEUP_PROMPT)
+        run = await self._agent.send(prompt or WRITEUP_PROMPT)
         async for message in run.stream():
             if isinstance(message, SDKAssistantMessage):
                 for block in message.message.content:

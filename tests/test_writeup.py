@@ -57,6 +57,8 @@ def test_coalesce_writeup_falls_back_to_run_result():
 
 
 def test_writeup_prompt_asks_for_structured_prose():
+    from backend.writeup import WRITEUP_RETRY_PROMPT
+
     assert "Do not call any tools" in WRITEUP_PROMPT
     assert "## Challenge" in WRITEUP_PROMPT
     assert "## Key insight" in WRITEUP_PROMPT
@@ -65,6 +67,8 @@ def test_writeup_prompt_asks_for_structured_prose():
     assert "## Why it worked" in WRITEUP_PROMPT
     assert "## Flag" not in WRITEUP_PROMPT
     assert "15–40 sentences" in WRITEUP_PROMPT
+    assert "## Challenge" in WRITEUP_RETRY_PROMPT
+    assert "too short" in WRITEUP_RETRY_PROMPT
 
 
 def test_normalize_writeup_keeps_sections():
@@ -160,15 +164,25 @@ def test_expand_splits_solution_summary_glued_after_flag_prose():
 
 
 def test_usable_narrative_rejects_accept_spam():
-    from backend.writeup import is_usable_narrative
+    from backend.writeup import is_detailed_writeup, is_usable_narrative
 
     assert not is_usable_narrative("The flag was accepted as CORRECT. FLAG: flag{x}")
     assert not is_usable_narrative("redo it to match the ARM register width.")
-    assert is_usable_narrative(
+    structured = (
         "Challenge\nPCAP with DNS + TCP.\n\n"
         "Key insight\nTXT holds the XOR key.\n\n"
         "How\n1. dig TXT\n2. decrypt the TCP stream"
     )
+    assert is_usable_narrative(structured)
+    assert is_detailed_writeup(structured)
+    teaser = (
+        "The decoded plaintext is a passage about frequency analysis ending with "
+        "instructions: Alan Turing once said machines take me by surprise with "
+        "great frequency — take each word in the quote, join with underscores, "
+        "put in flag format."
+    )
+    assert is_usable_narrative(teaser)
+    assert not is_detailed_writeup(teaser)
 
 
 def test_notes_expand_jammed_prose_before_steps():
@@ -208,6 +222,55 @@ async def test_capture_normalizes_output():
     assert text.startswith("Challenge")
     assert "Hello world." in text
     assert "```" not in text
+
+
+@pytest.mark.asyncio
+async def test_capture_retries_thin_writeup():
+    from backend.writeup import WRITEUP_RETRY_PROMPT
+
+    calls: list[str | None] = []
+
+    async def produce_writeup(prompt: str | None = None) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            return (
+                "The decoded plaintext is a passage about frequency analysis "
+                "ending with instructions about a Turing quote."
+            )
+        return (
+            "## Challenge\nCiphertext in the challenge file.\n\n"
+            "## Key insight\nLetter frequencies match English.\n\n"
+            "## How\n1. count letters\n2. map e to the top letter\n"
+            "3. decode the quote\n4. join words with underscores\n\n"
+            "## What I tried\nROT13 failed.\n\n"
+            "## Why it worked\nThe quote was the instruction."
+        )
+
+    solver = SimpleNamespace(produce_writeup=produce_writeup)
+    text = await capture_solver_writeup(solver)
+    assert len(calls) == 2
+    assert calls[1] == WRITEUP_RETRY_PROMPT
+    assert "Key insight" in text
+    assert "count letters" in text
+
+
+@pytest.mark.asyncio
+async def test_capture_skips_retry_when_detailed():
+    calls = 0
+
+    async def produce_writeup(prompt: str | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        return (
+            "## Challenge\nShop PIN in libapp.so.\n\n"
+            "## Key insight\nClient-side check before the buy call.\n\n"
+            "## How\n1. strings libapp.so\n2. call the buy endpoint"
+        )
+
+    solver = SimpleNamespace(produce_writeup=produce_writeup)
+    text = await capture_solver_writeup(solver)
+    assert calls == 1
+    assert "Shop PIN" in text
 
 
 def test_collapse_streamed_word_per_line_writeup():

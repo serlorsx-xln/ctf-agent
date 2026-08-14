@@ -8,8 +8,8 @@ Auth modes (all via /connect → auth.json → env):
   - ADC (no key — google.auth.default(); ``gcloud auth application-default login``)
   - Vertex AI (GEMINI_PROJECT + GEMINI_LOCATION; optionally GEMINI_BASE_URL)
 
-USD is never reported by Gemini → ``cost_usd=None``. Token usage is pushed
-mid-turn for the live sidebar.
+USD is never reported by Gemini → ``cost_usd=None``. Token usage is committed
+when ``generate_content`` returns ``usage_metadata``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 from backend.agents.live_log import live as _live
 from backend.agents.live_log import live_json as _live_json
 from backend.continue_prompt import build_continue_prompt
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.prompts import ChallengeMeta, build_prompt
@@ -304,24 +304,19 @@ class GeminiSolver:
                 _live(f"{self.agent_name} status", f" Gemini error: {e}")
                 return self._result(GAVE_UP, run_steps=self._step_count)
 
-            # Commit + preview token usage (provider-reported only; no USD).
-            usage = getattr(response, "usage_metadata", None)
-            if usage is not None:
-                in_t = int(getattr(usage, "prompt_token_count", 0) or 0)
-                out_t = int(getattr(usage, "candidates_token_count", 0) or 0)
-                cache_t = int(getattr(usage, "cached_content_token_count", 0) or 0)
+            # Commit provider-reported tokens only. Do not preview the same
+            # snapshot after record — that doubled the sidebar totals.
+            parsed = usage_from_provider(response)
+            if parsed["input"] or parsed["output"] or parsed["cache_read"]:
                 self.cost_tracker.record_tokens(
                     self.agent_name,
                     self.model_id,
-                    input_tokens=in_t,
-                    output_tokens=out_t,
-                    cache_read_tokens=cache_t,
+                    input_tokens=parsed["input"],
+                    output_tokens=parsed["output"],
+                    cache_read_tokens=parsed["cache_read"],
                     provider_spec="gemini-sdk",
                     duration_seconds=time.monotonic() - t0,
                     reported_cost_usd=None,  # Gemini does not report USD.
-                )
-                self.cost_tracker.publish_with_pending(
-                    input_tokens=in_t, output_tokens=out_t, cache_read_tokens=cache_t
                 )
 
             candidate = response.candidates[0] if response.candidates else None
@@ -402,14 +397,14 @@ class GeminiSolver:
 
         stash_bump(self, insights)
 
-    async def produce_writeup(self) -> str:
+    async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more generate_content call without tools for the operator recap."""
         from backend.writeup import WRITEUP_PROMPT
 
         if self._client is None:
             return ""
         _live(self.agent_name, "── writeup ──")
-        contents = list(self._contents) + [WRITEUP_PROMPT]
+        contents = list(self._contents) + [prompt or WRITEUP_PROMPT]
         try:
             response = await asyncio.to_thread(
                 self._client.models.generate_content,

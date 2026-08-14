@@ -50,7 +50,23 @@ Rules:
 - Do not invent details you did not observe in this session.
 - Do not paste raw multi-line shell / hex / decompiler dumps.
 - Do not use markdown bold (**…**); plain section headings only.
-- Do not restate CORRECT / Confirmed / the flag value — the UI already shows it."""
+- Do not restate CORRECT / Confirmed / the flag value — the UI already shows it.
+- A one-paragraph teaser is not enough. Fill every heading."""
+
+
+WRITEUP_RETRY_PROMPT = """Your last reply was too short for the operator recap. Write the FULL structured writeup now.
+
+Required headings, each on its own line:
+## Challenge
+## Key insight
+## How
+## What I tried
+## Why it worked
+
+Under How: 8–16 numbered steps, EACH on its own line. For every step say what you looked at, what you saw, and what you did next. Name files, ports, and tools.
+
+15–40 sentences of concrete observed detail. No tools. No flag value. No markdown bold.
+A one-paragraph teaser is not enough."""
 
 
 _HEADING_RE = re.compile(r"^#{1,3}\s+")
@@ -307,49 +323,95 @@ def is_command_trail(text: str) -> bool:
     return toolish >= max(1, (len(lines) + 1) // 2)
 
 
-def is_usable_narrative(text: str) -> bool:
-    """True when cleaned prose is worth showing in the operator recap."""
+_SECTION_STRIP_RE = re.compile(
+    r"(?i)^(Challenge|Key insight|How|Solution summary|What I tried|"
+    r"Why it worked|Dead ends)\s*:?\s*"
+)
+# "How" is omitted: "How the flag was found…" is a teaser, not a heading.
+_USABLE_SECTION_RE = re.compile(
+    r"(?i)^(Challenge|Key insight|Solution summary|What I tried|"
+    r"Why it worked|Dead ends)\b"
+)
+_DETAILED_LABELS = (
+    "Challenge",
+    "Key insight",
+    "How",
+    "What I tried",
+    "Why it worked",
+    "Solution summary",
+)
+
+
+def _narrative_stats(text: str) -> tuple[str, int, int, int] | None:
+    """Return (blob, usable_sections, detailed_sections, n_steps) or None."""
     if is_command_trail(text):
-        return False
+        return None
     collapsed = collapse_prose_fragments(text)
     if is_fragmented_prose(collapsed):
-        return False
+        return None
     lines = [ln for ln in clean_how_lines(collapsed) if ln.strip()]
     if not lines:
-        return False
-    # Drop bare section labels for the substance check.
+        return None
     substance = []
     for ln in lines:
-        s = re.sub(
-            r"(?i)^(Challenge|Key insight|How|Solution summary|What I tried|"
-            r"Why it worked|Dead ends)\s*:?\s*",
-            "",
-            ln,
-        ).strip()
+        s = _SECTION_STRIP_RE.sub("", ln).strip()
         if s:
             substance.append(s)
-    blob = " ".join(substance)
-    blob = _FLAG_TOKEN_RE.sub("", blob)
+    blob = _FLAG_TOKEN_RE.sub("", " ".join(substance))
     blob = re.sub(r"\s+", " ", blob).strip()
     if not blob:
-        return False
-    has_section = any(
-        re.match(
-            r"(?i)^(Challenge|Key insight|Solution summary|What I tried|"
-            r"Why it worked|Dead ends)\b",
-            ln,
-        )
-        for ln in lines
+        return None
+    usable_sections = sum(1 for ln in lines if _USABLE_SECTION_RE.match(ln))
+    detailed_sections = sum(
+        1
+        for label in _DETAILED_LABELS
+        if any(re.match(rf"(?i)^{re.escape(label)}\b", ln) for ln in lines)
     )
     n_steps = sum(1 for ln in lines if re.match(r"^\d+\.\s", ln))
+    return blob, usable_sections, detailed_sections, n_steps
+
+
+def is_usable_narrative(text: str) -> bool:
+    """True when cleaned prose is worth showing in the operator recap."""
+    stats = _narrative_stats(text)
+    if stats is None:
+        return False
+    blob, usable_sections, _detailed_sections, n_steps = stats
     # One mid-solve fragment ("redo it to match the ARM…") is not a recap.
-    if has_section or n_steps >= 2:
+    if usable_sections or n_steps >= 2:
         if len(blob) < 40:
             return False
     elif len(blob) < 160:
         return False
     # Reject pure accept-message regurgitation.
     return not (_ACCEPT_NOISE_RE.search(blob) and len(blob) < 100)
+
+
+def is_detailed_writeup(text: str) -> bool:
+    """True when the recap has real structure — not a one-paragraph teaser."""
+    if not is_usable_narrative(text):
+        return False
+    stats = _narrative_stats(text)
+    if stats is None:
+        return False
+    blob, _usable_sections, section_hits, n_steps = stats
+    blob_len = len(blob)
+    if section_hits >= 2 and (n_steps >= 2 or blob_len >= 200):
+        return True
+    if section_hits >= 1 and n_steps >= 3 and blob_len >= 160:
+        return True
+    if n_steps >= 6 and blob_len >= 280:
+        return True
+    return False
+
+
+async def _call_produce_writeup(fn: Any, prompt: str | None = None) -> Any:
+    if prompt is None:
+        return await fn()
+    try:
+        return await fn(prompt)
+    except TypeError:
+        return await fn()
 
 
 def normalize_writeup_text(text: str) -> str:
@@ -396,18 +458,35 @@ def normalize_writeup_text(text: str) -> str:
 
 
 async def capture_solver_writeup(solver: Any) -> str:
-    """Ask the solver for a narrative writeup; empty string if unavailable."""
+    """Ask the solver for a narrative writeup; empty string if unavailable.
+
+    If the first turn is only a teaser paragraph, retry once with a stricter
+    prompt. Returns the best text we got (detailed preferred).
+    """
     fn = getattr(solver, "produce_writeup", None)
     if not callable(fn):
         return ""
-    try:
-        text = await asyncio.wait_for(fn(), timeout=WRITEUP_TIMEOUT_S)
-    except TimeoutError:
-        logger.warning("writeup capture timed out after %.0fs", WRITEUP_TIMEOUT_S)
-        return ""
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.warning("writeup capture failed", exc_info=True)
-        return ""
-    return normalize_writeup_text(str(text or ""))
+
+    async def _once(prompt: str | None = None) -> str:
+        try:
+            raw = await asyncio.wait_for(
+                _call_produce_writeup(fn, prompt),
+                timeout=WRITEUP_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning("writeup capture timed out after %.0fs", WRITEUP_TIMEOUT_S)
+            return ""
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("writeup capture failed", exc_info=True)
+            return ""
+        return normalize_writeup_text(str(raw or ""))
+
+    text = await _once()
+    if is_detailed_writeup(text):
+        return text
+    retry = await _once(WRITEUP_RETRY_PROMPT)
+    if is_detailed_writeup(retry):
+        return retry
+    return retry if len(retry) > len(text) else text

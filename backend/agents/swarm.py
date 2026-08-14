@@ -304,7 +304,7 @@ class ChallengeSwarm:
     # Escalating cooldowns after incorrect submissions (per model)
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
 
-    async def try_submit_flag(self, flag: str, model_spec: str) -> tuple[str, bool]:
+    async def try_submit_flag(self, flag: str, runner_id: str) -> tuple[str, bool]:
         """Cooldown-gated, deduplicated flag submission. Returns (display, challenge_complete)."""
         from backend.flags import normalize_flags_required
 
@@ -342,11 +342,11 @@ class ChallengeSwarm:
                 )
 
             # Escalating cooldown after incorrect submissions
-            wrong_count = self._submit_count.get(model_spec, 0)
+            wrong_count = self._submit_count.get(runner_id, 0)
             cooldown_idx = min(wrong_count, len(self.SUBMISSION_COOLDOWNS) - 1)
             cooldown = self.SUBMISSION_COOLDOWNS[cooldown_idx]
             if cooldown > 0:
-                last_time = self._last_submit_time.get(model_spec, 0)
+                last_time = self._last_submit_time.get(runner_id, 0)
                 elapsed = time.monotonic() - last_time
                 if elapsed < cooldown:
                     remaining = int(cooldown - elapsed)
@@ -367,7 +367,7 @@ class ChallengeSwarm:
                 required=required,
                 challenge_dir=self.challenge_dir,
                 auto_confirm=auto,
-                by=model_spec,
+                by=runner_id,
             )
             # Hard rejects (decoy/artifact/rewrap-style) still dedupe so agents
             # do not re-prompt the operator with the same junk.
@@ -375,21 +375,21 @@ class ChallengeSwarm:
 
             if display.startswith(("ACCEPTED", "CORRECT")):
                 self.confirmed_flags.append(normalized)
-                self.flag_credits[normalized] = model_spec
+                self.flag_credits[normalized] = runner_id
                 # Snapshot usable prose only — command trails never go in recap.
                 from backend.action_log import notes_from_prose
 
-                solver = self.solvers.get(model_spec)
+                solver = self.solvers.get(runner_id)
                 prose = str(getattr(solver, "_findings", "") or "").strip()
                 notes = notes_from_prose(prose)
                 if notes:
-                    self.flag_notes[model_spec] = notes
+                    self.flag_notes[runner_id] = notes
                 logger.info(
                     "[%s] Flag progress %s/%s via %s",
                     self.meta.name,
                     len(self.confirmed_flags),
                     required,
-                    model_spec,
+                    runner_id,
                 )
                 # Persist so TUI sidebar / flowCompleted / restart-confirm work.
                 try:
@@ -403,19 +403,19 @@ class ChallengeSwarm:
                     logger.debug("sync_accepted_flags failed", exc_info=True)
                 if is_complete:
                     self.confirmed_flag = " | ".join(self.confirmed_flags)
-                    self.winner_runner_id = model_spec
+                    self.winner_runner_id = runner_id
                     # Sticky main-page recap NOW — do not wait for writeup / teardown.
                     # Writeup can hang for minutes; without these lines the TUI goes
                     # empty while sidebar already shows n/n flags.
-                    self._emit_correct_recap(model_spec)
+                    self._emit_correct_recap(runner_id)
                     self._emit_how_recap(interim=True)
                 return display, is_complete
 
             # Rejected / not counted — escalate cooldown only for attempts that
             # reached the operator (or incorrect), not pure parse empties.
             if not display.startswith("Empty flag"):
-                self._submit_count[model_spec] = wrong_count + 1
-                self._last_submit_time[model_spec] = time.monotonic()
+                self._submit_count[runner_id] = wrong_count + 1
+                self._last_submit_time[runner_id] = time.monotonic()
             return display, False
 
     async def _run_solver(self, runner_id: str, model_spec: str) -> SolverResult | None:
@@ -884,9 +884,9 @@ class ChallengeSwarm:
         emit_line(f"[artemis] summary Solved by {who}")
 
     def _how_has_body(self, how_lines: list[str]) -> bool:
-        from backend.writeup import is_usable_narrative
+        from backend.writeup import is_detailed_writeup
 
-        return is_usable_narrative("\n".join(how_lines))
+        return is_detailed_writeup("\n".join(how_lines))
 
     def _emit_how_recap(self, *, interim: bool = False) -> None:
         """Stream narrative writeup once (no command trail).
@@ -921,19 +921,21 @@ class ChallengeSwarm:
         from backend.writeup import (
             capture_solver_writeup,
             clean_how_lines,
+            is_detailed_writeup,
             is_usable_narrative,
         )
 
         existing = (self.flag_notes.get(runner_id) or "").strip()
         late = str(getattr(solver, "_findings", "") or "").strip()
-        if is_usable_narrative(late) and (
-            not is_usable_narrative(existing) or len(late) > len(existing) + 40
+        # Last-turn chatter is not a writeup — only promote structured recaps.
+        if is_detailed_writeup(late) and (
+            not is_detailed_writeup(existing) or len(late) > len(existing) + 40
         ):
             existing = "\n".join(clean_how_lines(late)).strip()
             self.flag_notes[runner_id] = existing
 
         writeup = await capture_solver_writeup(solver)
-        if writeup and (is_usable_narrative(writeup) or len(writeup) >= 80):
+        if writeup and is_usable_narrative(writeup):
             self.flag_notes[runner_id] = writeup
             self.findings[runner_id] = writeup[:800]
             self._how_emitted = False

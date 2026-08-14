@@ -2810,8 +2810,6 @@ function GenericTool(props: ToolProps) {
   )
   const blockTitle = createMemo(() => {
     if (props.tool === "artemis_load_challenge") return "Load challenge"
-    if (props.tool === "artemis_set_flags") return "Flags required"
-    if (props.tool === "artemis_submit_flag") return "Submit flag"
     if (props.tool === "artemis_status") return "Status"
     if (props.tool.startsWith("artemis_")) return props.tool.replace(/^artemis_/, "").replaceAll("_", " ")
     return `# ${props.tool} ${input(props.input)}`
@@ -3174,10 +3172,8 @@ function Glob(props: ToolProps) {
   )
   return (
     <InlineTool icon="✱" pending="Finding files..." complete={pattern()} part={props.part}>
-      <Show when={props.tool === "artemis_list_files"} fallback={<>Glob "{pattern()}" </>}>
-        List {pathFormatter.format(pattern())}{" "}
-      </Show>
-      <Show when={props.tool !== "artemis_list_files" && stringValue(props.input.path)}>
+      <>Glob "{pattern()}" </>
+      <Show when={stringValue(props.input.path)}>
         in {pathFormatter.format(stringValue(props.input.path))}{" "}
       </Show>
       <Show when={numberValue(props.metadata.count)}>
@@ -3703,10 +3699,6 @@ const toolDisplays = new Set([
 
 export function toolDisplay(tool: string) {
   if (tool === "artemis_swarm" || tool === "artemis_ask_flags") return "artemis_swarm"
-  if (tool === "artemis_bash") return "bash"
-  if (tool === "artemis_read_file") return "read"
-  if (tool === "artemis_write_file") return "write"
-  if (tool === "artemis_list_files") return "glob"
   return toolDisplays.has(tool) ? tool : "generic"
 }
 

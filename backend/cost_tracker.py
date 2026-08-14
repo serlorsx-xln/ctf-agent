@@ -27,6 +27,128 @@ logger = logging.getLogger(__name__)
 _LAST_PUBLISH_MONO = 0.0
 _PUBLISH_MIN_INTERVAL_S = 0.75
 
+_INPUT_KEYS = (
+    "input_tokens",
+    "prompt_tokens",
+    "inputTokens",
+    "promptTokens",
+    "prompt_token_count",
+    "input",
+)
+_OUTPUT_KEYS = (
+    "output_tokens",
+    "completion_tokens",
+    "outputTokens",
+    "completionTokens",
+    "candidates_token_count",
+    "output",
+)
+_CACHE_KEYS = (
+    "cache_read_input_tokens",
+    "cache_read_tokens",
+    "cached_tokens",
+    "cacheReadInputTokens",
+    "cachedInputTokens",
+    "cached_content_token_count",
+    "cache_read",
+)
+_COST_KEYS = ("total_cost_usd", "cost_usd", "totalCostUsd")
+_NESTED_USAGE_KEYS = ("usage", "token_usage", "usage_metadata", "tokenUsage")
+
+
+def _as_mapping(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        try:
+            data = dump()
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    as_dict = getattr(obj, "dict", None)
+    if callable(as_dict):
+        try:
+            data = as_dict()
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    raw = getattr(obj, "__dict__", None)
+    if isinstance(raw, dict) and raw:
+        return {k: v for k, v in raw.items() if not str(k).startswith("_")}
+    return {}
+
+
+def _first_int(data: dict[str, Any], obj: Any, keys: tuple[str, ...]) -> int:
+    for key in keys:
+        if key in data and data[key] is not None:
+            try:
+                return int(data[key] or 0)
+            except (TypeError, ValueError):
+                pass
+        if obj is not None and not isinstance(obj, dict):
+            val = getattr(obj, key, None)
+            if val is not None:
+                try:
+                    return int(val or 0)
+                except (TypeError, ValueError):
+                    pass
+    return 0
+
+
+def _first_float(data: dict[str, Any], obj: Any, keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        if key in data and data[key] is not None:
+            try:
+                return float(data[key])
+            except (TypeError, ValueError):
+                pass
+        if obj is not None and not isinstance(obj, dict):
+            val = getattr(obj, key, None)
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def usage_from_provider(obj: Any) -> dict[str, Any]:
+    """Normalize Anthropic / OpenAI / camelCase / pydantic usage blobs.
+
+    Returns ``input``, ``output``, ``cache_read``, and ``cost_usd`` (USD may
+    be ``None``). Never invents counts — missing fields stay 0 / None.
+    """
+    empty = {"input": 0, "output": 0, "cache_read": 0, "cost_usd": None}
+    if obj is None:
+        return empty
+    data = _as_mapping(obj)
+    has_tokens = any(k in data for k in _INPUT_KEYS + _OUTPUT_KEYS)
+    if not has_tokens:
+        nested = None
+        if isinstance(obj, dict):
+            for key in _NESTED_USAGE_KEYS:
+                if obj.get(key) is not None:
+                    nested = obj[key]
+                    break
+        else:
+            for key in _NESTED_USAGE_KEYS:
+                nested = getattr(obj, key, None)
+                if nested is not None:
+                    break
+        if nested is not None and nested is not obj:
+            return usage_from_provider(nested)
+    return {
+        "input": _first_int(data, obj, _INPUT_KEYS),
+        "output": _first_int(data, obj, _OUTPUT_KEYS),
+        "cache_read": _first_int(data, obj, _CACHE_KEYS),
+        "cost_usd": _first_float(data, obj, _COST_KEYS),
+    }
+
 
 def _usage_path(session_id: str | None = None) -> Path:
     from backend.cache import cache_dir
@@ -258,7 +380,8 @@ class CostTracker:
             f"{_fmt_tokens(usage.cache_read_tokens)} cached ({_cache_rate(usage)} hit) / "
             f"{_fmt_tokens(usage.output_tokens)} out | {duration_seconds:.1f}s{cost_note}"
         )
-        self.publish()
+        # Force so the last commit is not dropped by the 0.75s preview throttle.
+        self.publish(force=True)
 
     def publish(self, *, force: bool = False) -> None:
         """Push current totals to usage.json for the TUI sidebar."""

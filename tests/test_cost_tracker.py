@@ -1,6 +1,57 @@
 """Usage tracker: tokens always; USD only when a provider reports it."""
 
-from backend.cost_tracker import CostTracker
+from types import SimpleNamespace
+
+from backend.cost_tracker import CostTracker, usage_from_provider
+
+
+def test_usage_from_provider_anthropic_and_openai_aliases():
+    assert usage_from_provider(None) == {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cost_usd": None,
+    }
+    anth = usage_from_provider(
+        {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 8}
+    )
+    assert anth["input"] == 100
+    assert anth["output"] == 20
+    assert anth["cache_read"] == 8
+
+    openai = usage_from_provider({"prompt_tokens": 50, "completion_tokens": 7})
+    assert openai["input"] == 50
+    assert openai["output"] == 7
+
+    camel = usage_from_provider({"inputTokens": 9, "outputTokens": 2, "cachedInputTokens": 1})
+    assert camel == {"input": 9, "output": 2, "cache_read": 1, "cost_usd": None}
+
+    gemini = usage_from_provider(
+        SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=80,
+                candidates_token_count=12,
+                cached_content_token_count=4,
+            )
+        )
+    )
+    assert gemini["input"] == 80
+    assert gemini["output"] == 12
+    assert gemini["cache_read"] == 4
+
+
+def test_usage_from_provider_nested_and_getattr():
+    nested = usage_from_provider({"usage": {"prompt_tokens": 11, "completion_tokens": 3}})
+    assert nested["input"] == 11
+    assert nested["output"] == 3
+
+    obj = SimpleNamespace(
+        usage=SimpleNamespace(input_tokens=40, output_tokens=5, total_cost_usd=0.12)
+    )
+    parsed = usage_from_provider(obj)
+    assert parsed["input"] == 40
+    assert parsed["output"] == 5
+    assert parsed["cost_usd"] == 0.12
 
 
 def test_tokens_without_reported_cost():

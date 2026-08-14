@@ -23,7 +23,7 @@ from typing import Any
 from backend.agents.live_log import live as _live
 from backend.agents.live_log import live_json
 from backend.continue_prompt import build_continue_prompt
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
@@ -427,19 +427,21 @@ class CodexSolver:
                     except Exception as e:
                         logger.warning(f"[{self.agent_name}] Compaction request failed: {e}")
 
+                last_usage = usage_from_provider(last)
+                total_usage = usage_from_provider(total)
                 self.cost_tracker.record_tokens(
                     self.agent_name,
                     self.model_id,
-                    input_tokens=last.get("inputTokens", 0),
-                    output_tokens=last.get("outputTokens", 0),
-                    cache_read_tokens=last.get("cachedInputTokens", 0),
+                    input_tokens=last_usage["input"],
+                    output_tokens=last_usage["output"],
+                    cache_read_tokens=last_usage["cache_read"],
                     provider_spec="codex",
                 )
                 # Codex reports tokens only — no USD billing field.
                 self.tracer.usage(
-                    total.get("inputTokens", 0),
-                    total.get("outputTokens", 0),
-                    total.get("cachedInputTokens", 0),
+                    total_usage["input"],
+                    total_usage["output"],
+                    total_usage["cache_read"],
                 )
 
     async def _handle_tool_call(self, request_id: int, params: dict) -> None:
@@ -669,7 +671,7 @@ class CodexSolver:
 
         stash_bump(self, insights)
 
-    async def produce_writeup(self) -> str:
+    async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more turn: narrative writeup for the operator recap (no tools expected)."""
         from backend.writeup import WRITEUP_PROMPT
 
@@ -684,7 +686,7 @@ class CodexSolver:
             "turn/start",
             {
                 "threadId": self._thread_id,
-                "input": [{"type": "text", "text": WRITEUP_PROMPT}],
+                "input": [{"type": "text", "text": prompt or WRITEUP_PROMPT}],
             },
         )
         await self._turn_done.wait()

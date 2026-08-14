@@ -41,7 +41,7 @@ from backend.bash_intercept import (
     submit_flag_suffix,
 )
 from backend.continue_prompt import build_continue_prompt
-from backend.cost_tracker import CostTracker
+from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.output_types import solver_output_json_schema
@@ -523,37 +523,31 @@ class ClaudeSolver:
                         elif isinstance(block, TextBlock):
                             self._findings = block.text[:2000]
                             _live(f"{self.agent_name} ai", block.text)
-                    # Mid-turn usage preview (provider-reported only). The SDK
-                    # attaches usage to AssistantMessage on newer versions; the
-                    # final commit still happens on ResultMessage below.
-                    msg_usage = getattr(message, "usage", None)
-                    if msg_usage is not None:
-                        u = msg_usage if isinstance(msg_usage, dict) else vars(msg_usage)
+                    # Mid-turn usage preview (provider-reported only). Gateways
+                    # may send Anthropic or OpenAI-shaped fields; normalize both.
+                    parsed = usage_from_provider(message)
+                    if parsed["input"] or parsed["output"] or parsed["cache_read"]:
                         self.cost_tracker.publish_with_pending(
-                            input_tokens=int(u.get("input_tokens", 0) or 0),
-                            output_tokens=int(u.get("output_tokens", 0) or 0),
-                            cache_read_tokens=int(
-                                u.get("cache_read_input_tokens", u.get("cache_read_tokens", 0)) or 0
-                            ),
+                            input_tokens=parsed["input"],
+                            output_tokens=parsed["output"],
+                            cache_read_tokens=parsed["cache_read"],
                         )
 
                 elif isinstance(message, ResultMessage):
                     self._session_id = message.session_id
+                    parsed = usage_from_provider(message)
                     turn_cost = getattr(message, "total_cost_usd", None)
+                    if turn_cost is None:
+                        turn_cost = parsed["cost_usd"]
                     if turn_cost is not None:
                         self._cost_usd += float(turn_cost)
                         self._cost_reported = True
-                    msg_usage = getattr(message, "usage", None) or {}
-                    if not isinstance(msg_usage, dict):
-                        msg_usage = vars(msg_usage) if hasattr(msg_usage, "__dict__") else {}
                     self.cost_tracker.record_tokens(
                         self.agent_name,
                         self.model_id,
-                        input_tokens=msg_usage.get("input_tokens", 0),
-                        output_tokens=msg_usage.get("output_tokens", 0),
-                        cache_read_tokens=msg_usage.get(
-                            "cache_read_input_tokens", msg_usage.get("cache_read_tokens", 0)
-                        ),
+                        input_tokens=parsed["input"],
+                        output_tokens=parsed["output"],
+                        cache_read_tokens=parsed["cache_read"],
                         provider_spec="claude-sdk",
                         duration_seconds=time.monotonic() - t0,
                         reported_cost_usd=float(turn_cost) if turn_cost is not None else None,
@@ -629,7 +623,7 @@ class ClaudeSolver:
             log_path=self.tracer.path,
         )
 
-    async def produce_writeup(self) -> str:
+    async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more turn: narrative writeup for the operator recap (no tools expected)."""
         from backend.writeup import WRITEUP_PROMPT
 
@@ -637,7 +631,7 @@ class ClaudeSolver:
             return ""
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
-        await self._client.query(WRITEUP_PROMPT)
+        await self._client.query(prompt or WRITEUP_PROMPT)
         async for message in self._client.receive_response():
             if isinstance(message, AssistantMessage):
                 for block in message.content:

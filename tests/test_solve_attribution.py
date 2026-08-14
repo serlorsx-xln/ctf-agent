@@ -220,6 +220,27 @@ def test_interim_how_prints_notes_immediately(monkeypatch):
     assert swarm._how_emitted is True
 
 
+def test_interim_how_keeps_pending_for_teaser_paragraph(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+    swarm = _swarm(["claude-sdk/aliyuncs/glm-5.2-fast-preview"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "claude-sdk/aliyuncs/glm-5.2-fast-preview"}
+    swarm.flag_notes = {
+        "claude-sdk/aliyuncs/glm-5.2-fast-preview": (
+            "The decoded plaintext is a passage about frequency analysis ending "
+            "with instructions: Alan Turing once said machines take me by surprise "
+            "with great frequency — take each word in the quote, join with "
+            "underscores, put in flag format."
+        )
+    }
+    swarm._emit_how_recap(interim=True)
+    joined = "\n".join(lines)
+    assert "Writing recap from the winning solver" in joined
+    assert "Alan Turing" not in joined
+    assert swarm._how_emitted is False
+
+
 def test_interim_how_prints_pending_without_notes(monkeypatch):
     lines: list[str] = []
     monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
