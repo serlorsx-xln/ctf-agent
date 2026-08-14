@@ -1,4 +1,4 @@
-"""Claude/GLM writeup must wait for ResultMessage before the recap query."""
+"""Claude/GLM writeup uses a fresh client after CORRECT."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ def _text(body: str) -> AssistantMessage:
 
 
 class _FakeClient:
-    def __init__(self, batches: list[list[object]]) -> None:
+    def __init__(self, batches: list[list[object]] | None = None) -> None:
         self.queries: list[str] = []
-        self._batches = list(batches)
+        self._batches = list(batches or [])
         self._i = 0
 
     async def query(self, prompt: str, session_id: str = "default") -> None:
@@ -41,6 +41,12 @@ class _FakeClient:
         self._i += 1
         for msg in batch:
             yield msg
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
 
 
 def _make_solver(monkeypatch: pytest.MonkeyPatch) -> ClaudeSolver:
@@ -67,9 +73,10 @@ def _make_solver(monkeypatch: pytest.MonkeyPatch) -> ClaudeSolver:
 
 
 @pytest.mark.asyncio
-async def test_solve_turn_consumes_result_after_correct(
+async def test_solve_turn_returns_on_correct_without_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """GLM after CORRECT may never send ResultMessage — do not wait for it."""
     solver = _make_solver(monkeypatch)
     client = _FakeClient(
         [
@@ -86,16 +93,15 @@ async def test_solve_turn_consumes_result_after_correct(
 
     result = await solver.run_until_done_or_gave_up()
     assert result.status == FLAG_FOUND
-    assert solver._receive_idle is True
-    assert solver._session_id == "solve"
     assert client._i == 1
 
 
 @pytest.mark.asyncio
-async def test_writeup_drains_leftover_result_then_queries(
+async def test_writeup_uses_fresh_client_not_stuck_solve_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     solver = _make_solver(monkeypatch)
+    solver._findings = "Counted letters and mapped the Turing quote."
     recap = (
         "Challenge\nMonoalphabetic quote cipher.\n\n"
         "Key insight\nTuring frequency quote.\n\n"
@@ -103,17 +109,17 @@ async def test_writeup_drains_leftover_result_then_queries(
         "What I tried\nWrong key length.\n\n"
         "Why it worked\nThe plaintext was a known quote."
     )
-    client = _FakeClient(
-        [
-            [_result("leftover")],
-            [_text(recap), _result("writeup")],
-        ]
-    )
-    solver._client = client
-    solver._receive_idle = False
+    fresh = _FakeClient([[_text(recap), _result("writeup")]])
+
+    def _factory(*, options=None, **_kw):
+        assert options is not None
+        assert options.env["ANTHROPIC_BASE_URL"]
+        return fresh
+
+    monkeypatch.setattr("backend.agents.claude_solver.ClaudeSDKClient", _factory)
 
     text = await solver.produce_writeup()
     assert "Turing frequency quote" in text
-    assert len(client.queries) == 1
-    assert solver._receive_idle is True
-    assert solver._session_id == "writeup"
+    assert len(fresh.queries) == 1
+    assert "Session notes" in fresh.queries[0]
+    assert "Counted letters" in fresh.queries[0]

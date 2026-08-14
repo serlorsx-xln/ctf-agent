@@ -102,9 +102,6 @@ class ClaudeSolver:
         self._cost_usd = 0.0
         self._cost_reported = False
         self._bump_insights: str | None = None
-        # False while receive_response is still waiting for ResultMessage.
-        # Breaking early left the next query (writeup) hung on the leftover turn.
-        self._receive_idle = True
 
     @staticmethod
     def _bash_timeout_s(tool_input: dict) -> int:
@@ -445,23 +442,11 @@ class ClaudeSolver:
         from backend.models import effort_from_spec
 
         effort = effort_from_spec(self.model_spec)
-
-        # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator.
-        # Propagate a custom Anthropic base URL (/connect → auth.json metadata).
-        env = {"CLAUDECODE": ""}
-        api_key = getattr(self.settings, "anthropic_api_key", "") or ""
-        if api_key:
-            env["ANTHROPIC_API_KEY"] = api_key
-        base_url = getattr(self.settings, "anthropic_base_url", "") or ""
-        if base_url:
-            from backend.shell.credentials import normalize_anthropic_base_url
-
-            env["ANTHROPIC_BASE_URL"] = normalize_anthropic_base_url(base_url)
         options = ClaudeAgentOptions(
             model=self.model_id,
             system_prompt=system_prompt,
             effort=effort,
-            env=env,
+            env=self._sdk_env(),
             mcp_servers={"ctf": mcp_server},
             allowed_tools=[
                 "Bash",
@@ -485,6 +470,19 @@ class ClaudeSolver:
         await self._client.__aenter__()
         self.tracer.event("start", challenge=self.meta.name, model=self.model_id)
         logger.info(f"[{self.agent_name}] Claude SDK solver started")
+
+    def _sdk_env(self) -> dict[str, str]:
+        """Same key + custom Anthropic URL as /connect (GLM gateways included)."""
+        env = {"CLAUDECODE": ""}
+        api_key = getattr(self.settings, "anthropic_api_key", "") or ""
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
+        base_url = getattr(self.settings, "anthropic_base_url", "") or ""
+        if base_url:
+            from backend.shell.credentials import normalize_anthropic_base_url
+
+            env["ANTHROPIC_BASE_URL"] = normalize_anthropic_base_url(base_url)
+        return env
 
     def _finish_findings(self) -> str:
         """Surface accepted flags + findings even when submit/race did not finish."""
@@ -521,14 +519,13 @@ class ClaudeSolver:
                 prompt = "Solve this CTF challenge."
 
             _live(self.agent_name, "── turn start ──")
-            self._receive_idle = False
             await self._client.query(prompt)
 
             async for message in self._client.receive_response():
-                # CORRECT must not break this iterator. receive_response only
-                # ends on ResultMessage; leaving early makes produce_writeup hang
-                # on the leftover turn ("Writing recap…" forever).
-                if self.cancel_event.is_set() and not self._confirmed:
+                # Custom GLM gateways often never emit ResultMessage after
+                # CORRECT (denied-tool loop). Return FLAG_FOUND and write the
+                # recap on a fresh client — do not wait here.
+                if self.cancel_event.is_set() or self._confirmed:
                     break
 
                 if isinstance(message, AssistantMessage):
@@ -589,12 +586,9 @@ class ClaudeSolver:
                 )
             return self._result(status)
 
-    def _apply_result_message(self, message: ResultMessage, *, t0: float | None = None) -> None:
-        """Mark the streaming turn idle and optionally commit usage."""
+    def _apply_result_message(self, message: ResultMessage, *, t0: float) -> None:
+        """Commit usage from a ResultMessage."""
         self._session_id = message.session_id
-        self._receive_idle = True
-        if t0 is None:
-            return
         parsed = usage_from_provider(message)
         turn_cost = getattr(message, "total_cost_usd", None)
         if turn_cost is None:
@@ -615,21 +609,6 @@ class ClaudeSolver:
         if output and output.get("type") == "flag_found":
             self._flag = output.get("flag")
             self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-
-    async def _await_idle_receive(self, *, timeout: float = 20.0) -> None:
-        """Finish a leftover receive_response so the next query can start."""
-        if self._client is None or self._receive_idle:
-            return
-        try:
-            async with asyncio.timeout(timeout):
-                async for message in self._client.receive_response():
-                    if isinstance(message, ResultMessage):
-                        self._apply_result_message(message)
-                        return
-        except TimeoutError:
-            logger.warning("[%s] Claude turn did not emit ResultMessage", self.agent_name)
-        except Exception:
-            logger.debug("[%s] drain receive failed", self.agent_name, exc_info=True)
 
     def bump(self, insights: str) -> None:
         from backend.agents.solver_control import stash_bump
@@ -661,33 +640,63 @@ class ClaudeSolver:
             log_path=self.tracer.path,
         )
 
-    async def produce_writeup(self, prompt: str | None = None) -> str:
-        """One more turn: narrative writeup for the operator recap (no tools expected)."""
-        from backend.writeup import WRITEUP_PROMPT
+    def _writeup_user_prompt(self, prompt: str) -> str:
+        notes: list[str] = []
+        name = getattr(self.meta, "name", "") or ""
+        if name:
+            notes.append(f"Challenge: {name}")
+        desc = (getattr(self.meta, "description", "") or "").strip()
+        if desc:
+            notes.append(desc[:1500])
+        if self._findings.strip():
+            notes.append("Session notes:\n" + self._findings.strip()[:4000])
+        if not notes:
+            return prompt
+        return prompt + "\n\n" + "\n\n".join(notes)
 
-        if self._client is None:
-            return ""
-        # Do not interrupt() — that tears down the Claude/GLM session. Drain any
-        # leftover solve-turn ResultMessage first so this query is not hung
-        # behind the previous receive_response.
-        await self._await_idle_receive()
-        parts: list[str] = []
+    async def produce_writeup(self, prompt: str | None = None) -> str:
+        """Recap on a fresh Claude client — the solve session is often stuck.
+
+        Custom Anthropic URLs (GLM) commonly never end receive_response after
+        CORRECT. Reusing that client hangs How: on "Writing recap…".
+        """
+        from backend.models import effort_from_spec
+        from backend.writeup import WRITEUP_PROMPT, WRITEUP_TIMEOUT_S, join_streamed_text_parts
+
+        body = self._writeup_user_prompt(prompt or WRITEUP_PROMPT)
         _live(self.agent_name, "── writeup ──")
-        self._receive_idle = False
+        options = ClaudeAgentOptions(
+            model=self.model_id,
+            system_prompt=(
+                "You write CTF operator recaps from the session notes. "
+                "Do not call tools. Do not invent details that are not in the notes."
+            ),
+            effort=effort_from_spec(self.model_spec),
+            env=self._sdk_env(),
+            allowed_tools=[],
+            permission_mode="bypassPermissions",
+        )
+        client = ClaudeSDKClient(options=options)
+        parts: list[str] = []
         try:
-            await self._client.query(prompt or WRITEUP_PROMPT)
-            async for message in self._client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock) and str(block.text or "").strip():
-                            parts.append(block.text.strip())
-                elif isinstance(message, ResultMessage):
-                    self._apply_result_message(message)
+            await client.__aenter__()
+            await client.query(body)
+            async with asyncio.timeout(WRITEUP_TIMEOUT_S):
+                async for message in client.receive_response():
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock) and str(block.text or "").strip():
+                                parts.append(block.text.strip())
+        except TimeoutError:
+            logger.warning("[%s] writeup turn timed out", self.agent_name)
         except Exception:
             logger.warning("[%s] writeup turn failed", self.agent_name, exc_info=True)
             return ""
-        from backend.writeup import join_streamed_text_parts
-
+        finally:
+            try:
+                await asyncio.wait_for(client.__aexit__(None, None, None), timeout=8.0)
+            except Exception:
+                pass
         return join_streamed_text_parts(parts)
 
     async def stop(self) -> None:

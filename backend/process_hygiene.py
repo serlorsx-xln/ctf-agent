@@ -229,15 +229,14 @@ def is_artemis_swarm_command(cmd: str) -> bool:
     return any(n in lower for n in _SWARM_NEEDLES)
 
 
-def session_bridge_token(session_id: str | None) -> str:
-    """Filesystem-safe token so a Cursor bridge can be attributed to one TUI session."""
+def _session_bridge_token(session_id: str | None) -> str:
     raw = (session_id or "").strip() or "_default"
     return _SESSION_TOKEN_RE.sub("_", raw)[:48]
 
 
 def cursor_bridge_session_prefix(session_id: str | None = None) -> str:
     """``tempfile.mkdtemp`` prefix for this session's Cursor SDK workspace."""
-    return f"ctf-cursor-bridge-{session_bridge_token(session_id)}-"
+    return f"ctf-cursor-bridge-{_session_bridge_token(session_id)}-"
 
 
 def bridge_belongs_to_session(cmd: str, session_id: str | None) -> bool:
@@ -292,7 +291,7 @@ def _iter_swarm_candidates() -> list[tuple[int, str]]:
             ps = (
                 "Get-CimInstance Win32_Process | "
                 "Where-Object { $_.CommandLine -match 'artemis swarm|artemis race|backend.cli swarm|backend.cli race' } | "
-                "ForEach-Object { '{0}\\t{1}' -f $_.ProcessId, $_.CommandLine }"
+                "ForEach-Object { '{0}\t{1}' -f $_.ProcessId, $_.CommandLine }"
             )
             from backend.subprocess_platform import windows_system_exe
 
@@ -325,12 +324,11 @@ def _iter_swarm_candidates() -> list[tuple[int, str]]:
         return []
 
 
-def live_artemis_swarm_pids() -> set[int]:
-    """PIDs of still-running Artemis swarm / race children."""
+def _live_artemis_swarm_pids() -> set[int]:
     return {pid for pid, cmd in _iter_swarm_candidates() if is_artemis_swarm_command(cmd)}
 
 
-def bridge_owned_by_live_swarm(
+def _bridge_owned_by_live_swarm(
     pid: int,
     live_swarm_pids: set[int],
     ppid_of: dict[int, int],
@@ -372,7 +370,7 @@ def should_kill_cursor_bridge(
         return False
     live = live_swarm_pids if live_swarm_pids is not None else set()
     parents = ppid_of if ppid_of is not None else {}
-    if bridge_owned_by_live_swarm(pid, live, parents):
+    if _bridge_owned_by_live_swarm(pid, live, parents):
         return False
     if session_id is not None:
         return bridge_belongs_to_session(cmd, session_id)
@@ -389,7 +387,7 @@ def cleanup_orphan_cursor_bridges(session_id: str | None = None) -> list[int]:
     """
     killed: list[int] = []
     me = os.getpid()
-    live = live_artemis_swarm_pids()
+    live = _live_artemis_swarm_pids()
     parents = _ppid_map()
     for pid, cmd in _iter_bridge_candidates():
         if not should_kill_cursor_bridge(

@@ -47,7 +47,7 @@ export function SwarmAgentFooter() {
     () =>
       process.env.ARTEMIS === "1" &&
       !dialogOpen() &&
-      (canStop() || startedAt() != null),
+      (canStop() || (startedAt() != null && !terminalDone())),
   )
   const showNav = createMemo(
     () =>
