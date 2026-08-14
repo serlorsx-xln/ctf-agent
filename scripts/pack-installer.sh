@@ -147,6 +147,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$sys = $env:SystemRoot
+if (-not $sys) { $sys = $env:WINDIR }
+if (-not $sys) { $sys = "C:\Windows" }
+foreach ($d in @((Join-Path $sys "System32"), (Join-Path $sys "System32\WindowsPowerShell\v1.0"))) {
+  if ((Test-Path $d) -and ($env:Path -notlike "*$d*")) { $env:Path = "$d;$env:Path" }
+}
 
 $InstallDir = if ($env:ARTEMIS_HOME) { $env:ARTEMIS_HOME } else { Join-Path $env:USERPROFILE "artemis" }
 $Marker = "__ARTEMIS_ZIP_B64__"
@@ -192,7 +198,13 @@ try {
         Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
       if (Test-Path $Path) {
-        cmd /c "rmdir /s /q `"$Path`"" 2>$null | Out-Null
+        $comspec = $env:ComSpec
+        if (-not $comspec -or -not (Test-Path -LiteralPath $comspec)) {
+          $comspec = Join-Path $sys "System32\cmd.exe"
+        }
+        if (Test-Path -LiteralPath $comspec) {
+          & $comspec /c "rmdir /s /q `"$Path`"" 2>$null | Out-Null
+        }
       }
     } finally {
       $ErrorActionPreference = $prev

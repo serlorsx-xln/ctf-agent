@@ -45,10 +45,6 @@ _DECOY_EXACT = frozenset(
     }
 )
 
-# Classic CTF: PREFIX{body} — kept for optional tooling / docs, not as an oracle
-_FLAG_BRACE = re.compile(r"^[A-Za-z0-9_-]{2,32}\{[^}]{4,256}\}$")
-# Dash style: FLAG-..., NSEC-..., etc.
-_FLAG_DASH = re.compile(r"^[A-Za-z]{2,16}-[A-Za-z0-9_-]{8,128}$")
 # Formatless secret token (no whitespace)
 _FLAG_TOKEN = re.compile(r"^[A-Za-z0-9_+\/=-]{16,200}$")
 _LICENSE_LIKE = re.compile(r"^(?:[A-Za-z0-9]{1,5}-){2,}[A-Za-z0-9]{1,5}$")

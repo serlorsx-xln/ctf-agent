@@ -7,7 +7,9 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+. (Join-Path $PSScriptRoot "lib\windows-path.ps1")
 . (Join-Path $PSScriptRoot "lib\windows-docker.ps1")
+Repair-ArtemisWindowsPath
 
 function Log($m) { Write-Host "[qa] $m" -ForegroundColor Cyan }
 function Fail($m) { Write-Host "[qa] FAIL: $m" -ForegroundColor Red; exit 1 }
@@ -17,7 +19,7 @@ function Wait-DockerReady { Wait-ArtemisDockerReady @args }
 
 $uv = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
 if (-not (Test-Path $uv)) { Fail "run scripts/install.ps1 first" }
-$env:Path = "$(Split-Path $uv);$env:Path"
+$env:Path = "$(Split-Path $uv);$env:USERPROFILE\.bun\bin;$env:Path"
 if (-not $SkipDocker) { Initialize-DockerCli }
 
 Log "ruff..."

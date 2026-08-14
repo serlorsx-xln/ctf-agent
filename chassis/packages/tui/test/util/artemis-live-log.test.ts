@@ -123,6 +123,15 @@ describe("parseArtemisEvents", () => {
     ])
   })
 
+  test("expands What I tried / Why it worked section labels", () => {
+    const pieces = expandSummaryLine(
+      "Key insight: XOR key in the APK. What I tried: jadx on the wrapper. Why it worked: client-side PIN.",
+    )
+    expect(pieces.some((p) => /^Key insight/i.test(p))).toBe(true)
+    expect(pieces.some((p) => /^What I tried/i.test(p))).toBe(true)
+    expect(pieces.some((p) => /^Why it worked/i.test(p))).toBe(true)
+  })
+
   test("expands jammed Solution summary numbered lists on ingest", () => {
     const pieces = expandSummaryLine(
       "FLAG: flag{x} **Solution summary:** 1. **DNS TXT** — mango 2. **TCP** — parts 3. **XOR** — done",

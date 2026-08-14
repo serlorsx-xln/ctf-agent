@@ -142,7 +142,7 @@ Default model lineup (configurable in `backend/models.py`):
 | GPT-5.4 / mini / codex | Codex | Optional — needs `OPENAI_API_KEY` + `codex` CLI |
 | Gemini 2.5 Flash / Pro | Gemini (`gemini-sdk/`) | Optional — `/connect` Google key, or `GEMINI_API_KEY` / ADC |
 
-Model specs use `provider/model` form, e.g. `cursor/composer-2.5`, `google/gemini-2.5-flash`. After `CORRECT`, the winning solver is asked for a short IDE-style writeup for the recap.
+Model specs use `provider/model` form, e.g. `cursor/composer-2.5`, `google/gemini-2.5-flash`. After `CORRECT`, the winning solver is asked for a detailed writeup of what it observed and why the solve worked.
 
 ## Sandbox Tooling
 

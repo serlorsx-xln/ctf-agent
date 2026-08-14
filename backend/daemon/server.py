@@ -294,7 +294,7 @@ class _PeerConn:
                 )
             elif sess.get("challenge_dir"):
                 await self._push({"type": "replay_done", "session": sid, "running": False})
-            await self._read_loop(handle_subscribe=True)
+            await self._read_loop()
         finally:
             if pump is not None:
                 pump.cancel()
@@ -314,20 +314,20 @@ class _PeerConn:
     # ---- swarm side ------------------------------------------------------
     async def _run_usage(self) -> None:
         """Accept usage_report / session_refresh — never cancel flag-confirm dialogs on exit."""
-        await self._read_loop(handle_subscribe=False)
+        await self._read_loop()
 
     async def _run_swarm(self) -> None:
         """The swarm subprocess sends usage/dialog requests; we forward to TUI
         and hold a future for the answer."""
         try:
-            await self._read_loop(handle_subscribe=False)
+            await self._read_loop()
         finally:
             # Swarm connection dropped: resolve this session's in-flight dialogs.
             handlers_mod.cancel_pending_dialogs(
                 broadcast=self.daemon.state.broadcast, session=self._sid()
             )
 
-    async def _read_loop(self, *, handle_subscribe: bool) -> None:
+    async def _read_loop(self) -> None:
         while True:
             msg = await self._read_message()
             if msg is None:
@@ -441,12 +441,6 @@ class _PeerConn:
                     n=result.get("n"),
                     session=sid,
                 )
-            )
-            return
-
-        if mtype == "solver_log":
-            self.daemon.state.broadcast(
-                {"type": "swarm_log", "session": sid, "text": msg.get("text", "")}
             )
             return
 

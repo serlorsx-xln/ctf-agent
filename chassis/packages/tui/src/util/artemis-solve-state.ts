@@ -6,6 +6,20 @@ import { daemon } from "../artemis/client"
  * call sites from drifting into asking different questions.
  */
 
+/** Whether the Solve card should render (hide idle "No solver activity"). */
+export function swarmHasVisibleSolveUi(opts: {
+  running: boolean
+  eventCount: number
+  startedAt: number | null
+  agentStarted?: boolean
+  showGrid?: boolean
+}): boolean {
+  if (opts.running || opts.showGrid || opts.agentStarted) return true
+  if (opts.eventCount > 0) return true
+  if (opts.startedAt != null) return true
+  return false
+}
+
 /**
  * The flags → mode → models gate owns the screen right now. Commands must not
  * clear it out from under the operator. (The command palette is itself a
@@ -13,6 +27,13 @@ import { daemon } from "../artemis/client"
  */
 export function solveGateOpen(): boolean {
   return daemon.solveFlowBusy[0]()
+}
+
+/** Block commands that would replace the flags→models dialogs. */
+export function warnIfSolveGateOpen(show: (opts: { message: string; variant: "warning" }) => void): boolean {
+  if (!solveGateOpen()) return false
+  show({ message: "Finish or cancel the current dialog first", variant: "warning" })
+  return true
 }
 
 /** Swarm or solve still in progress — clearing must stop it first. */
@@ -59,6 +80,7 @@ export async function stopAndClearArtemisState(): Promise<void> {
   daemon.setLastModels([])
   daemon.setFlowCompleted(false)
   daemon.setSolveLocked(false)
+  daemon.setSolveFlowBusy(false)
   daemon.setSuppressSolveGate(false)
   daemon.flagConfirm[1](null)
 }

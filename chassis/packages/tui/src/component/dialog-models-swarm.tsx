@@ -27,8 +27,9 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
   const connected = useConnected()
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
-  const [selected, setSelected] = createSignal<Set<string>>(new Set(props.preselected ?? []))
+  const [selected, setSelected] = createSignal<string[]>([...(props.preselected ?? [])])
   const [index, setIndex] = createSignal(0)
+  const MAX_AGENTS = 16
   let scroll: ScrollBoxRenderable | undefined
   let input: InputRenderable | undefined
 
@@ -39,7 +40,7 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
       connected: connected(),
       connectedProviders: sync.data.provider_next?.connected ?? [],
       query: query(),
-      preselected: [...selected()],
+      preselected: selected(),
     }),
   )
 
@@ -93,24 +94,44 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
     }
   })
 
-  function toggleCurrent() {
+  function currentSpec(): string | null {
     const opt = flat()[index()]
-    if (!opt) return
-    const spec = toRaceSpec(opt.value.providerID, opt.value.modelID)
+    if (!opt) return null
+    return toRaceSpec(opt.value.providerID, opt.value.modelID)
+  }
+
+  function countOf(spec: string): number {
+    return selected().reduce((n, s) => n + (s === spec ? 1 : 0), 0)
+  }
+
+  function addSpec(spec: string) {
+    setSelected((prev) => (prev.length >= MAX_AGENTS ? prev : [...prev, spec]))
+  }
+
+  function removeSpec(spec: string) {
     setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(spec)) next.delete(spec)
-      else next.add(spec)
-      return next
+      const i = prev.lastIndexOf(spec)
+      if (i < 0) return prev
+      return [...prev.slice(0, i), ...prev.slice(i + 1)]
     })
   }
 
+  function addCurrent() {
+    const spec = currentSpec()
+    if (spec) addSpec(spec)
+  }
+
+  function removeCurrent() {
+    const spec = currentSpec()
+    if (spec) removeSpec(spec)
+  }
+
   createEffect(() => {
-    props.onSelectedChange?.([...selected()])
+    props.onSelectedChange?.(selected())
   })
 
   function confirm() {
-    const models = [...selected()]
+    const models = selected()
     if (models.length === 0) return
     props.onConfirm(models)
     dialog.clear()
@@ -134,18 +155,21 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
         group: "Dialog",
         cmd: () => setIndex((i) => Math.min(flat().length - 1, i + 1)),
       },
-      { key: "tab", desc: "Toggle selection", group: "Dialog", cmd: () => toggleCurrent() },
+      { key: "tab", desc: "Add another of this model", group: "Dialog", cmd: () => addCurrent() },
       { key: "return", desc: "Confirm selection", group: "Dialog", cmd: () => confirm() },
       { key: "escape", desc: "Confirm cancel", group: "Dialog", cmd: () => void cancel() },
     ],
   }))
 
-  // Space keeps toggling while nobody is searching; once there is a query it has
-  // to reach the input, because model names contain spaces.
+  // Space / backspace only while the search box is empty so they can type names.
   useBindings(() => ({
-    priority: 1,
+    priority: 2,
     enabled: query().length === 0 && dialog.stack.length <= 1,
-    bindings: [{ key: "space", desc: "Toggle selection", group: "Dialog", cmd: () => toggleCurrent() }],
+    bindings: [
+      { key: "space", desc: "Add another of this model", group: "Dialog", cmd: () => addCurrent() },
+      { key: "backspace", desc: "Remove one of this model", group: "Dialog", cmd: () => removeCurrent() },
+      { key: "-", desc: "Remove one of this model", group: "Dialog", cmd: () => removeCurrent() },
+    ],
   }))
 
   return (
@@ -159,10 +183,17 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
         </text>
       </box>
       <text fg={theme.textMuted}>
-        Type to search · ↑↓ move · tab{query().length === 0 ? "/space" : ""} toggles · enter confirms when ≥1
+        Type to search · ↑↓ move · tab{query().length === 0 ? "/space" : ""} adds another · click/backspace removes one · enter confirms
       </text>
       <input
         onInput={(e) => setQuery(e)}
+        onKeyDown={(e: { name?: string; preventDefault(): void }) => {
+          if (query().length > 0) return
+          if (e.name === "backspace" || e.name === "-") {
+            e.preventDefault()
+            removeCurrent()
+          }
+        }}
         focusedBackgroundColor={theme.backgroundPanel}
         cursorColor={theme.primary}
         focusedTextColor={theme.text}
@@ -208,18 +239,21 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
                         .slice(0, groupIdx())
                         .reduce((acc, [, prev]) => acc + prev.length, 0) + i()
                     const active = () => flatIndex() === index()
-                    const picked = () => selected().has(spec())
+                    const n = () => countOf(spec())
+                    const picked = () => n() > 0
                     return (
                       <box
                         paddingLeft={1}
                         backgroundColor={active() ? theme.primary : undefined}
                         onMouseUp={() => {
+                          const s = spec()
                           setIndex(flatIndex())
-                          toggleCurrent()
+                          if (countOf(s) > 0) removeSpec(s)
+                          else addSpec(s)
                         }}
                       >
                         <text fg={active() ? theme.selectedListItemText : picked() ? theme.success : theme.text}>
-                          {picked() ? "✓ " : "  "}
+                          {picked() ? (n() > 1 ? `✓×${n()} ` : "✓ ") : "  "}
                           {opt.title}
                           {opt.footer ? ` · ${opt.footer}` : ""}
                         </text>
@@ -234,7 +268,7 @@ export function DialogModelsSwarm(props: DialogModelsSwarmProps) {
       </Show>
       <box flexDirection="row" gap={2} justifyContent="flex-end" paddingBottom={1}>
         <text fg={theme.textMuted}>
-          {selected().size} selected · {flat().length} shown
+          {selected().length} agent{selected().length === 1 ? "" : "s"} · {flat().length} shown
         </text>
         <box paddingLeft={3} paddingRight={3} backgroundColor={theme.primary} onMouseUp={() => confirm()}>
           <text fg={theme.selectedListItemText}>enter confirm</text>

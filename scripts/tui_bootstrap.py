@@ -7,7 +7,6 @@ import shlex
 import socket
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -167,34 +166,22 @@ def _refresh_install_path() -> None:
         pass
 
 
-def _bridge_cleanup_async() -> None:
-    """Orphan sweep — only on cold start (daemon already sweeps on boot)."""
-    try:
-        from backend.process_hygiene import cleanup_orphan_cursor_bridges
-
-        cleanup_orphan_cursor_bridges()
-    except Exception:
-        pass
-
-
 def ensure_background_services() -> None:
     ensure_import_path()
     from backend.daemon.transport import daemon_alive
     from backend.stdio_platform import ensure_standard_streams
 
     ensure_standard_streams()
-    _refresh_install_path()
 
     if daemon_alive(timeout=0.05) and port_open("127.0.0.1", 18765):
         return
 
+    # Cold start only — daemon also sweeps bridges on boot.
+    _refresh_install_path()
+
     from backend.cache import cache_dir
     from backend.daemon.transport import clear_stale_endpoint_files
     from backend.file_lock import release, try_acquire
-
-    threading.Thread(
-        target=_bridge_cleanup_async, name="artemis-bridge-cleanup", daemon=True
-    ).start()
 
     py = python_cmd()
     lock_path = cache_dir() / "bootstrap.lock"
@@ -202,7 +189,7 @@ def ensure_background_services() -> None:
     lock_fd = try_acquire(lock_path)
     if lock_fd is None:
         if not _wait_until(
-            lambda: daemon_alive(timeout=0.1) and port_open("127.0.0.1", 18765),
+            lambda: _daemon_connectable(timeout=0.1) and port_open("127.0.0.1", 18765),
             timeout_s=3.0,
         ):
             _warn("another launch is starting services — see ~/.cache/artemis/logs/")
@@ -215,7 +202,7 @@ def ensure_background_services() -> None:
             except OSError:
                 pass
             spawn_background(py + ["-m", "backend.daemon.server"], log_name="daemon")
-            if not _wait_until(lambda: daemon_alive(timeout=0.1), timeout_s=3.0):
+            if not _wait_until(lambda: _daemon_connectable(timeout=0.1), timeout_s=3.0):
                 _warn(f"daemon not ready — see {_service_log('daemon')}")
 
         if not port_open("127.0.0.1", 18765):

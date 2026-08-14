@@ -1,6 +1,32 @@
 # User PATH + global `artemis` command on Windows.
 # Dot-source: . (Join-Path $PSScriptRoot 'lib\windows-path.ps1')
 
+# Some Windows Server / locked-down profiles drop System32 from PATH, so
+# bare `cmd` / `powershell` fail even though the binaries exist.
+function Repair-ArtemisWindowsPath {
+  $sys = $env:SystemRoot
+  if (-not $sys) { $sys = $env:WINDIR }
+  if (-not $sys) { $sys = "C:\Windows" }
+  $parts = @($env:Path -split ';' | ForEach-Object { $_.Trim().TrimEnd('\') } | Where-Object { $_ })
+  $need = @(
+    (Join-Path $sys "System32"),
+    (Join-Path $sys "System32\Wbem"),
+    (Join-Path $sys "System32\WindowsPowerShell\v1.0")
+  )
+  $prefix = @()
+  foreach ($d in $need) {
+    $norm = $d.TrimEnd('\')
+    $hit = $false
+    foreach ($p in $parts) {
+      if ([string]::Equals($p, $norm, [StringComparison]::OrdinalIgnoreCase)) { $hit = $true; break }
+    }
+    if ((Test-Path $norm) -and -not $hit) { $prefix += $norm }
+  }
+  if ($prefix.Count -gt 0) {
+    $env:Path = ($prefix -join ";") + ";" + $env:Path
+  }
+}
+
 function Set-ArtemisInstallPath {
   param([Parameter(Mandatory)][string]$RepoRoot)
   $f = Join-Path $env:USERPROFILE ".local\share\artemis\install-path.txt"
@@ -43,6 +69,7 @@ function Install-ArtemisCli {
   @"
 @echo off
 setlocal EnableExtensions
+if defined SystemRoot set "PATH=%SystemRoot%\System32;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%"
 set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.bun\bin;%PATH%"
 set "PATHFILE=%USERPROFILE%\.local\share\artemis\install-path.txt"
 if defined ARTEMIS_REPO_ROOT if exist "%ARTEMIS_REPO_ROOT%\chassis\bin\artemis.cmd" (

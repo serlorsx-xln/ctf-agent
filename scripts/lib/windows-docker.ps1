@@ -31,7 +31,7 @@ switch ($Action) {
 }
 '@ | Set-Content $stubPs1 -Encoding UTF8
         Set-Content (Join-Path $stubDir "docker-credential-stub.cmd") '@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\bin\docker-credential-stub.ps1" %*' -Encoding ASCII
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\bin\docker-credential-stub.ps1" %*' -Encoding ASCII
     }
     $cfg = Join-Path $env:USERPROFILE ".docker-build"
     New-Item -ItemType Directory -Force -Path $cfg | Out-Null
@@ -58,8 +58,12 @@ function Test-ArtemisDockerDaemon {
     try {
         Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
         Remove-Item Env:DOCKER_HOST -ErrorAction SilentlyContinue
-        cmd /c "docker info >nul 2>&1"
-        return ($LASTEXITCODE -eq 0)
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & docker info 2>&1 | Out-Null
+        $ok = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $prev
+        return $ok
     } finally {
         if ($null -eq $prevCfg) {
             Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue

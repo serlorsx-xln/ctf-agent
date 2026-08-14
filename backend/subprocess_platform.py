@@ -128,7 +128,72 @@ def swarm_command(repo: str | Path, swarm_args: list[str]) -> list[str]:
     py = resolve_venv_python(root)
     if py is not None:
         return [str(py), "-m", "backend.cli", "swarm", *swarm_args]
+    uv_name = "uv.exe" if sys.platform == "win32" else "uv"
+    uv = Path.home() / ".local" / "bin" / uv_name
+    if uv.is_file():
+        return [str(uv), "run", "--directory", str(root), "artemis", "swarm", *swarm_args]
     return ["uv", "run", "--directory", str(root), "artemis", "swarm", *swarm_args]
+
+
+def windows_system_root() -> Path:
+    return Path(os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows")
+
+
+def windows_system_exe(name: str) -> str:
+    """Absolute System32/PowerShell path so stripped PATH still finds the tool."""
+    if sys.platform != "win32":
+        return name
+    root = windows_system_root()
+    sys32 = root / "System32"
+    key = name.lower().removesuffix(".exe")
+    if key == "cmd":
+        comspec = (os.environ.get("COMSPEC") or "").strip()
+        if comspec and Path(comspec).is_file():
+            return comspec
+        return str(sys32 / "cmd.exe")
+    if key == "powershell":
+        pshome = (os.environ.get("PSHOME") or "").strip()
+        if pshome:
+            cand = Path(pshome) / "powershell.exe"
+            if cand.is_file():
+                return str(cand)
+        return str(sys32 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    cand = sys32 / f"{key}.exe"
+    return str(cand) if cand.is_file() else name
+
+
+def resolve_docker_exe() -> str:
+    import shutil
+
+    found = shutil.which("docker")
+    if found:
+        return found
+    if sys.platform == "win32":
+        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        cand = Path(pf) / "Docker" / "Docker" / "resources" / "bin" / "docker.exe"
+        if cand.is_file():
+            return str(cand)
+    return "docker"
+
+
+def ensure_windows_system_path(env: dict[str, str]) -> dict[str, str]:
+    """Prepend System32 so child processes find cmd/taskkill on stripped PATH."""
+    if sys.platform != "win32":
+        return env
+    root = windows_system_root()
+    need = (
+        root / "System32",
+        root / "System32" / "Wbem",
+        root / "System32" / "WindowsPowerShell" / "v1.0",
+    )
+    raw = env.get("PATH") or env.get("Path") or ""
+    parts = [p.strip().rstrip("\\") for p in raw.split(";") if p.strip()]
+    have = {p.lower() for p in parts}
+    prefix = [str(d) for d in need if d.is_dir() and str(d).rstrip("\\").lower() not in have]
+    if prefix:
+        env["PATH"] = ";".join([*prefix, raw] if raw else prefix)
+        env["Path"] = env["PATH"]
+    return env
 
 
 def sanitize_child_env(base: dict[str, str] | None = None) -> dict[str, str]:
@@ -138,4 +203,4 @@ def sanitize_child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     env.pop("PYTHONPATH", None)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    return env
+    return ensure_windows_system_path(env)

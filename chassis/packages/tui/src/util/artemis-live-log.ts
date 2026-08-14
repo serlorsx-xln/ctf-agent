@@ -39,12 +39,12 @@ export function expandSummaryLine(line: string): string[] {
   // `…} ## Solution Summary 1. …` → plain section label on its own line.
   text = text
     .replace(
-      /\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps)\b\s*:?)/gi,
+      /\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps|What I tried|Why it worked|Dead ends)\b\s*:?)/gi,
       "\n$1\n",
     )
     .trim()
   const sectionRe =
-    /(?=\b(?:Solution summary|Key insight|Challenge)\b\s*:?|\b(?:How|Steps)\s*:)/i
+    /(?=\b(?:Solution summary|Key insight|Challenge|What I tried|Why it worked|Dead ends)\b\s*:?|\b(?:How|Steps)\s*:)/i
   const sections = text
     .split(sectionRe)
     .map((s) => s.replace(/^#{1,3}\s+/, "").trim())

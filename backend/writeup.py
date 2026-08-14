@@ -1,7 +1,8 @@
-"""Post-solve narrative writeup — IDE-style summary for the operator recap.
+"""Post-solve narrative writeup — operator recap of how the winning solver did it.
 
-After CORRECT the winning solver still has session context. Asking it for a short
-prose writeup (no tools) powers the operator recap.
+After CORRECT the winning solver still has session context. One more turn
+(no tools) asks it to explain the solve in enough detail that a human can
+follow what the agent actually observed.
 """
 
 from __future__ import annotations
@@ -14,28 +15,40 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Cursor/Grok writeup turns need headroom; swarm waits the full timeout.
-WRITEUP_TIMEOUT_S = 45.0
+WRITEUP_TIMEOUT_S = 90.0
 
-WRITEUP_PROMPT = """The flag was accepted (CORRECT). Write a CTF writeup for the human operator.
+WRITEUP_PROMPT = """The flag was accepted (CORRECT). Write a detailed CTF writeup for the human operator
+so they can understand exactly what you did in this session and why it worked.
 
 Use this exact structure (markdown headings, plain prose under each):
 
 ## Challenge
-One or two sentences: what the challenge was (files, category, goal).
+What you were given (files, services, category) and what "solved" meant.
 
 ## Key insight
-The vulnerability / trick that made the solve possible.
+The vulnerability / trick / invariant that made the solve possible. Be specific
+(offsets, formats, weak crypto, misconfig) — not "I found the flag".
 
 ## How
-Numbered steps in plain language (not raw shell dumps). 4–8 steps max.
+Numbered steps in the order you actually took them. 8–16 steps is fine.
 Put EACH numbered step on its own line (never jam "1. … 2. …" onto one line).
-Mention tools only when they mattered (e.g. strings, jadx, blutter).
+For each step: what you looked at, what you saw, and what you did next.
+Name files, ports, function names, and tools when they mattered
+(e.g. strings, jadx, blutter, tshark). Quote short evidence (one line), not dumps.
+
+## What I tried
+Dead ends that wasted time (wrong hypothesis, failed command, red herring) and
+how you knew to abandon them. Skip this section only if there were none.
+
+## Why it worked
+Tie the evidence back to the key insight. What would a reader check first if
+they had to reproduce this without your session?
 
 Rules:
-- 5–12 sentences total across sections (plus the short numbered list).
+- Be thorough. Prefer 15–40 sentences of concrete observed detail over a teaser.
 - Do not call any tools.
 - Do not invent details you did not observe in this session.
-- Do not pad with filler; be concrete.
+- Do not paste raw multi-line shell / hex / decompiler dumps.
 - Do not use markdown bold (**…**); plain section headings only.
 - Do not restate CORRECT / Confirmed / the flag value — the UI already shows it."""
 
@@ -45,11 +58,13 @@ _NUMBERED_START_RE = re.compile(r"(?:^|(?<=\s))(\d{1,2})\.\s+")
 # Colon required for How/Steps (avoid splitting "How the…"). Optional for
 # Solution summary / Key insight / Challenge which models often omit.
 _SECTION_SPLIT_RE = re.compile(
-    r"(?=\b(?:Solution summary|Key insight|Challenge)\b\s*:?|\b(?:How|Steps)\s*:)",
+    r"(?=\b(?:Solution summary|Key insight|Challenge|What I tried|Why it worked|Dead ends)\b\s*:?"
+    r"|\b(?:How|Steps)\s*:)",
     re.IGNORECASE,
 )
 _MD_SECTION_RE = re.compile(
-    r"(?i)\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps)\b\s*:?)"
+    r"(?i)\s*#{1,3}\s*((?:Solution summary|Key insight|Challenge|How|Steps|"
+    r"What I tried|Why it worked|Dead ends)\b\s*:?)"
 )
 _DECRYPT_BREAK_RE = re.compile(r"(?=\bDecryption\s*:)", re.IGNORECASE)
 _FLAG_TOKEN_RE = re.compile(r"(?i)\b(?:flag|ctf|archa)\{[^{}\n]{4,200}\}")
@@ -58,7 +73,8 @@ _ACCEPT_NOISE_RE = re.compile(
     r"Challenge complete|counting this flag|Cogitated)\b"
 )
 _SECTION_LABEL_ONLY_RE = re.compile(
-    r"(?i)^(Challenge|Key insight|How|Solution summary|Steps)\s*:?\s*$"
+    r"(?i)^(Challenge|Key insight|How|Solution summary|Steps|What I tried|"
+    r"Why it worked|Dead ends)\s*:?\s*$"
 )
 _BARE_HASH_RE = re.compile(r"^#{1,3}$")
 
@@ -294,7 +310,8 @@ def is_usable_narrative(text: str) -> bool:
     substance = []
     for ln in lines:
         s = re.sub(
-            r"(?i)^(Challenge|Key insight|How|Solution summary)\s*:?\s*",
+            r"(?i)^(Challenge|Key insight|How|Solution summary|What I tried|"
+            r"Why it worked|Dead ends)\s*:?\s*",
             "",
             ln,
         ).strip()
@@ -349,7 +366,7 @@ def normalize_writeup_text(text: str) -> str:
     # Trim trailing blanks.
     while lines and not lines[-1]:
         lines.pop()
-    return "\n".join(lines).strip()[:4000]
+    return "\n".join(lines).strip()[:12000]
 
 
 async def capture_solver_writeup(solver: Any) -> str:

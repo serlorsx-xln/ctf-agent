@@ -71,8 +71,10 @@ def _iter_bridge_candidates() -> list[tuple[int, str]]:
                 "Where-Object { $_.CommandLine -match 'cursor-sdk-bridge|ctf-cursor-' } | "
                 "ForEach-Object { '{0}\t{1}' -f $_.ProcessId, $_.CommandLine }"
             )
+            from backend.subprocess_platform import windows_system_exe
+
             out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", ps],
+                [windows_system_exe("powershell"), "-NoProfile", "-Command", ps],
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=15,
@@ -122,8 +124,10 @@ def _kill_pid(pid: int) -> None:
         return
     if sys.platform == "win32":
         try:
+            from backend.subprocess_platform import windows_system_exe
+
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                [windows_system_exe("taskkill"), "/PID", str(pid), "/T", "/F"],
                 check=False,
                 capture_output=True,
                 timeout=10,
@@ -157,8 +161,10 @@ def pid_command(pid: int) -> str:
                 f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\"; "
                 "if ($p) { $p.CommandLine }"
             )
+            from backend.subprocess_platform import windows_system_exe
+
             out = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", ps],
+                [windows_system_exe("powershell"), "-NoProfile", "-Command", ps],
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
@@ -200,8 +206,10 @@ def windows_image_looks_like_python(pid: int) -> bool:
             f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\"; "
             "if ($p) { $p.Name + '|' + $p.ExecutablePath }"
         )
+        from backend.subprocess_platform import windows_system_exe
+
         out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command", ps],
+            [windows_system_exe("powershell"), "-NoProfile", "-Command", ps],
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=10,

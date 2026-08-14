@@ -3,6 +3,7 @@ import {
   createContext,
   createEffect,
   createMemo,
+  createRenderEffect,
   createSignal,
   For,
   Match,
@@ -43,7 +44,7 @@ import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { formatDuration } from "../../util/format"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { hasAgentActivity, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, dropPostSolveAgentChatter, parseArtemisEvents } from "../../util/artemis-live-log"
+import { hasAgentActivity, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, dropPostSolveAgentChatter, type ArtemisEvent } from "../../util/artemis-live-log"
 import {
   agentPreviews,
   globalSwarmEvents,
@@ -61,13 +62,11 @@ import {
   hasDaemonArtemisResidue,
   solveGateOpen,
   stopAndClearArtemisState,
+  swarmHasVisibleSolveUi,
 } from "../../util/artemis-solve-state"
 import { prefillModelFromRaceSpec } from "../../component/dialog-model"
 import { daemon } from "../../artemis/client"
-import {
-  loadArgsFromPrompt,
-  shouldLoadChallengeFromPrompt,
-} from "../../util/artemis-challenge-paste"
+import { loadArgsFromPrompt, looksLikeChallengePaste } from "../../util/artemis-challenge-paste"
 import { runSolveFlowGate } from "../../util/artemis-solve-flow"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
@@ -222,6 +221,14 @@ export function Session() {
   const { theme } = useTheme()
   const promptRef = usePromptRef()
   const dialog = useDialog()
+  // Bind the daemon peer before first paint. Do NOT read dialog.stack here —
+  // that retriggers when the flags gate opens and immediately dismisses it
+  // (load → empty "No solver activity").
+  createRenderEffect(() => {
+    if (process.env.ARTEMIS !== "1") return
+    const sessionID = route.sessionID
+    untrack(() => daemon.setSessionId(sessionID))
+  })
   const session = createMemo(() => sync.session.get(route.sessionID))
   const location = createMemo(() => {
     const current = session()
@@ -285,6 +292,30 @@ export function Session() {
 
   const lastAssistant = createMemo(() => {
     return messages().findLast((x) => x.role === "assistant")
+  })
+
+  /** Intercept load (no LLM tool cards) still needs the solve feed on a fresh chat. */
+  const hasSwarmToolCard = createMemo(() => {
+    for (const msg of messages()) {
+      const parts = sync.data.part[msg.id]
+      if (!parts) continue
+      for (const part of parts) {
+        if (part.type !== "tool") continue
+        if (part.tool === "artemis_ask_flags" || part.tool === "artemis_swarm") return true
+      }
+    }
+    return false
+  })
+  const showSessionSwarm = createMemo(() => {
+    if (process.env.ARTEMIS !== "1") return false
+    if (hasSwarmToolCard()) return false
+    // Gate dialogs own the screen — do not flash an empty grid over flags/mode.
+    if (daemon.solveFlowBusy[0]()) return false
+    return (
+      daemon.swarmRunning[0]() ||
+      daemon.swarmEvents[0]().length > 0 ||
+      daemon.swarmStartedAt[0]() != null
+    )
   })
 
   const dimensions = useTerminalDimensions()
@@ -396,8 +427,8 @@ export function Session() {
   // signals created outside the TUI reactive root don't reliably notify effects
   // inside it.
   const answered = new Set<string>()
-  let solveFlowBusy = false
   const seenAskFlagsParts = new Set<string>()
+  let gateGeneration = 0
 
   async function clearSolvedSession(opts?: { newChat?: boolean }): Promise<boolean> {
     await stopAndClearArtemisState()
@@ -457,7 +488,7 @@ export function Session() {
    */
   async function tryLoadChallengeFromPrompt(): Promise<boolean> {
     const raw = (prompt?.current.input ?? "").trim()
-    if (!shouldLoadChallengeFromPrompt(raw)) return false
+    if (!looksLikeChallengePaste(raw)) return false
     if (daemon.swarmRunning[0]() || daemon.solveLocked[0]() || daemon.solveFlowBusy[0]()) {
       return false
     }
@@ -506,7 +537,7 @@ export function Session() {
     const cleared = await clearSolvedSession({ newChat: true })
     if (!cleared) {
       toast.show({ message: "Cleared challenge data — could not open a new chat", variant: "warning" })
-      return true
+      return false
     }
     armArtemisResubmit()
     // Block this submit: Prompt remounts on the new session and auto-resends once.
@@ -518,29 +549,30 @@ export function Session() {
     preselected?: string[]
     defaultFlags?: number
   }): boolean {
-    if (solveFlowBusy) return false
+    if (daemon.solveFlowBusy[0]()) return false
     if (daemon.swarmRunning[0]()) return false
     if (daemon.solveLocked[0]()) return false
     // Quota / CORRECT / stop: do not auto-reopen flags→mode→models.
     if (daemon.suppressSolveGate[0]()) return false
-    solveFlowBusy = true
     daemon.setSolveFlowBusy(true)
     // Drop previous swarm UI so the gate is not drawn over stale agents / esc-stop.
     // Keep lastModels until the operator confirms a new pick (cancel must not
     // leave an empty "No solver activity" grid).
     daemon.clearSwarmEvents()
     daemon.setSolveLocked(true)
+    const gen = ++gateGeneration
+    const sessionAtStart = route.sessionID
     void runSolveFlowGate(dialog, {
       challengeName: opts?.challengeName ?? daemon.sessionState[0]().challenge_name,
       preselected: opts?.preselected,
       defaultFlags: opts?.defaultFlags ?? 1,
     })
       .then(async (result) => {
+        if (gen !== gateGeneration || route.sessionID !== sessionAtStart) return
         if (!result) {
           daemon.setSolveLocked(false)
           // Cancelled gate — do not let the same ask_flags card reopen immediately.
           daemon.setSuppressSolveGate(true)
-          solveFlowBusy = false
           daemon.setSolveFlowBusy(false)
           return
         }
@@ -554,7 +586,6 @@ export function Session() {
         if (cursorSpec) prefillModelFromRaceSpec(cursorSpec, local)
         // Drop busy BEFORE startSwarm so daemon boot/roster pushes are not ignored
         // while the RPC is in flight (spawn broadcasts before the response).
-        solveFlowBusy = false
         daemon.setSolveFlowBusy(false)
         try {
           await daemon.startSwarm({
@@ -570,13 +601,23 @@ export function Session() {
         }
       })
       .finally(() => {
-        solveFlowBusy = false
+        if (gen !== gateGeneration || route.sessionID !== sessionAtStart) return
         daemon.setSolveFlowBusy(false)
       })
     return true
   }
 
   onMount(() => {
+    // Keyed remount leaves DialogProvider's stack intact. Clear leftovers once
+    // — never reactively, or the flags/mode/models gate closes itself.
+    if (
+      process.env.ARTEMIS === "1" &&
+      !daemon.swarmRunning[0]() &&
+      !daemon.solveFlowBusy[0]() &&
+      dialog.stack.length > 0
+    ) {
+      dialog.clear()
+    }
     // Must subscribe before ask_flags — plugin runs in another process and only
     // broadcasts solve_flow_request to connected TUI sockets.
     // Clear leftovers only when idle with no finished summary — remount must not
@@ -591,6 +632,8 @@ export function Session() {
     void daemon.ensureConnected()
 
     const offSolve = daemon.onSolveFlow((push) => {
+      // New load RPC — not a remount of a cancelled card.
+      if (push.from_load) daemon.setSuppressSolveGate(false)
       startSolveGate({
         challengeName: push.challenge ?? daemon.sessionState[0]().challenge_name,
         preselected: push.preselected,
@@ -598,33 +641,62 @@ export function Session() {
       })
     })
 
-    // Fallback: if the daemon push arrived before we subscribed, still open the
-    // gate when ask_flags/swarm tool cards appear. Mark the part whenever the
-    // gate is already owned (busy/locked/running/suppressed) so unlocking after
-    // quota cannot reopen the same card.
-    const offTool = event.on("message.part.updated", (evt) => {
-      if (process.env.ARTEMIS !== "1") return
-      const part = evt.properties.part
-      if (part.type !== "tool") return
-      if (part.sessionID !== route.sessionID) return
-      if (part.tool !== "artemis_ask_flags" && part.tool !== "artemis_swarm") return
-      if (part.state.status !== "running" && part.state.status !== "completed") return
+    const tryOpenGateFromToolPart = (
+      part: ToolPart,
+      sessionID: string,
+      opts?: { fresh?: boolean },
+    ) => {
+      if (part.sessionID && part.sessionID !== sessionID) return
+      const isLoad = part.tool === "artemis_load_challenge"
+      const isAsk = part.tool === "artemis_ask_flags" || part.tool === "artemis_swarm"
+      if (!isLoad && !isAsk) return
       if (seenAskFlagsParts.has(part.id)) return
+      if (isLoad) {
+        if (part.state.status !== "completed") return
+        const out = typeof part.state.output === "string" ? part.state.output : ""
+        if (/^ERROR/i.test(out.trim())) return
+        // Fresh part.updated only — remount scan must not undo Esc.
+        if (opts?.fresh) daemon.setSuppressSolveGate(false)
+      } else if (part.state.status !== "running" && part.state.status !== "completed") {
+        return
+      }
       const started = startSolveGate({ defaultFlags: 1 })
       if (
         started ||
-        solveFlowBusy ||
+        daemon.solveFlowBusy[0]() ||
         daemon.solveLocked[0]() ||
         daemon.swarmRunning[0]() ||
         daemon.suppressSolveGate[0]()
       ) {
         seenAskFlagsParts.add(part.id)
       }
+    }
+
+    // Fallback: if the daemon push arrived before we subscribed, still open the
+    // gate when load/ask_flags/swarm tool cards appear. Mark the part whenever
+    // the gate is already owned (busy/locked/running/suppressed) so unlocking
+    // after quota cannot reopen the same card.
+    const offTool = event.on("message.part.updated", (evt) => {
+      if (process.env.ARTEMIS !== "1") return
+      const part = evt.properties.part
+      if (part.type !== "tool") return
+      tryOpenGateFromToolPart(part, route.sessionID, { fresh: true })
     })
+
+    // Relaunch / remount: the load card is already completed, so no new
+    // part.updated fires. Scan once so flags → models still opens.
+    for (const msg of messages()) {
+      const parts = sync.data.part[msg.id]
+      if (!parts) continue
+      for (const part of parts) {
+        if (part.type !== "tool") continue
+        tryOpenGateFromToolPart(part, route.sessionID)
+      }
+    }
 
     const offAsk = daemon.onFlagsAsk((push) => {
       // Solve-flow gate owns flags; ignore legacy FLAGS_ASK during/after a run.
-      if (solveFlowBusy || daemon.solveLocked[0]() || daemon.suppressSolveGate[0]()) return
+      if (daemon.solveFlowBusy[0]() || daemon.solveLocked[0]() || daemon.suppressSolveGate[0]()) return
       if (daemon.sessionState[0]().flags_explicit) return
       if (answered.has(`ask:${push.request_id}`)) return
       answered.add(`ask:${push.request_id}`)
@@ -639,6 +711,7 @@ export function Session() {
     })
     // Flag confirm: inline FlagConfirmBar reads daemon.flagConfirm (no modal).
     onCleanup(() => {
+      gateGeneration += 1
       offSolve()
       offTool()
       offAsk()
@@ -1674,6 +1747,9 @@ export function Session() {
                     </Switch>
                   )}
                 </For>
+                <Show when={showSessionSwarm()}>
+                  <ArtemisSwarm />
+                </Show>
               </scrollbox>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>
@@ -2226,7 +2302,7 @@ type SwarmGroup =
   | { type: "summary"; lines: string[] }
 
 /** Group consecutive bash/tool/result events into one tool card per agent. */
-function groupSwarmEvents(events: ReturnType<typeof parseArtemisEvents>, swarmRunning: boolean): SwarmGroup[] {
+function groupSwarmEvents(events: ArtemisEvent[], swarmRunning: boolean): SwarmGroup[] {
   const out: SwarmGroup[] = []
   let cur: ToolGroup | null = null
   const seenOutcome = new Set<string>()
@@ -2295,7 +2371,7 @@ function groupSwarmEvents(events: ReturnType<typeof parseArtemisEvents>, swarmRu
   return out
 }
 
-function SwarmToolCard(props: { group: ToolGroup; running: boolean; part: ToolPart }) {
+function SwarmToolCard(props: { group: ToolGroup; running: boolean; part?: ToolPart }) {
   const { theme } = useTheme()
   const ctx = use()
   const [expanded, setExpanded] = createSignal(true)
@@ -2357,7 +2433,7 @@ function SwarmToolCard(props: { group: ToolGroup; running: boolean; part: ToolPa
   )
 }
 
-function ArtemisSwarm(props: ToolProps) {
+function ArtemisSwarm(props: { part?: ToolPart }) {
   const { theme } = useTheme()
   const events = createMemo(() => daemon.swarmEvents[0]())
   const agents = createMemo(() =>
@@ -2373,8 +2449,8 @@ function ArtemisSwarm(props: ToolProps) {
   const isRunning = createMemo(
     () =>
       !terminalDone() &&
-      (props.part.state.status === "running" ||
-        props.part.state.status === "pending" ||
+      (props.part?.state.status === "running" ||
+        props.part?.state.status === "pending" ||
         processAlive()),
   )
   const agentStarted = createMemo(() => hasAgentActivity(events()))
@@ -2443,6 +2519,16 @@ function ArtemisSwarm(props: ToolProps) {
   )
   // Multi-agent: show boxes as soon as roster/models known (including boot).
   const showGrid = createMemo(() => multiAgent() && !focus())
+  /** Hide the empty "# Artemis / No solver activity" card when nothing started. */
+  const hasSolveUi = createMemo(() =>
+    swarmHasVisibleSolveUi({
+      running: processAlive() || isRunning(),
+      eventCount: events().length,
+      startedAt: daemon.swarmStartedAt[0](),
+      agentStarted: agentStarted(),
+      showGrid: showGrid(),
+    }),
+  )
 
   const [now, setNow] = createSignal(Date.now())
   createEffect(() => {
@@ -2547,7 +2633,7 @@ function ArtemisSwarm(props: ToolProps) {
                   return (
                     /^(How)\b/i.test(t) ||
                     /^\d+\.\s/.test(t) ||
-                    (/^(Challenge|Key insight|Solution summary)\b/i.test(t))
+                    (/^(Challenge|Key insight|Solution summary|What I tried|Why it worked|Dead ends)\b/i.test(t))
                   )
                 })}
               >
@@ -2560,7 +2646,7 @@ function ArtemisSwarm(props: ToolProps) {
                   const t = line.trim()
                   const isSolvedBy = /^Solved by /i.test(t)
                   const isHeader =
-                    /^(How|Challenge|Key insight|Flag|Solution summary|Steps)\b/i.test(t) ||
+                    /^(How|Challenge|Key insight|Flag|Solution summary|Steps|What I tried|Why it worked|Dead ends)\b/i.test(t) ||
                     /^Flag:/i.test(t)
                   const isStep = /^\d+\.\s/.test(t)
                   const fg = isSolvedBy || isHeader
@@ -2584,6 +2670,7 @@ function ArtemisSwarm(props: ToolProps) {
   )
 
   return (
+    <Show when={hasSolveUi()}>
     <box gap={1} flexShrink={0} marginTop={1}>
       {/* Scrollback marker only. The live spinner, elapsed and page nav are in
           the sticky footer, so this stays static to avoid a second animation. */}
@@ -2599,7 +2686,12 @@ function ArtemisSwarm(props: ToolProps) {
       <Show when={showBoot() && !showGrid()}>
         <BlockTool title="# Artemis" part={props.part} spinner={isRunning()}>
           <box gap={0} paddingLeft={1}>
-            <For each={bootLines().length ? bootLines() : isRunning() ? ["Waiting for solvers…"] : ["No solver activity"]}>
+            <For each={bootLines().length ? bootLines() : isRunning() ? [
+              daemon.sessionState[0]().challenge_name
+                ? `Loaded ${daemon.sessionState[0]().challenge_name}`
+                : "Waiting for solvers…",
+              ...(daemon.sessionState[0]().challenge_name ? ["Waiting for solvers…"] : []),
+            ] : ["No solver activity"]}>
               {(line) => (
                 <text fg={theme.textMuted} wrapMode="char">
                   {line}
@@ -2667,6 +2759,7 @@ function ArtemisSwarm(props: ToolProps) {
         <Show when={agentStarted() || focus() || terminalDone()}>{renderGroups()}</Show>
       </Show>
     </box>
+    </Show>
   )
 }
 

@@ -242,10 +242,16 @@ async def _cleanup_orphans_cli(session_id: str | None = None) -> None:
         logger.info("CLI cleaned up %d orphan sandbox container(s)", removed)
 
 
+def _docker_exe() -> str:
+    from backend.subprocess_platform import resolve_docker_exe
+
+    return resolve_docker_exe()
+
+
 async def _docker_cli(*args: str, timeout_s: float = 600) -> tuple[int, str, str]:
     """Run the host `docker` CLI (respects DOCKER_HOST)."""
     proc = await asyncio.create_subprocess_exec(
-        "docker",
+        _docker_exe(),
         *args,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -347,7 +353,7 @@ async def docker_cp_from_container(
         raise RuntimeError(err.strip() or f"docker start {container} failed")
 
     proc = await asyncio.create_subprocess_exec(
-        "docker",
+        _docker_exe(),
         "exec",
         container,
         "tar",

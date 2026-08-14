@@ -523,12 +523,10 @@ class ChallengeSwarm:
                     existing = "\n".join(clean_how_lines(late)).strip()
                     self.flag_notes[runner_id] = existing
 
-                writeup = ""
-                if not is_usable_narrative(existing):
-                    writeup = await capture_solver_writeup(solver)
+                writeup = await capture_solver_writeup(solver)
                 if writeup and is_usable_narrative(writeup):
                     self.flag_notes[runner_id] = writeup
-                    self.findings[runner_id] = writeup[:500]
+                    self.findings[runner_id] = writeup[:800]
                 self._emit_how_recap()
                 self.cancel_event.set()
                 if result.flag != self.confirmed_flag:
@@ -934,7 +932,7 @@ class ChallengeSwarm:
             lines.append("  (no writeup recorded)")
         while lines and not lines[-1].strip():
             lines.pop()
-        return lines[:120]
+        return lines[:400]
 
     def _summary_findings(self) -> str:
         parts = [f"[{m}]: {f}" for m, f in self.findings.items() if f]

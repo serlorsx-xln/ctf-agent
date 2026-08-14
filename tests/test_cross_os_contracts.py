@@ -43,7 +43,8 @@ def test_swarm_command_shape_is_os_agnostic(tmp_path, monkeypatch: pytest.Monkey
         lambda repo=None: None,
     )
     cmd = swarm_command(tmp_path, ["--challenge", "c"])
-    assert cmd[0] in ("uv",) or cmd[0].endswith("python") or "python" in cmd[0].lower()
+    head = cmd[0].lower()
+    assert head in ("uv",) or head.endswith("uv") or head.endswith("uv.exe") or "python" in head
     assert "swarm" in cmd
 
 

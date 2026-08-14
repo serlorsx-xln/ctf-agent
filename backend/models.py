@@ -14,17 +14,8 @@ DEFAULT_MODELS: list[str] = [
     "cursor/composer-2.5",
 ]
 
-# Stronger options for hard crypto/rev (same Cursor key, or other backends).
-HARDER_MODELS: list[str] = [
-    "cursor/claude-4-sonnet",
-    "claude-sdk/claude-opus-4-6",
-    "codex/gpt-5.4",
-]
-
 # Product swarm providers (TUI /connect → cursor, anthropic, openai, google).
 SUPPORTED_PROVIDERS = frozenset({"cursor", "claude-sdk", "codex", "gemini-sdk"})
-# Legacy alias — same set as SUPPORTED_PROVIDERS.
-_RACE_PROVIDERS = SUPPORTED_PROVIDERS
 
 
 def model_id_from_spec(spec: str) -> str:

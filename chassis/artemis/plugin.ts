@@ -6,6 +6,7 @@
  */
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
+import { existsSync } from "node:fs"
 import path from "path"
 import { daemon } from "../packages/tui/src/artemis/client"
 
@@ -48,6 +49,24 @@ async function daemonOp(
   }
 }
 
+function bridgeArgv(root: string): { cmd: string; args: string[] } {
+  const py =
+    process.platform === "win32"
+      ? path.join(root, ".venv", "Scripts", "python.exe")
+      : path.join(root, ".venv", "bin", "python")
+  if (existsSync(py)) {
+    return { cmd: py, args: ["-m", "backend.shell.bridge"] }
+  }
+  const uv =
+    process.platform === "win32"
+      ? path.join(process.env.USERPROFILE || "", ".local", "bin", "uv.exe")
+      : "uv"
+  if (process.platform === "win32" && existsSync(uv)) {
+    return { cmd: uv, args: ["run", "--directory", root, "python", "-m", "backend.shell.bridge"] }
+  }
+  return { cmd: "uv", args: ["run", "--directory", root, "python", "-m", "backend.shell.bridge"] }
+}
+
 function runPython(
   op: string,
   input?: Record<string, unknown>,
@@ -55,12 +74,9 @@ function runPython(
 ): Promise<string> {
   const root = repoRoot()
   const payload = JSON.stringify(input || {})
+  const { cmd, args } = bridgeArgv(root)
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "uv",
-      ["run", "--directory", root, "python", "-m", "backend.shell.bridge", op],
-      { env },
-    )
+    const child = spawn(cmd, [...args, op], { env })
     let out = ""
     let err = ""
     child.stdout.on("data", (d) => (out += d.toString()))
@@ -165,20 +181,23 @@ export const ArtemisCtfPlugin: Plugin = async () => {
       // (flags 1/1 + flags_explicit skipping the digits dialog).
       if (event.type === "session.created") {
         try {
-          const sid = (event.properties as { info?: { id?: string } })?.info?.id
+          const info = (event.properties as { info?: { id?: string; parentID?: string } })?.info
+          // Child/subagent sessions must not rebind the process-wide daemon
+          // peer or unlock a live swarm on the parent chat.
+          if (info?.parentID) return
+          if (daemon.swarmRunning[0]()) return
+          // Late session.created must not drop busy while flags→models is open.
+          if (daemon.solveFlowBusy[0]()) return
+          const sid = info?.id
           if (sid) daemon.setSessionId(sid)
-          await daemon.request("clear_session", {})
+          // Do not clear_session here. TUI already cleared before create, and
+          // a late clear races the resubmit load on the new chat.
           daemon.setFlowCompleted(false)
           daemon.setSolveLocked(false)
+          daemon.setSolveFlowBusy(false)
           daemon.setSuppressSolveGate(false)
-          daemon.clearSwarmEvents()
         } catch {
-          // Daemon unavailable — fall back to the legacy bridge op.
-          try {
-            await runPython("clear_session", {})
-          } catch {
-            /* ignore */
-          }
+          /* daemon down — TUI clearSolvedSession already handled disk state */
         }
       }
     },
@@ -250,10 +269,10 @@ export const ArtemisCtfPlugin: Plugin = async () => {
     "experimental.chat.system.transform": async (_input, output) => {
       const st = readSession()
       const lines = [
-        "You are Artemis. Single CTF flow: load → ask_flags (always) → TUI gate (flags, mode, models) → swarm → summarize.",
+        "You are Artemis. Single CTF flow: load → TUI gate (flags, mode, models) → swarm → summarize.",
         "User may paste challenge text, a URL/nc/ssh line, @file paths, and/or a folder path — all in one message (any mix).",
         "Call artemis_load_challenge with path=<folder> + attachments=[other host paths] + prompt=<pasted text minus paths>.",
-        "After a *successful* load (output starts with Loaded), call artemis_ask_flags once — the TUI runs flags → mode → models, then starts the swarm. artemis_swarm is only a deprecated alias of ask_flags.",
+        "After a *successful* load (output starts with Loaded) the TUI opens flags → mode → models by itself. Call artemis_ask_flags only if that gate did not appear. artemis_swarm is a deprecated alias of ask_flags.",
         "If load returns ERROR (path not found / bad path), do NOT call ask_flags — tell the user to fix the path.",
         "Never start a second swarm right after ask_flags/swarm finished unless the user asks again.",
         "If the solve stopped (usage limit, error, no flag), do NOT call artemis_ask_flags again until the user explicitly asks to retry or switch models.",
@@ -346,7 +365,8 @@ export const ArtemisCtfPlugin: Plugin = async () => {
         description:
           "Load a CTF challenge. Prefer prompt= pasted challenge.txt-style text (+ URLs). " +
           "Optional path= existing folder. Optional attachments= host file paths to copy into distfiles/. " +
-          "Creates ~/.cache/artemis/challenges/<id>/ when using prompt.",
+          "Creates ~/.cache/artemis/challenges/<id>/ when using prompt. " +
+          "A successful load opens the TUI flags → mode → models gate automatically.",
         args: {
           path: tool.schema.string().optional().describe("Host path to an existing challenge folder"),
           prompt: tool.schema

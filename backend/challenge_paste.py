@@ -1,7 +1,8 @@
-"""Shared CTF challenge-paste heuristics (TUI + Cursor stub).
+"""Shared first-message paste rules (TUI + Cursor stub).
 
-Patterns live in ``shared/challenge_paste.json`` so TypeScript and Python
-cannot drift. Both consumers load that file at import/runtime.
+``path_re`` extracts host paths from mixed paste. ``greetings`` is the only
+reject list — anything else on a fresh session is a challenge (story, URL,
+folder, attachments). Not a CTF-keyword allowlist.
 """
 
 from __future__ import annotations
@@ -21,34 +22,29 @@ def _spec() -> dict:
 
 
 @lru_cache(maxsize=1)
-def _challenge_hint() -> re.Pattern[str]:
-    return re.compile(_spec()["challenge_hint"], re.IGNORECASE)
-
-
-@lru_cache(maxsize=1)
-def _ctf_prose() -> re.Pattern[str]:
-    return re.compile(_spec()["ctf_prose"], re.IGNORECASE)
-
-
-@lru_cache(maxsize=1)
 def _path_re() -> re.Pattern[str]:
     return re.compile(_spec()["path_re"])
 
 
-def looks_like_challenge_paste(text: str) -> bool:
-    """True when pasted text looks like a CTF challenge description."""
+@lru_cache(maxsize=1)
+def _greetings() -> re.Pattern[str]:
+    return re.compile(_spec()["greetings"], re.IGNORECASE)
+
+
+def is_greeting(text: str) -> bool:
+    """True for empty or a bare hello — not a challenge."""
     t = (text or "").strip()
     if not t:
-        return False
-    if _challenge_hint().search(t):
         return True
-    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
-    spec = _spec()
-    return (
-        len(lines) >= int(spec["min_lines"])
-        and len(t) >= int(spec["min_chars"])
-        and bool(_ctf_prose().search(t))
-    )
+    return bool(_greetings().fullmatch(t))
+
+
+def looks_like_challenge_paste(text: str) -> bool:
+    """True for any non-empty, non-greeting paste."""
+    t = (text or "").strip()
+    if not t or is_greeting(t):
+        return False
+    return True
 
 
 def extract_challenge_paths(text: str) -> list[str]:

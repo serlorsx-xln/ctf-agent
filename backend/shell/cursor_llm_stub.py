@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -22,11 +21,20 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from backend.challenge_paste import (
+    extract_challenge_paths,
+    extract_paste_without_paths,
+    is_greeting,
+    looks_like_challenge_paste,
+)
+
 HOST = "127.0.0.1"
 PORT = 18765
 logger = logging.getLogger("cursor-proxy")
 
 _PLACEHOLDER_MODELS = ("default", "auto")
+_MODELS_CACHE: tuple[float, tuple[str, ...], str] | None = None
+_MODELS_CACHE_TTL_S = 600.0
 
 
 def _extract_cursor_model(body: dict) -> str:
@@ -36,9 +44,17 @@ def _extract_cursor_model(body: dict) -> str:
 
 
 def _official_model_ids() -> list[str]:
+    global _MODELS_CACHE
     key = (os.environ.get("CURSOR_API_KEY") or "").strip()
     if not key:
         return list(_PLACEHOLDER_MODELS)
+    now = time.time()
+    if (
+        _MODELS_CACHE
+        and now - _MODELS_CACHE[0] < _MODELS_CACHE_TTL_S
+        and _MODELS_CACHE[2] == key
+    ):
+        return list(_MODELS_CACHE[1])
 
     try:
         req = urllib.request.Request(
@@ -54,6 +70,7 @@ def _official_model_ids() -> list[str]:
         items = payload.get("items") or []
         ids = [str(item.get("id")) for item in items if item.get("id")]
         if ids:
+            _MODELS_CACHE = (now, tuple(ids), key)
             return ids
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError) as e:
         logger.warning("Cursor Bearer models failed: %s", e)
@@ -72,6 +89,7 @@ def _official_model_ids() -> list[str]:
         items = payload.get("items") or []
         ids = [str(item.get("id")) for item in items if item.get("id")]
         if ids:
+            _MODELS_CACHE = (now, tuple(ids), key)
             return ids
     except Exception as e:  # noqa: BLE001
         logger.warning("Cursor Basic models failed: %s", e)
@@ -83,6 +101,7 @@ def _official_model_ids() -> list[str]:
         ids = [str(getattr(m, "id", None) or "") for m in models]
         ids = [i for i in ids if i]
         if ids:
+            _MODELS_CACHE = (now, tuple(ids), key)
             return ids
     except Exception as e:  # noqa: BLE001
         logger.warning("Cursor SDK models.list failed: %s", e)
@@ -231,27 +250,6 @@ def _in_tool_continuation(messages: object) -> bool:
     return bool(role == "assistant" and last.get("tool_calls"))
 
 
-def _is_greeting(text: str) -> bool:
-    """True only for empty text or a bare greeting — NOT short instructions.
-
-    The length-based trivial check was removed so 'go'/'ok'/'run' proceed to
-    the swarm instead of being swallowed by guidance.
-    """
-    if not text:
-        return True
-    return bool(
-        re.fullmatch(
-            r"(hi|hello|hey|yo|test|testing|ping|สวัสดี|หวัดดี|ทดสอบ|เทส)+[!?.]*",
-            text,
-            flags=re.I,
-        )
-    )
-
-
-def _looks_like_challenge_paste(text: str) -> bool:
-    from backend.challenge_paste import looks_like_challenge_paste
-
-    return looks_like_challenge_paste(text)
 
 
 def _session_id_from_headers(headers: dict) -> str | None:
@@ -397,18 +395,6 @@ def _sse_tool_call(model: str, tool_call: dict) -> list[str]:
     ]
 
 
-def _extract_all_paths(text: str) -> list[str]:
-    from backend.challenge_paste import extract_challenge_paths
-
-    return extract_challenge_paths(text)
-
-
-def _extract_paste(text: str, paths: list[str]) -> str:
-    from backend.challenge_paste import extract_paste_without_paths
-
-    return extract_paste_without_paths(text, paths)
-
-
 def _load_tool_call_v2(
     *, path: str | None = None, attachments: list[str] | None = None, prompt: str | None = None
 ) -> dict:
@@ -510,13 +496,13 @@ def _handle_chat(body: dict, headers: dict) -> tuple[str, Any]:
         return _emit_text(model, "", stream)
 
     # 2) Fresh user turn.
-    paths = _extract_all_paths(user_text)
+    paths = extract_challenge_paths(user_text)
 
     # 2a) Pure greeting (no paths) with no challenge loaded → guidance.
-    if not paths and not challenge_dir and _is_greeting(user_text):
+    if not paths and not challenge_dir and is_greeting(user_text):
         return _emit_text(model, _guidance_text(), stream)
 
-    paste = _extract_paste(user_text, paths)
+    paste = extract_paste_without_paths(user_text, paths)
 
     # 2b) A NEW path on a fresh turn → (re)load (multi-path → attachments).
     #     This reloads even if the path matches the loaded challenge.
@@ -528,16 +514,8 @@ def _handle_chat(body: dict, headers: dict) -> tuple[str, Any]:
         )
         return _emit_tool(model, tool, stream)
 
-    # 2c) Challenge-shaped paste → always materialize + load.
-    #     Must win over a stale challenge_dir (other window / _default),
-    #     otherwise ssh/nc-only pastes skip load and open ask_flags empty.
-    if paste and _looks_like_challenge_paste(paste):
-        tool = _load_tool_call_v2(prompt=paste)
-        return _emit_tool(model, tool, stream)
-
-    # 2d) Challenge already loaded, fresh turn, not a new path → ask_flags —
-    #     unless the most recent load in this chat failed (stale challenge_dir
-    #     must not reopen Flags for the previous challenge).
+    # 2c) Last load in this chat failed — don't treat "go" as a new challenge
+    #     and don't reopen Flags for the previous challenge_dir.
     recent_load = _most_recent_load_result(messages)
     if recent_load is not None and _load_challenge_failed(recent_load):
         return _emit_text(
@@ -546,6 +524,13 @@ def _handle_chat(body: dict, headers: dict) -> tuple[str, Any]:
             "and/or paste the challenge text (web links stay in the paste).",
             stream,
         )
+
+    # 2d) Nothing loaded yet: any non-greeting paste is a challenge.
+    if not challenge_dir and paste and looks_like_challenge_paste(paste):
+        tool = _load_tool_call_v2(prompt=paste)
+        return _emit_tool(model, tool, stream)
+
+    # 2e) Challenge already loaded, fresh turn, not a new path → ask_flags.
     if challenge_dir:
         return _emit_tool(model, _ask_flags_tool_call(model, default=1), stream)
 

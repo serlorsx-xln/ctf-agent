@@ -215,7 +215,7 @@ async def _load_challenge(payload: dict) -> str:
         flags = "unknown"
 
     how = "existing path" if path else "pasted prompt → cache workspace"
-    next_step = "Next: artemis_ask_flags (TUI: flags → single/swarm → models → start)."
+    next_step = "Next: TUI opens flags → single/swarm → models → start (ask_flags only if the gate is missing)."
     return (
         f"Loaded challenge `{meta.name}` at {root}\n"
         f"source={how}\n"
@@ -306,8 +306,10 @@ def _kill_pid_tree(pid: int) -> None:
         pass
     if sys.platform == "win32":
         try:
+            from backend.subprocess_platform import windows_system_exe
+
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                [windows_system_exe("taskkill"), "/PID", str(pid), "/T", "/F"],
                 check=False,
                 capture_output=True,
             )
@@ -470,11 +472,6 @@ async def _swarm_via_daemon(payload: dict) -> str:
             elif mtype == "swarm_start":
                 # Spawn ack from daemon (type mirrors the request name).
                 if msg.get("id") == req_id and not msg.get("ok"):
-                    err = msg.get("error", "swarm_start failed")
-                    return f"ERROR: {err}"
-            elif mtype == "swarm_start.response":
-                # Legacy alias — keep for older daemon builds.
-                if not msg.get("ok"):
                     err = msg.get("error", "swarm_start failed")
                     return f"ERROR: {err}"
             # Ignore other push events (usage/session/dialog) in the bridge shim —

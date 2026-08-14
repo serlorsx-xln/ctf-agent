@@ -13,9 +13,11 @@ from backend.process_hygiene import (
 )
 from backend.stdio_platform import fd_is_valid
 from backend.subprocess_platform import (
+    resolve_docker_exe,
     resolve_venv_python,
     sanitize_child_env,
     swarm_command,
+    windows_system_exe,
 )
 
 
@@ -77,11 +79,22 @@ def test_swarm_command_prefers_venv_python(tmp_path: Path, monkeypatch: pytest.M
     assert "--challenge" in cmd
 
 
-def test_swarm_command_falls_back_to_uv(tmp_path: Path) -> None:
+def test_swarm_command_falls_back_to_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cmd = swarm_command(tmp_path, ["--challenge", "c"])
     assert cmd[:2] == ["uv", "run"]
     assert "artemis" in cmd
     assert "swarm" in cmd
+
+
+def test_windows_system_exe_passthrough_on_unix() -> None:
+    if sys.platform == "win32":
+        exe = windows_system_exe("cmd")
+        assert exe.lower().endswith("cmd.exe")
+        assert Path(exe).is_absolute()
+    else:
+        assert windows_system_exe("cmd") == "cmd"
+    assert resolve_docker_exe()
 
 
 def test_resolve_venv_python_none_without_venv(tmp_path: Path) -> None:

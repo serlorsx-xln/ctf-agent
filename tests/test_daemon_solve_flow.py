@@ -104,3 +104,114 @@ def test_solve_flow_start_registered(daemon_env: str) -> None:
             await _stop(d, task)
 
     asyncio.run(run())
+
+
+def test_load_broadcasts_solve_flow(daemon_env: str) -> None:
+    """Successful load must push solve_flow_request so the TUI gate opens
+    even when the chat model never calls artemis_ask_flags."""
+
+    async def run() -> None:
+        cache = Path(os.environ["ARTEMIS_CACHE"])
+        chal = cache / "chal-load"
+        chal.mkdir(parents=True, exist_ok=True)
+        (chal / "challenge.txt").write_text("pwn story\n", encoding="utf-8")
+
+        d, task = await _start()
+        try:
+            tr, tw = await open_connection()
+            tw.write(
+                (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s-load"}) + "\n").encode()
+            )
+            await tw.drain()
+            await asyncio.wait_for(tr.readline(), 3)
+
+            tw.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "ld1",
+                            "type": "load",
+                            "session": "s-load",
+                            "path": str(chal),
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await tw.drain()
+
+            seen = False
+            load_ok = False
+            for _ in range(20):
+                line = await asyncio.wait_for(tr.readline(), 5)
+                if not line:
+                    break
+                msg = json.loads(line)
+                if msg.get("id") == "ld1" and msg.get("type") == "load":
+                    assert msg.get("ok") is not False, msg
+                    assert "ERROR" not in str(msg.get("text", ""))
+                    load_ok = True
+                if msg.get("type") == "solve_flow_request":
+                    assert msg.get("from_load") is True
+                    assert msg.get("session") == "s-load"
+                    seen = True
+                    if load_ok:
+                        break
+            assert load_ok, "load response missing"
+            assert seen, "successful load never pushed solve_flow_request"
+            tw.close()
+        finally:
+            await _stop(d, task)
+
+    asyncio.run(run())
+
+
+def test_failed_load_does_not_broadcast_solve_flow(daemon_env: str) -> None:
+    """ERROR load must not open the flags → models gate."""
+
+    async def run() -> None:
+        d, task = await _start()
+        try:
+            tr, tw = await open_connection()
+            tw.write(
+                (json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s-bad"}) + "\n").encode()
+            )
+            await tw.drain()
+            await asyncio.wait_for(tr.readline(), 3)
+
+            tw.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "ld-bad",
+                            "type": "load",
+                            "session": "s-bad",
+                            "path": "/no/such/challenge/dir",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await tw.drain()
+
+            saw_error = False
+            for _ in range(15):
+                line = await asyncio.wait_for(tr.readline(), 5)
+                if not line:
+                    break
+                msg = json.loads(line)
+                if msg.get("type") == "solve_flow_request":
+                    raise AssertionError(f"failed load pushed solve_flow_request: {msg}")
+                if msg.get("id") == "ld-bad":
+                    text = str(msg.get("text") or msg.get("error") or "")
+                    assert "ERROR" in text.upper() or msg.get("ok") is False
+                    saw_error = True
+                    break
+            assert saw_error, "failed load response missing"
+            tw.close()
+        finally:
+            await _stop(d, task)
+
+    asyncio.run(run())

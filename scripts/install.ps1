@@ -11,6 +11,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 . (Join-Path $PSScriptRoot "lib\windows-docker.ps1")
 . (Join-Path $PSScriptRoot "lib\windows-path.ps1")
+Repair-ArtemisWindowsPath
 
 $env:PYTHONIOENCODING = "utf-8"
 
@@ -24,11 +25,8 @@ function Invoke-External {
   )
   $prev = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
-  $quoted = $Args | ForEach-Object {
-    if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-  }
-  $cmd = if ($quoted.Count -gt 0) { "$Exe $($quoted -join ' ')" } else { $Exe }
-  cmd /c $cmd 2>&1 | ForEach-Object {
+  if ($null -eq $Args) { $Args = @() }
+  & $Exe @Args 2>&1 | ForEach-Object {
     if ($_ -is [System.Management.Automation.ErrorRecord]) { Write-Host $_.ToString() }
     else { Write-Host $_ }
   }
@@ -131,7 +129,9 @@ Install-ArtemisCli -RepoRoot $RepoRoot
 Log "Running verify-install..."
 $verifyArgs = @()
 if ($SkipDocker -or -not $dockerOk) { $verifyArgs += "-SkipDocker" }
-& powershell -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "scripts\verify-install.ps1") @verifyArgs
+$ps = Join-Path $PSHOME "powershell.exe"
+if (-not (Test-Path -LiteralPath $ps)) { $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe" }
+& $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "scripts\verify-install.ps1") @verifyArgs
 
 Write-Host ""
 Write-Host "Artemis install complete." -ForegroundColor Green

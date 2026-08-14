@@ -20,8 +20,10 @@ def ensure_docker_bind_dir(path: str | Path) -> None:
         return
     p = str(Path(path).resolve())
     try:
+        from backend.subprocess_platform import windows_system_exe
+
         proc = subprocess.run(
-            ["icacls", p, "/inheritance:e"],
+            [windows_system_exe("icacls"), p, "/inheritance:e"],
             capture_output=True,
             text=True,
             check=False,

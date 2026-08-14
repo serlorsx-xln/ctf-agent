@@ -418,7 +418,7 @@ def test_session_header_uses_that_session_state(monkeypatch) -> None:
         return {"challenge_dir": "/old", "challenge_name": "old"}
 
     monkeypatch.setattr("backend.shell.sandbox_session.load_session_state", _load)
-    # Empty session + short non-challenge text → guidance (not ask_flags for /old)
+    # Empty session + any paste loads into ses_new (must not ask_flags for /old).
     kind, payload = stub._handle_chat(
         {
             "model": "default",
@@ -428,5 +428,4 @@ def test_session_header_uses_that_session_state(monkeypatch) -> None:
         {"X-Artemis-Session-Id": "ses_new"},
     )
     msg = payload["choices"][0]["message"]
-    assert msg.get("tool_calls") is None
-    assert "challenge" in (msg.get("content") or "").lower()
+    assert msg["tool_calls"][0]["function"]["name"] == "artemis_load_challenge"

@@ -103,6 +103,11 @@ class Handlers:
         from backend.shell.sandbox_session import load_session_state
 
         self.state.set_session(load_session_state(session), session_id=session)
+        # LLM load path used to stop here and wait for artemis_ask_flags.
+        # Composer/other chat models often end the turn after load, so the TUI
+        # never opened flags → mode → models. Push the gate from load itself.
+        if not str(text).lstrip().upper().startswith("ERROR"):
+            self._broadcast_solve_flow(session, from_load=True)
         return {"text": text, "session_state": self.state.get_session(session)}
 
     async def _h_bash(self, payload: dict, *, session: str) -> dict:
@@ -171,7 +176,15 @@ class Handlers:
         self.state.set_session(load_session_state(session) or {}, session_id=session)
         return {"session_state": self.state.get_session(session)}
 
-    async def _h_solve_flow_start(self, payload: dict, *, session: str) -> dict:
+    def _broadcast_solve_flow(
+        self,
+        session: str,
+        *,
+        default: int | None = None,
+        preselected: Any = None,
+        from_load: bool = False,
+    ) -> bool:
+        """Push solve_flow_request when a challenge dir is on disk. Returns True if sent."""
         from pathlib import Path
 
         from backend.shell.sandbox_session import load_session_state
@@ -179,23 +192,35 @@ class Handlers:
         st = load_session_state(session) or self.state.get_session(session)
         challenge_dir = str(st.get("challenge_dir") or "").strip()
         if not challenge_dir or not Path(challenge_dir).is_dir():
-            return {
-                "ok": False,
-                "error": "load a challenge first (path must be an existing directory)",
-            }
+            return False
         challenge = st.get("challenge_name") or challenge_dir
-        default = payload.get("default", 1)
+        if default is None:
+            raw = st.get("flags_required")
+            default = int(raw) if isinstance(raw, int) and raw > 0 else 1
         event: dict[str, Any] = {
             "type": "solve_flow_request",
             "session": session,
             "default_flags": int(default),
             "challenge": challenge,
+            "from_load": from_load,
         }
-        preselected = payload.get("preselected")
         if preselected is not None:
             event["preselected"] = preselected
         self.state.broadcast(event)
         self.state.set_session(st, session_id=session)
+        return True
+
+    async def _h_solve_flow_start(self, payload: dict, *, session: str) -> dict:
+        default = payload.get("default", 1)
+        if not self._broadcast_solve_flow(
+            session,
+            default=int(default) if default is not None else None,
+            preselected=payload.get("preselected"),
+        ):
+            return {
+                "ok": False,
+                "error": "load a challenge first (path must be an existing directory)",
+            }
         return {"__push_only__": True}
 
     async def _h_sandbox_stop(self, payload: dict, *, session: str) -> dict:
@@ -298,6 +323,3 @@ class Handlers:
             fut.set_result({"n": n, "ok": True})
             return {"ok": True}
         return {"ok": False, "error": "no pending flags-ask for that id"}
-
-    async def _h_subscribe(self, payload: dict, *, session: str) -> dict:
-        return {"__push_only__": True}

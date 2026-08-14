@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _LOCK = asyncio.Lock()
 _SANDBOXES: dict[str, Any] = {}
+_ORPHAN_CLEANUP_AT: dict[str, float] = {}
+_ORPHAN_CLEANUP_TTL_S = 45.0
 
 _SAFE_SID = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -88,7 +90,11 @@ async def get_sandbox(challenge_dir: str, session_id: str | None = None):
             _SANDBOXES.pop(key, None)
 
         configure_semaphore(4)
-        await cleanup_orphan_containers(session_id=sid)
+        now = time.monotonic()
+        last = _ORPHAN_CLEANUP_AT.get(sid, 0.0)
+        if now - last >= _ORPHAN_CLEANUP_TTL_S:
+            await cleanup_orphan_containers(session_id=sid)
+            _ORPHAN_CLEANUP_AT[sid] = now
         settings = Settings()
         sandbox = DockerSandbox(
             image=getattr(settings, "sandbox_image", None) or "ctf-sandbox-core",

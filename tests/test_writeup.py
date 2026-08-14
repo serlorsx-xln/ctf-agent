@@ -53,7 +53,10 @@ def test_writeup_prompt_asks_for_structured_prose():
     assert "## Challenge" in WRITEUP_PROMPT
     assert "## Key insight" in WRITEUP_PROMPT
     assert "## How" in WRITEUP_PROMPT
+    assert "## What I tried" in WRITEUP_PROMPT
+    assert "## Why it worked" in WRITEUP_PROMPT
     assert "## Flag" not in WRITEUP_PROMPT
+    assert "15–40 sentences" in WRITEUP_PROMPT
 
 
 def test_normalize_writeup_keeps_sections():
@@ -70,12 +73,20 @@ Secret shop PIN unlocks the API.
 2. blutter dump shop logic
 3. call the buy endpoint
 
+## What I tried
+jadx on the wrapper APK showed only Flutter glue.
+
+## Why it worked
+The PIN is checked client-side before the buy call.
+
 ## Flag
 ARCHA{test}
 """
     out = normalize_writeup_text(raw)
     assert "Challenge" in out
     assert "Key insight" in out
+    assert "What I tried" in out
+    assert "Why it worked" in out
     assert "ARCHA{test}" not in out
     assert "```" not in out
 

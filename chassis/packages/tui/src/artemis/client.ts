@@ -38,7 +38,13 @@ export type SessionState = {
 
 export type FlagConfirmRequest = { request_id: string; flag: string }
 export type FlagsAskRequest = { request_id: string; default: number; challenge?: string }
-export type SolveFlowRequest = { default_flags: number; challenge?: string; preselected?: string[] }
+export type SolveFlowRequest = {
+  default_flags: number
+  challenge?: string
+  preselected?: string[]
+  /** True when the daemon opened the gate after a successful load. */
+  from_load?: boolean
+}
 
 /** Whether a daemon push belongs to this TUI window's OpenCode session. */
 export function pushBelongsToSession(
@@ -108,8 +114,6 @@ const rootSignals = createRoot(() => {
   const sessionState = createSignal<SessionState>({})
   const usage = createSignal<ArtemisUsage | null>(null)
   const flagConfirm = createSignal<FlagConfirmRequest | null>(null)
-  const flagsAsk = createSignal<FlagsAskRequest | null>(null)
-  const swarmLog = createSignal<string[]>([])
   const swarmEvents = createSignal<ArtemisEvent[]>([])
   const swarmRunning = createSignal<boolean>(false)
   const solveLocked = createSignal<boolean>(false)
@@ -138,8 +142,6 @@ const rootSignals = createRoot(() => {
     sessionState,
     usage,
     flagConfirm,
-    flagsAsk,
-    swarmLog,
     swarmEvents,
     swarmRunning,
     solveLocked,
@@ -161,8 +163,6 @@ const {
   sessionState,
   usage,
   flagConfirm,
-  flagsAsk,
-  swarmLog,
   swarmEvents,
   swarmRunning,
   solveLocked,
@@ -208,6 +208,8 @@ class DaemonClient {
   private sessionId: string | null = null
   /** Invalidates /stop unlock timers so a newer stop/start cannot be cleared early. */
   private _swarmStopGeneration = 0
+  /** Line count for event-buffer cap (strings are not kept). */
+  private swarmLogCount = 0
 
   /**
    * Bind this client to an OpenCode session. Re-hellos when the id changes so
@@ -216,7 +218,19 @@ class DaemonClient {
   setSessionId(id: string | null | undefined): void {
     const next = id && String(id).trim() ? String(id).trim() : null
     if (next === this.sessionId) return
+    const prev = this.sessionId
     this.sessionId = next
+    // Module-level suppress/lock leak across chats: a cancelled gate or a
+    // _default hydrate must not block flags → models on the next session.
+    if (prev !== next && !this.swarmRunning[0]()) {
+      this.suppressSolveGate[1](false)
+      this.solveLocked[1](false)
+      this.flowCompleted[1](false)
+      this.solveFlowBusy[1](false)
+      this.lastModels[1]([])
+      this.clearSwarmEvents()
+      this.sessionState[1]({})
+    }
     if (this.sock && !this.sock.destroyed) {
       try {
         this.sock.destroy()
@@ -230,16 +244,10 @@ class DaemonClient {
     }
   }
 
-  currentSessionId(): string | null {
-    return this.sessionId
-  }
-
   // Push-driven state signals (module-level — shared, reactive across components).
   sessionState = sessionState
   usage = usage
   flagConfirm = flagConfirm
-  flagsAsk = flagsAsk
-  swarmLog = swarmLog
   swarmEvents = swarmEvents
   swarmRunning = swarmRunning
   solveLocked = solveLocked
@@ -320,7 +328,7 @@ class DaemonClient {
             reject(new Error("daemon socket connect failed"))
             return
           }
-          setTimeout(tryOnce, 100)
+          setTimeout(tryOnce, attempts < 10 ? 25 : 100)
         })
         s.on("close", () => {
           if (this.sock === s) this.sock = null
@@ -462,7 +470,6 @@ class DaemonClient {
           default: Number(msg.default ?? 1),
           challenge: msg.challenge as string | undefined,
         }
-        this.flagsAsk[1](faReq)
         for (const cb of this.flagsAskCbs) cb(faReq)
         break
       }
@@ -471,7 +478,9 @@ class DaemonClient {
           default_flags: Number(msg.default_flags ?? msg.default ?? 1),
           challenge: msg.challenge as string | undefined,
           preselected: Array.isArray(msg.preselected) ? (msg.preselected as string[]) : undefined,
+          from_load: msg.from_load === true,
         }
+        // Session callbacks decide whether a fresh load unsuppresses.
         for (const cb of this.solveFlowCbs) cb(sfReq)
         break
       }
@@ -485,7 +494,7 @@ class DaemonClient {
         this.swarmRunning[1](true)
         // A "Starting swarm" boot line begins a fresh run → reset the buffer.
         if (String(msg.text ?? "").startsWith("Starting swarm")) {
-          this.swarmLog[1]([String(msg.text ?? "")])
+          this.swarmLogCount = 1
           this.swarmEvents[1](this.parseEvents([String(msg.text ?? "")]))
           this.agentLineCounts[1]({})
           this.swarmStartedAt[1](Date.now())
@@ -545,10 +554,10 @@ class DaemonClient {
             break
           }
           // True cold idle: drop previous-run agent grid so a fresh TUI never
-          // flashes stale boxes before the flags dialog.
+          // flashes stale boxes before the flags dialog. Do not suppress just
+          // because a challenge is loaded — that is the normal pre-gate state
+          // (LLM load → ask_flags, or reconnect mid-setup).
           this.clearSwarmEvents()
-          const hasChallenge = Boolean(this.sessionState[0]()?.challenge_dir)
-          if (hasChallenge) this.suppressSolveGate[1](true)
           break
         }
         const terminal = hasTerminalSolveOutcome(this.swarmEvents[0](), this.isMultiAgent())
@@ -615,9 +624,8 @@ class DaemonClient {
     )
   }
 
-  /** Answer a flags-ask dialog. Clears the pending signal. */
+  /** Answer a flags-ask dialog. */
   answerFlagsAsk(request_id: string, n: number): Promise<unknown> {
-    this.flagsAsk[1](null)
     return this.request("flags_ask_answer", { request_id, n })
   }
 
@@ -630,7 +638,7 @@ class DaemonClient {
   }): Promise<unknown> {
     // Fresh run — drop prior events so old think lines cannot invent agent boxes.
     this._swarmStopGeneration += 1
-    this.swarmLog[1]([])
+    this.swarmLogCount = 0
     this.swarmEvents[1]([])
     this.solveLocked[1](true)
     this.swarmRunning[1](true)
@@ -675,7 +683,7 @@ class DaemonClient {
         const hasBoot = ev.some((e) => e.kind === "boot")
         if (hasBoot || hasTerminalSolveOutcome(ev, this.isMultiAgent())) return
         void this.request("swarm_replay", {}).catch(() => {})
-      }, 700)
+      }, 250)
     })
   }
 
@@ -723,7 +731,7 @@ class DaemonClient {
   }
 
   clearSwarmEvents(): void {
-    this.swarmLog[1]([])
+    this.swarmLogCount = 0
     this.swarmEvents[1]([])
     this.swarmRoster[1]([])
     this.swarmFocus[1](null)
@@ -861,13 +869,12 @@ class DaemonClient {
    * O(n²) re-parse of the whole buffer on every line). */
   private appendSwarmLog(line: string): void {
     let dropped = 0
-    this.swarmLog[1]((prev) => {
-      if (prev.length >= SWARM_LOG_CAP) {
-        dropped = prev.length - SWARM_LOG_CAP + 1
-        return [...prev.slice(dropped), line]
-      }
-      return [...prev, line]
-    })
+    if (this.swarmLogCount >= SWARM_LOG_CAP) {
+      dropped = this.swarmLogCount - SWARM_LOG_CAP + 1
+      this.swarmLogCount = SWARM_LOG_CAP
+    } else {
+      this.swarmLogCount += 1
+    }
     this.swarmEvents[1]((prev) => {
       const ev = parseLine(line)
       let base = prev

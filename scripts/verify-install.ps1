@@ -7,6 +7,8 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+. (Join-Path $PSScriptRoot "lib\windows-path.ps1")
+Repair-ArtemisWindowsPath
 
 $ok = 0
 $fail = 0
@@ -36,18 +38,21 @@ if ($StructureOnly) {
 
 $localBin = Join-Path $env:USERPROFILE ".local\bin"
 $uv = Join-Path $localBin "uv.exe"
+$venvPy = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $env:Path = "$localBin;$env:USERPROFILE\.bun\bin;$env:Path"
 Check { Test-Path $uv } "uv.exe"
 Check { Get-Command bun -ErrorAction SilentlyContinue } "bun"
 Check { Test-Path (Join-Path $RepoRoot ".venv") } ".venv"
 
-if (Test-Path $uv) {
+$py = if (Test-Path $venvPy) { $venvPy } elseif (Test-Path $uv) { $uv } else { $null }
+$pyArgs = if (Test-Path $venvPy) { @() } else { @("run", "python") }
+if ($py) {
   Check {
-    & $uv run python -c 'import backend.platform_paths' 2>$null | Out-Null
+    & $py @pyArgs -c 'import backend.platform_paths' 2>$null | Out-Null
     $LASTEXITCODE -eq 0
   } "import backend"
   Check {
-    & $uv run python -c 'from pydantic_ai.usage import RunUsage' 2>$null | Out-Null
+    & $py @pyArgs -c 'from pydantic_ai.usage import RunUsage' 2>$null | Out-Null
     $LASTEXITCODE -eq 0
   } "pydantic-ai"
 }
@@ -68,7 +73,12 @@ Check {
   $parts -contains $localBin
 } "user PATH includes .local/bin"
 
-if (Test-Path $uv) {
+if (Test-Path $venvPy) {
+  Check {
+    & $venvPy -m backend.cli --help 2>$null | Out-Null
+    $LASTEXITCODE -eq 0
+  } "artemis CLI (--help)"
+} elseif (Test-Path $uv) {
   Check {
     & $uv run --directory $RepoRoot artemis --help 2>$null | Out-Null
     $LASTEXITCODE -eq 0
@@ -82,7 +92,7 @@ if (-not $SkipDocker) {
     Check {
       $prev = $ErrorActionPreference
       $ErrorActionPreference = "Continue"
-      cmd /c "docker image inspect ctf-sandbox-core >nul 2>&1"
+      & docker image inspect ctf-sandbox-core 2>&1 | Out-Null
       $ok = ($LASTEXITCODE -eq 0)
       $ErrorActionPreference = $prev
       $ok

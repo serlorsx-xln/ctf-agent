@@ -29,6 +29,7 @@ exit 1
 _WINDOWS_WRAPPER = """\
 @echo off
 setlocal EnableExtensions
+if defined SystemRoot set "PATH=%SystemRoot%\\System32;%SystemRoot%\\System32\\WindowsPowerShell\\v1.0;%PATH%"
 set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\.bun\\bin;%PATH%"
 set "PATHFILE=%USERPROFILE%\\.local\\share\\artemis\\install-path.txt"
 if defined ARTEMIS_REPO_ROOT if exist "%ARTEMIS_REPO_ROOT%\\chassis\\bin\\artemis.cmd" (

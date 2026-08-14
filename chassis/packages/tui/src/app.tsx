@@ -64,8 +64,8 @@ import { DialogConfirmRestart } from "./component/dialog-confirm-restart"
 import {
   confirmRestartOpts,
   hasDaemonArtemisResidue,
-  solveGateOpen,
   stopAndClearArtemisState,
+  warnIfSolveGateOpen,
 } from "./util/artemis-solve-state"
 import { ToastProvider, useToast } from "./ui/toast"
 import { isDefaultTitle } from "./util/session"
@@ -628,6 +628,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         category: "System",
         hidden: true,
         run: () => {
+          if (warnIfSolveGateOpen((opts) => toast.show(opts))) return
           dialog.replace(() => <CommandPaletteDialog />)
         },
       },
@@ -639,6 +640,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         slashName: "sessions",
         slashAliases: ["resume", "continue"],
         run: () => {
+          if (warnIfSolveGateOpen((opts) => toast.show(opts))) return
           dialog.replace(() => <DialogSessionList />)
         },
       },
@@ -651,11 +653,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         slashAliases: ["clear"],
         run: async () => {
           if (process.env.ARTEMIS === "1") {
-            if (solveGateOpen()) {
-              // Leave the gate alone — it owns the current step.
-              toast.show({ message: "Finish or cancel the current dialog first", variant: "warning" })
-              return
-            }
+            if (warnIfSolveGateOpen((opts) => toast.show(opts))) return
             if (hasDaemonArtemisResidue()) {
               const ok = await DialogConfirmRestart.show(dialog, confirmRestartOpts())
               if (!ok) return
@@ -699,6 +697,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         category: "Session",
         hidden: true,
         run: () => {
+          if (warnIfSolveGateOpen((opts) => toast.show(opts))) return
           local.session.quickSwitch(i + 1)
         },
       })),
@@ -711,6 +710,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         // Bias /mo toward /models over /move without changing global fuzzy scoring.
         slashAliases: ["mo"],
         run: () => {
+          if (warnIfSolveGateOpen((opts) => toast.show(opts))) return
           if (process.env.ARTEMIS === "1") {
             const models = daemon.lastModels[0]()
             const cursorSpec = models.find((m) => m.trim().startsWith("cursor/"))
