@@ -1,4 +1,4 @@
-"""Paste rules: greetings skip, everything else loads (TUI + Cursor stub)."""
+"""Paste rules: greetings skip, everything else loads (TUI interceptor)."""
 
 from __future__ import annotations
 

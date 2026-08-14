@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
+  combinedPromptForLoad,
   extractChallengePaths,
+  filePathsFromPromptParts,
   isGreeting,
   loadArgsFromPrompt,
   looksLikeChallengePaste,
@@ -24,7 +26,9 @@ describe("looksLikeChallengePaste", () => {
 
   test("rejects short greetings only", () => {
     expect(isGreeting("hi")).toBe(true)
+    expect(isGreeting("test")).toBe(true)
     expect(looksLikeChallengePaste("hi")).toBe(false)
+    expect(looksLikeChallengePaste("test")).toBe(false)
     expect(looksLikeChallengePaste("hello")).toBe(false)
   })
 
@@ -77,5 +81,24 @@ describe("extractChallengePaths / loadArgsFromPrompt", () => {
     expect(extractChallengePaths("C:/Users/me/challenges/glass please solve")).toEqual([
       "C:/Users/me/challenges/glass",
     ])
+  })
+})
+
+describe("file chips", () => {
+  test("filePathsFromPromptParts reads source.path", () => {
+    expect(
+      filePathsFromPromptParts([
+        { type: "file", source: { path: "/Users/me/Downloads/pwnknight" } },
+        { type: "agent" },
+      ]),
+    ).toEqual(["/Users/me/Downloads/pwnknight"])
+  })
+
+  test("combinedPromptForLoad treats a folder chip as a challenge paste", () => {
+    const combined = combinedPromptForLoad("", [
+      { type: "file", source: { path: "/Users/me/Downloads/pwnknight" } },
+    ])
+    expect(combined).toBe("/Users/me/Downloads/pwnknight")
+    expect(looksLikeChallengePaste(combined)).toBe(true)
   })
 })

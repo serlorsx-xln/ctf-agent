@@ -76,11 +76,26 @@ def _format_exec(result) -> str:
     return _truncate(out)
 
 
+def _humanize_read_error(path: str, exc: BaseException) -> str:
+    """Turn Docker/archive 404s into a short path-only miss."""
+    text = str(exc)
+    low = text.lower()
+    if (
+        isinstance(exc, FileNotFoundError)
+        or "could not find the file" in low
+        or "no such file" in low
+        or "no file found" in low
+        or ("404" in low and "file" in low)
+    ):
+        return f"File not found: {path}"
+    return f"Error reading file: {exc}"
+
+
 async def do_read_file(sandbox, path: str) -> str:
     try:
         data = await sandbox.read_file(path)
     except Exception as e:
-        return f"Error reading file: {e}"
+        return _humanize_read_error(path, e)
 
     if isinstance(data, bytes):
         sample = data[:4096]

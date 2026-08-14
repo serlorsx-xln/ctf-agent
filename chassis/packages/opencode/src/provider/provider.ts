@@ -1831,7 +1831,22 @@ const layer = Layer.effect(
         return yield* new ModelNotFoundError({ providerID, modelID, suggestions })
       }
 
-      const info = provider.models[modelID]
+      let info = provider.models[modelID]
+      if (
+        !info &&
+        process.env.ARTEMIS === "1" &&
+        String(providerID) === "anthropic"
+      ) {
+        const template = Object.values(provider.models)[0]
+        if (template) {
+          info = {
+            ...template,
+            id: modelID,
+            name: modelID,
+            api: { ...template.api, id: modelID },
+          }
+        }
+      }
       if (!info) {
         const current = modelSuggestions(provider, modelID, runtimeFlags.enableExperimentalModels)
         const suggestions = current.length

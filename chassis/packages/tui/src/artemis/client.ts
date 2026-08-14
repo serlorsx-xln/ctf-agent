@@ -206,6 +206,8 @@ class DaemonClient {
   private closed = false
   /** OpenCode chat sessionID bound to this TUI window (null → daemon ``_default``). */
   private sessionId: string | null = null
+  /** Home-screen load finishes before Session mounts — open the gate then. */
+  private pendingSolveGate: SolveFlowRequest | null = null
   /** Invalidates /stop unlock timers so a newer stop/start cannot be cleared early. */
   private _swarmStopGeneration = 0
   /** Line count for event-buffer cap (strings are not kept). */
@@ -728,6 +730,16 @@ class DaemonClient {
 
   setSuppressSolveGate(suppress: boolean): void {
     this.suppressSolveGate[1](suppress)
+  }
+
+  setPendingSolveGate(req: SolveFlowRequest): void {
+    this.pendingSolveGate = req
+  }
+
+  takePendingSolveGate(): SolveFlowRequest | null {
+    const req = this.pendingSolveGate
+    this.pendingSolveGate = null
+    return req
   }
 
   clearSwarmEvents(): void {

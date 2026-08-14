@@ -557,7 +557,7 @@ const layer = Layer.effect(
           )
           if (bashRule.action === "deny") {
             output = process.env.ARTEMIS
-              ? "Host shell is disabled for Artemis. Use artemis_bash (Docker CTF sandbox) instead."
+              ? "Host shell is disabled for Artemis. Solving happens in the Docker sandbox after Start."
               : "Permission denied: bash is not allowed for this agent."
             yield* finish
             return { info: msg, parts: [part] }

@@ -56,9 +56,12 @@ uv run artemis swarm …       # Python swarm harness
 
 ## CTF bridge
 
+The TUI loads the paste and opens flags → mode → models. Chat does not solve.
+Sandbox solvers run in Docker after Start.
+
 Chassis tools call into Python:
 
-- `artemis_load_challenge` / `artemis_bash` / `artemis_submit_flag` → `backend.shell.bridge`
+- `artemis_load_challenge` / `artemis_ask_flags` / `artemis_status` → `backend.shell.bridge`
 - `artemis swarm` → `python -m backend.cli swarm …` (swarm)
 
 Do not reimplement pack/sandbox logic in TypeScript.

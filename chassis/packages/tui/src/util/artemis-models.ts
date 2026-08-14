@@ -1,4 +1,4 @@
-/** Artemis providers: Cursor + Claude + Codex + Gemini. Keys via TUI /connect only. */
+/** Artemis providers: Cursor + Claude + Codex + Gemini. */
 export const ARTEMIS_CHAT_PROVIDERS = new Set(["cursor", "anthropic", "openai", "google"])
 
 const ARTEMIS_PROVIDER_NAMES: Record<string, string> = {
@@ -9,6 +9,29 @@ const ARTEMIS_PROVIDER_NAMES: Record<string, string> = {
 }
 
 const NON_CHAT_RE = /whisper|tts|orpheus|transcri|speech|audio|embedding|moderation|dall-e|tts-|realtime/i
+
+export type ArtemisModelValue = { providerID: string; modelID: string }
+
+const TYPED_ID_PROVIDERS = ["anthropic"] as const
+
+/** Type any model id for Claude (custom ANTHROPIC_BASE_URL). */
+export function typedConnectModelOptions(
+  needle: string,
+  connectedProviders: string[],
+  existing: ArtemisModelValue[],
+  providerID?: string,
+): ArtemisModelValue[] {
+  const id = needle.trim()
+  if (!id || /\s/.test(id) || id.length < 2) return []
+  const out: ArtemisModelValue[] = []
+  for (const pid of TYPED_ID_PROVIDERS) {
+    if (providerID && pid !== providerID) continue
+    if (!connectedProviders.includes(pid)) continue
+    if (existing.some((item) => item.providerID === pid && item.modelID === id)) continue
+    out.push({ providerID: pid, modelID: id })
+  }
+  return out
+}
 
 export function artemisProviderName(providerID: string, fallback?: string): string {
   return ARTEMIS_PROVIDER_NAMES[providerID] ?? fallback ?? providerID

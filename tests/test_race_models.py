@@ -16,6 +16,7 @@ def test_normalize_tui_aliases() -> None:
     assert normalize_race_spec("openai/gpt-5.4") == "codex/gpt-5.4"
     assert normalize_race_spec("cursor/composer-2") == "cursor/composer-2"
     assert normalize_race_spec("composer-2.5") == "cursor/composer-2.5"
+    assert normalize_race_spec("anthropic/bigmodel/glm-5.2") == "claude-sdk/bigmodel/glm-5.2"
 
 
 def test_normalize_multipliers() -> None:

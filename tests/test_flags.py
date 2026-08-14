@@ -8,7 +8,6 @@ from pathlib import Path
 from backend.flags import (
     accept_flag,
     collect_artifact_flag_candidates,
-    is_complete_accept_message,
     is_counted_accept_message,
     is_decoy_flag,
     is_filename_like_flag_token,
@@ -19,7 +18,6 @@ def test_unconfirmed_is_candidate_not_correct() -> None:
     msg, done = accept_flag("CTF{hello_world_ok}")
     assert not done
     assert msg.startswith("CANDIDATE")
-    assert not is_complete_accept_message(msg)
     assert not is_counted_accept_message(msg)
 
 
@@ -27,7 +25,6 @@ def test_confirmed_one_flag_correct() -> None:
     msg, done = accept_flag("CTF{hello_world_ok}", human_confirmed=True)
     assert done
     assert msg.startswith("CORRECT")
-    assert is_complete_accept_message(msg)
     assert is_counted_accept_message(msg)
 
 
@@ -46,7 +43,6 @@ def test_multi_flag_partial_then_complete() -> None:
     assert not d1
     assert m1.startswith("ACCEPTED")
     assert is_counted_accept_message(m1)
-    assert not is_complete_accept_message(m1)
     assert "CORRECT" not in m1
 
     m2, d2 = accept_flag(
@@ -67,14 +63,13 @@ def test_already_solved() -> None:
     )
     assert done
     assert msg.startswith("ALREADY SOLVED")
-    assert is_complete_accept_message(msg)
     assert not is_counted_accept_message(msg)
+
 
 def test_accepted_message_does_not_substring_match_correct() -> None:
     msg, done = accept_flag("CTF{user_aaaaaaaa}", required=2, human_confirmed=True)
     assert not done
     assert "CORRECT" not in msg
-    assert not is_complete_accept_message(msg)
 
 
 def test_solved_names_ignores_incomplete_results() -> None:

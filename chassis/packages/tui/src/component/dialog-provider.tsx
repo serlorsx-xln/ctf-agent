@@ -62,7 +62,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
         providerID: provider.id,
         description: {
           cursor: "Cursor API key",
-          anthropic: "Claude API key / setup-token",
+          anthropic: "Claude key, or custom target URL + models list",
           openai: "Codex OAuth or API key",
           google: "Gemini API key / ADC / Vertex",
         }[provider.id],
@@ -229,6 +229,17 @@ export function createDialogProviderOptions() {
                       rest.baseURL !== undefined
                         ? "Invalid key or base URL (must be https://… and a real API key)"
                         : "That does not look like a real API key — paste the full key from the provider dashboard",
+                  })
+                  return
+                }
+                if (
+                  providerID === "anthropic" &&
+                  "baseURL" in rest &&
+                  !String(rest.baseURL || "").trim()
+                ) {
+                  toast.show({
+                    variant: "error",
+                    message: "Target API URL is required",
                   })
                   return
                 }

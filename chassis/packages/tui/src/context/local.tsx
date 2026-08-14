@@ -63,7 +63,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
-      return !!provider?.models[model.modelID]
+      if (!provider) return false
+      if (provider.models[model.modelID]) return true
+      // Claude custom URL: operator types the id their CLI already uses.
+      return process.env.ARTEMIS === "1" && model.providerID === "anthropic" && !!model.modelID.trim()
     }
 
     function getFirstValidModel(...modelFns: (() => { providerID: string; modelID: string } | undefined)[]) {

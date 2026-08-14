@@ -11,8 +11,17 @@ import asyncio
 
 import pytest
 
-from backend.flags import normalize_confirm
+from backend.flags import _emit_confirm_verdict, normalize_confirm
 from backend.tools.core import do_submit_flag
+
+
+def test_reject_verdict_does_not_emit_a_second_banner(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.flags._emit_line", lines.append)
+    _emit_confirm_verdict(False)
+    assert lines == []
+    _emit_confirm_verdict(True)
+    assert lines == [">>> Confirmed — counting this flag.\n"]
 
 
 def test_normalize_confirm_accepts_both_shapes():

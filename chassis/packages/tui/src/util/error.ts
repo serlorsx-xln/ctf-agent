@@ -1,5 +1,18 @@
 import { isRecord } from "./record"
 
+function humanizeArtemisProviderError(message: string): string {
+  if (process.env.ARTEMIS !== "1") return message
+  const low = message.toLowerCase()
+  if (low.includes("method not allowed") || low.includes("405")) {
+    return (
+      "HTTP 405: this host rejected the chat API we used. " +
+      "/connect → Claude → Custom target URL and paste the same ANTHROPIC_BASE_URL " +
+      "you use with Claude CLI, then pick or type the model id."
+    )
+  }
+  return message
+}
+
 type ConfigIssue = { message: string; path: string[] }
 
 export function cliErrorMessage(input: unknown): string | undefined {
@@ -124,16 +137,16 @@ export function errorFormat(error: unknown): string {
 
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
-    if (error.message) return error.message
+    if (error.message) return humanizeArtemisProviderError(error.message)
     if (error.name) return error.name
   }
 
   if (isRecord(error) && typeof error.message === "string" && error.message) {
-    return error.message
+    return humanizeArtemisProviderError(error.message)
   }
 
   if (isRecord(error) && isRecord(error.data) && typeof error.data.message === "string" && error.data.message) {
-    return error.data.message
+    return humanizeArtemisProviderError(error.data.message)
   }
 
   const text = String(error)

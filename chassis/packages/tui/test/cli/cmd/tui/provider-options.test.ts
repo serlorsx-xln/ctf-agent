@@ -36,6 +36,7 @@ describe("providerOptions", () => {
       providerOptions([
         { id: "openai", name: "OpenAI" },
         { id: "groq", name: "Groq" },
+        { id: "together", name: "Together" },
         { id: "anthropic", name: "Anthropic" },
         { id: "cursor", name: "Cursor" },
         { id: "google", name: "Google" },

@@ -103,58 +103,10 @@ class Handlers:
         from backend.shell.sandbox_session import load_session_state
 
         self.state.set_session(load_session_state(session), session_id=session)
-        # LLM load path used to stop here and wait for artemis_ask_flags.
-        # Composer/other chat models often end the turn after load, so the TUI
-        # never opened flags → mode → models. Push the gate from load itself.
+        # TUI owns the gate. Broadcast so flags → mode → models opens after load.
         if not str(text).lstrip().upper().startswith("ERROR"):
             self._broadcast_solve_flow(session, from_load=True)
         return {"text": text, "session_state": self.state.get_session(session)}
-
-    async def _h_bash(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _bash
-
-        return {"text": await _bash(self._bridge_payload(payload, session))}
-
-    async def _h_read_file(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _read_file
-
-        return {"text": await _read_file(self._bridge_payload(payload, session))}
-
-    async def _h_write_file(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _write_file
-
-        return {"text": await _write_file(self._bridge_payload(payload, session))}
-
-    async def _h_list_files(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _list_files
-
-        return {"text": await _list_files(self._bridge_payload(payload, session))}
-
-    async def _h_submit_flag(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _submit_flag
-
-        text = await _submit_flag(self._bridge_payload(payload, session))
-        from backend.shell.sandbox_session import load_session_state
-
-        self.state.set_session(load_session_state(session), session_id=session)
-        st = self.state.get_session(session)
-        return {
-            "text": text,
-            "accepted_flags": st.get("accepted_flags", []),
-            "flags_required": st.get("flags_required", 1),
-        }
-
-    async def _h_flags_set(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _set_flags
-
-        text = await _set_flags(self._bridge_payload(payload, session))
-        from backend.shell.sandbox_session import load_session_state
-
-        self.state.set_session(load_session_state(session), session_id=session)
-        return {
-            "text": text,
-            "flags_required": self.state.get_session(session).get("flags_required", 1),
-        }
 
     async def _h_status(self, _payload: dict, *, session: str) -> dict:
         import json

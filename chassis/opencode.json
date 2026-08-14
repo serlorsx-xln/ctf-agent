@@ -4,7 +4,7 @@
   "default_agent": "artemis",
   "theme": "opencode",
   "disabled_providers": ["opencode", "opencode-go"],
-  "enabled_providers": ["cursor", "anthropic", "openai"],
+  "enabled_providers": ["cursor", "anthropic", "openai", "google"],
   "provider": {
     "cursor": {
       "name": "Cursor",
@@ -25,6 +25,22 @@
   "permission": {
     "bash": "deny",
     "edit": "deny",
+    "read": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "list": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "external_directory": "deny",
+    "todowrite": "deny",
+    "skill": "deny",
+    "lsp": "deny",
+    "artemis_bash": "deny",
+    "artemis_read_file": "deny",
+    "artemis_write_file": "deny",
+    "artemis_list_files": "deny",
+    "artemis_submit_flag": "deny",
     "question": "allow"
   },
   "instructions": ["./AGENTS.md"],
@@ -34,10 +50,10 @@
     "general": { "disable": true },
     "explore": { "disable": true },
     "artemis": {
-      "description": "CTF solve — load challenge, run swarm, summarize",
+      "description": "CTF load gate — sandbox solvers do the work",
       "mode": "primary",
       "color": "primary",
-      "prompt": "You are Artemis. Single CTF flow only.\n1) User sends any mix of challenge text (web links/nc stay in the paste — not downloaded), and/or one or more folder and file paths in one message → artemis_load_challenge with path= (first folder or file) + attachments=[other paths] + prompt=<text minus paths>.\n2) After a *successful* load only, call artemis_ask_flags — the TUI runs flags → Single/Swarm → models, then starts the swarm. If load returns ERROR (bad/missing path), do not ask_flags; wait for a corrected path/paste. Never reopen flags from a stale prior challenge after a failed reload. Never skip the TUI gate; do not pass models yourself.\n3) Summarize how the flag was found.\nIf they only greet with no challenge content, ask them to paste the challenge. Never start a second swarm while one is running or right after ask_flags just finished. Do not ask for API keys."
+      "prompt": "You are Artemis chat. You do not solve. The TUI loads the paste and asks flags / mode / models. After Start, only Docker sandbox solvers work. Never inspect files, list directories, run bash, or submit flags. Call artemis_load_challenge only if the TUI did not load. Call artemis_ask_flags only if the gate did not appear after a successful load. If a challenge is already loaded, stop. If load returns ERROR, wait for a corrected path. Summarize only after the swarm finishes and the user asks. Do not ask for API keys."
     }
   },
   "lsp": false,

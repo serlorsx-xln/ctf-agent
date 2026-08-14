@@ -17,11 +17,21 @@ DEFAULT_MODELS: list[str] = [
 # Product swarm providers (TUI /connect → cursor, anthropic, openai, google).
 SUPPORTED_PROVIDERS = frozenset({"cursor", "claude-sdk", "codex", "gemini-sdk"})
 
+_EFFORT_SUFFIXES = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 
 def model_id_from_spec(spec: str) -> str:
-    """Extract just the model ID from a spec (strips effort suffix)."""
+    """Extract the model ID (everything after the provider, minus effort).
+
+    Custom Claude ids may contain slashes (``claude-sdk/bigmodel/glm-5.2``).
+    """
     parts = spec.split("/")
-    return parts[1] if len(parts) >= 2 else spec
+    if len(parts) < 2:
+        return spec
+    rest = parts[1:]
+    if rest and rest[-1] in _EFFORT_SUFFIXES:
+        rest = rest[:-1]
+    return "/".join(rest) if rest else spec
 
 
 def provider_from_spec(spec: str) -> str:
@@ -70,7 +80,8 @@ def normalize_swarm_spec(spec: str) -> str:
     if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(
             f"Unknown swarm provider {provider!r} in {spec!r}. "
-            f"Use cursor/, claude-sdk/ (or anthropic/), codex/ (or openai/), gemini-sdk/ (or google/)…"
+            f"Use cursor/, claude-sdk/ (or anthropic/), codex/ (or openai/), "
+            f"gemini-sdk/ (or google/)."
         )
     return f"{provider}/{rest}"
 
@@ -201,17 +212,9 @@ def effort_from_spec(spec: str) -> EffortLevel | None:
     parts = spec.split("/")
     if len(parts) < 3:
         return None
-    effort = parts[2]
-    if effort == "low":
-        return "low"
-    if effort == "medium":
-        return "medium"
-    if effort == "high":
-        return "high"
-    if effort == "xhigh":
-        return "xhigh"
-    if effort == "max":
-        return "max"
+    effort = parts[-1]
+    if effort in _EFFORT_SUFFIXES:
+        return effort  # type: ignore[return-value]
     return None
 
 

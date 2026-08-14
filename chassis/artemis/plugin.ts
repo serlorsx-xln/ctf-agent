@@ -1,8 +1,8 @@
 /**
- * Artemis CTF plugin — tools + Cursor auth + official Cursor model catalog.
+ * Artemis CTF plugin — load/gate/status tools + Cursor auth + official catalog.
  *
- * Happy path: all ops go through the daemon socket (no per-tool Python spawn).
- * Bridge subprocess is fallback only when the daemon is unreachable.
+ * Chat does not solve. Sandbox solvers do. Happy path goes through the daemon
+ * socket (no per-tool Python spawn). Bridge subprocess is fallback only.
  */
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { spawn } from "child_process"
@@ -160,6 +160,23 @@ function modelTemplate(id: string, name: string, existing?: Record<string, unkno
   }
 }
 
+async function startSolveFlowTool(
+  defaultFlags: number | undefined,
+  ctx: { sessionID: string; metadata: (input: { title: string; metadata: { output: string } }) => void },
+) {
+  daemon.setSessionId(ctx.sessionID)
+  const title = "Solve"
+  ctx.metadata({ title, metadata: { output: "TUI flow gate: flags → mode → models → swarm…\n" } })
+  try {
+    await daemon.request("solve_flow_start", { default: defaultFlags })
+  } catch (e) {
+    const output = `ERROR: ${(e as Error).message}`
+    return { title, output, metadata: { title, output } }
+  }
+  const output = "TUI flow gate: flags → mode → models → swarm…"
+  return { title, output, metadata: { title, output } }
+}
+
 export const ArtemisCtfPlugin: Plugin = async () => {
   // Connect to the control-plane daemon early (best-effort; reconnects on its own).
   daemon.ensureConnected().catch(() => {})
@@ -269,98 +286,25 @@ export const ArtemisCtfPlugin: Plugin = async () => {
     "experimental.chat.system.transform": async (_input, output) => {
       const st = readSession()
       const lines = [
-        "You are Artemis. Single CTF flow: load → TUI gate (flags, mode, models) → swarm → summarize.",
-        "User may paste challenge text, a URL/nc/ssh line, @file paths, and/or a folder path — all in one message (any mix).",
-        "Call artemis_load_challenge with path=<folder> + attachments=[other host paths] + prompt=<pasted text minus paths>.",
-        "After a *successful* load (output starts with Loaded) the TUI opens flags → mode → models by itself. Call artemis_ask_flags only if that gate did not appear. artemis_swarm is a deprecated alias of ask_flags.",
-        "If load returns ERROR (path not found / bad path), do NOT call ask_flags — tell the user to fix the path.",
-        "Never start a second swarm right after ask_flags/swarm finished unless the user asks again.",
-        "If the solve stopped (usage limit, error, no flag), do NOT call artemis_ask_flags again until the user explicitly asks to retry or switch models.",
-        "Host bash/edit denied. Never invent flags. Do not ask for API keys.",
+        "You are Artemis chat. You do not solve CTF challenges.",
+        "The TUI loads the paste and opens flags → mode → models. Sandbox solvers do all work after Start.",
+        "Never inspect files. Never list directories. Never run bash. Never submit flags.",
+        "Call artemis_load_challenge only if the TUI did not load and the user pasted a challenge or path.",
+        "Call artemis_ask_flags only if a challenge is loaded and the TUI gate did not appear.",
+        "If load returns ERROR, tell the user to fix the path. Do not ask_flags.",
+        "After the swarm finishes, summarize only if the user asks. Never invent flags. Do not ask for API keys.",
       ]
       if (st.challenge_dir) {
         lines.push(`Active challenge_dir: ${st.challenge_dir}`)
         lines.push(`Challenge name: ${st.challenge_name || "?"}`)
         const acc = (st.accepted_flags as string[]) || []
         lines.push(`accepted_flags: ${acc.join(" | ") || "(none)"}`)
-      } else {
-        lines.push(
-          "No challenge loaded — take the user's next message (challenge text and/or path/files) and call artemis_load_challenge.",
-        )
+        lines.push("Challenge is loaded. Do not use tools. Do not think about the files. Stop.")
       }
       output.system.push(lines.join("\n"))
     },
 
     tool: {
-      artemis_bash: tool({
-        description:
-          "Run a bash command inside the Artemis Docker CTF sandbox (L0 + lazy packs). REQUIRED for challenge solving.",
-        args: {
-          command: tool.schema.string().describe("Bash command"),
-          challenge_dir: tool.schema.string().optional(),
-        },
-        async execute(args, ctx) {
-          return await daemonOp(
-            "bash",
-            {
-              command: args.command,
-              challenge_dir: args.challenge_dir,
-            },
-            ctx.sessionID,
-          )
-        },
-      }),
-      artemis_read_file: tool({
-        description: "Read a file from the Artemis Docker sandbox.",
-        args: {
-          path: tool.schema.string(),
-          challenge_dir: tool.schema.string().optional(),
-        },
-        async execute(args, ctx) {
-          return await daemonOp("read_file", args, ctx.sessionID)
-        },
-      }),
-      artemis_write_file: tool({
-        description: "Write a file inside the Artemis Docker sandbox (scripts, exploits, notes).",
-        args: {
-          path: tool.schema.string(),
-          content: tool.schema.string(),
-          challenge_dir: tool.schema.string().optional(),
-        },
-        async execute(args, ctx) {
-          return await daemonOp("write_file", args, ctx.sessionID)
-        },
-      }),
-      artemis_list_files: tool({
-        description: "List files in the Artemis Docker sandbox (default /challenge/distfiles).",
-        args: {
-          path: tool.schema.string().optional(),
-          challenge_dir: tool.schema.string().optional(),
-        },
-        async execute(args, ctx) {
-          return await daemonOp("list_files", args, ctx.sessionID)
-        },
-      }),
-      artemis_submit_flag: tool({
-        description:
-          "Submit a recovered CTF flag (local human confirm). Used inside the swarm; ACCEPTED/CORRECT progress.",
-        args: {
-          flag: tool.schema.string(),
-          challenge_dir: tool.schema.string().optional(),
-          soft: tool.schema.boolean().optional().describe("Default true for TUI session bookkeeping"),
-        },
-        async execute(args, ctx) {
-          return await daemonOp(
-            "submit_flag",
-            {
-              flag: args.flag,
-              challenge_dir: args.challenge_dir,
-              soft: args.soft !== false,
-            },
-            ctx.sessionID,
-          )
-        },
-      }),
       artemis_load_challenge: tool({
         description:
           "Load a CTF challenge. Prefer prompt= pasted challenge.txt-style text (+ URLs). " +
@@ -386,15 +330,6 @@ export const ArtemisCtfPlugin: Plugin = async () => {
           return await daemonOp("load", args, ctx.sessionID)
         },
       }),
-      artemis_set_flags: tool({
-        description: "Set Flags required (N) for the active challenge.",
-        args: {
-          flags_required: tool.schema.number(),
-        },
-        async execute(args, ctx) {
-          return await daemonOp("flags_set", args, ctx.sessionID)
-        },
-      }),
       artemis_ask_flags: tool({
         description:
           "Start the CTF solve flow. The TUI runs flags → mode → models, then starts the swarm.",
@@ -402,23 +337,7 @@ export const ArtemisCtfPlugin: Plugin = async () => {
           default: tool.schema.number().optional().describe("Default if Esc / timeout (1–64)"),
         },
         async execute(args, ctx) {
-          daemon.setSessionId(ctx.sessionID)
-          const title = "Solve"
-          ctx.metadata({ title, metadata: { output: "TUI flow gate: flags → mode → models → swarm…\n" } })
-          try {
-            await daemon.request("solve_flow_start", { default: args.default })
-          } catch (e) {
-            return {
-              title: "Solve",
-              output: `ERROR: ${(e as Error).message}`,
-              metadata: { title: "Solve", output: `ERROR: ${(e as Error).message}` },
-            }
-          }
-          return {
-            title: "Solve",
-            output: "TUI flow gate: flags → mode → models → swarm…",
-            metadata: { title: "Solve", output: "TUI flow gate: flags → mode → models → swarm…" },
-          }
+          return await startSolveFlowTool(args.default, ctx)
         },
       }),
       artemis_status: tool({
@@ -452,25 +371,7 @@ export const ArtemisCtfPlugin: Plugin = async () => {
           default: tool.schema.number().optional().describe("Default flags if Esc / timeout (1–64)"),
         },
         async execute(args, ctx) {
-          daemon.setSessionId(ctx.sessionID)
-          const title = "Solve"
-          ctx.metadata({ title, metadata: { output: "TUI flow gate: flags → mode → models → swarm…\n" } })
-          try {
-            await daemon.request("solve_flow_start", {
-              default: args.default,
-            })
-          } catch (e) {
-            return {
-              title: "Solve",
-              output: `ERROR: ${(e as Error).message}`,
-              metadata: { title: "Solve", output: `ERROR: ${(e as Error).message}` },
-            }
-          }
-          return {
-            title: "Solve",
-            output: "TUI flow gate: flags → mode → models → swarm…",
-            metadata: { title: "Solve", output: "TUI flow gate: flags → mode → models → swarm…" },
-          }
+          return await startSolveFlowTool(args.default, ctx)
         },
       }),
     },

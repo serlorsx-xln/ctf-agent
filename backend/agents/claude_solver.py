@@ -69,11 +69,11 @@ class ClaudeSolver:
         notify_coordinator=None,
     ) -> None:
         self.model_spec = model_spec
-        # A custom model id from /connect (auth.json metadata) overrides the
-        # spec's model id when the user didn't pass an explicit one in the spec.
+        # Swarm picker wins. /connect model_id is only the fallback when the
+        # spec has no id (custom Claude URL with an empty catalog).
         custom_model = (getattr(settings, "anthropic_model_id", "") or "").strip()
         spec_model = model_id_from_spec(model_spec)
-        self.model_id = custom_model or spec_model
+        self.model_id = spec_model or custom_model
         self.challenge_dir = challenge_dir
         self.meta = meta
         self.cost_tracker = cost_tracker
@@ -433,9 +433,14 @@ class ClaudeSolver:
         # Clear CLAUDECODE to prevent nested-session rejection when run from coordinator.
         # Propagate a custom Anthropic base URL (/connect → auth.json metadata).
         env = {"CLAUDECODE": ""}
+        api_key = getattr(self.settings, "anthropic_api_key", "") or ""
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
         base_url = getattr(self.settings, "anthropic_base_url", "") or ""
         if base_url:
-            env["ANTHROPIC_BASE_URL"] = base_url
+            from backend.shell.credentials import normalize_anthropic_base_url
+
+            env["ANTHROPIC_BASE_URL"] = normalize_anthropic_base_url(base_url)
         options = ClaudeAgentOptions(
             model=self.model_id,
             system_prompt=system_prompt,

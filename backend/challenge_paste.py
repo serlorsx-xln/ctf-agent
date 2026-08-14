@@ -1,4 +1,4 @@
-"""Shared first-message paste rules (TUI + Cursor stub).
+"""Shared first-message paste rules (TUI load interceptor).
 
 ``path_re`` extracts host paths from mixed paste. ``greetings`` is the only
 reject list — anything else on a fresh session is a challenge (story, URL,
@@ -57,13 +57,3 @@ def extract_challenge_paths(text: str) -> list[str]:
         if p not in seen:
             seen.append(p)
     return seen
-
-
-def extract_paste_without_paths(text: str, paths: list[str]) -> str:
-    """User text with detected paths removed."""
-    if not text:
-        return ""
-    out = text
-    for p in paths:
-        out = out.replace(p, " ")
-    return out.strip()

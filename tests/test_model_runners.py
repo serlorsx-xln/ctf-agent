@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.models import assign_runner_ids, expand_model_cli_args
+from backend.models import assign_runner_ids, effort_from_spec, expand_model_cli_args, model_id_from_spec
 
 
 def test_expand_star_multiplier():
@@ -56,6 +56,14 @@ def test_expand_does_not_mangle_ids_ending_in_x2():
 def test_expand_rejects_zero():
     with pytest.raises(ValueError):
         expand_model_cli_args(["cursor/grok*0"])
+
+
+def test_model_id_keeps_custom_claude_slashes():
+    assert model_id_from_spec("claude-sdk/bigmodel/glm-5.2") == "bigmodel/glm-5.2"
+    assert model_id_from_spec("claude-sdk/bigmodel/glm-5.2/max") == "bigmodel/glm-5.2"
+    assert model_id_from_spec("claude-sdk/claude-opus-4-6/max") == "claude-opus-4-6"
+    assert effort_from_spec("claude-sdk/bigmodel/glm-5.2/max") == "max"
+    assert effort_from_spec("claude-sdk/bigmodel/glm-5.2") is None
 
 
 def test_assign_runner_ids_unique():

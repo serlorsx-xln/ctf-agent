@@ -17,8 +17,6 @@ import {
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
 import path from "node:path"
-import fs from "node:fs"
-import os from "node:os"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
 import { useProject } from "../../context/project"
@@ -29,7 +27,7 @@ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
-import { Prompt, type PromptRef, armArtemisResubmit } from "../../component/prompt"
+import { Prompt, type PromptRef } from "../../component/prompt"
 import type {
   AssistantMessage,
   Part,
@@ -66,7 +64,8 @@ import {
 } from "../../util/artemis-solve-state"
 import { prefillModelFromRaceSpec } from "../../component/dialog-model"
 import { daemon } from "../../artemis/client"
-import { loadArgsFromPrompt, looksLikeChallengePaste } from "../../util/artemis-challenge-paste"
+import { combinedPromptForLoad, looksLikeChallengePaste } from "../../util/artemis-challenge-paste"
+import { tuiLoadChallenge } from "../../util/artemis-tui-load"
 import { runSolveFlowGate } from "../../util/artemis-solve-flow"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
@@ -486,37 +485,30 @@ export function Session() {
    * the chat LLM. Works for any chat provider (Cursor, Claude, GPT, Gemini).
    * Returns true when the submit was handled (caller must return false).
    */
+  function promptTextForLoad(): string {
+    return combinedPromptForLoad(prompt?.current.input ?? "", prompt?.current.parts ?? [])
+  }
+
   async function tryLoadChallengeFromPrompt(): Promise<boolean> {
-    const raw = (prompt?.current.input ?? "").trim()
+    const raw = promptTextForLoad()
     if (!looksLikeChallengePaste(raw)) return false
     if (daemon.swarmRunning[0]() || daemon.solveLocked[0]() || daemon.solveFlowBusy[0]()) {
       return false
     }
-    const args = loadArgsFromPrompt(raw)
-    try {
-      toast.show({ message: "Loading challenge…", variant: "info" })
-      const { text, session_state } = await daemon.loadChallenge(args)
-      if (/^ERROR/i.test(text.trim())) {
-        toast.show({
-          message: text.trim().slice(0, 160) || "Load failed",
-          variant: "error",
-        })
-        return true
-      }
-      prompt?.reset()
-      daemon.setSuppressSolveGate(false)
-      startSolveGate({
-        challengeName: session_state.challenge_name,
-        defaultFlags: Number(session_state.flags_required ?? 1) || 1,
-      })
-      return true
-    } catch (e) {
-      toast.show({
-        message: (e as Error).message || "Load failed",
-        variant: "error",
-      })
+    toast.show({ message: "Loading challenge…", variant: "info" })
+    const result = await tuiLoadChallenge(raw)
+    if (result.status === "skip") return false
+    if (result.status === "error") {
+      toast.show({ message: result.message, variant: "error" })
       return true
     }
+    prompt?.reset()
+    daemon.setSuppressSolveGate(false)
+    startSolveGate({
+      challengeName: result.session_state.challenge_name,
+      defaultFlags: Number(result.session_state.flags_required ?? 1) || 1,
+    })
+    return true
   }
 
   async function beforePromptSubmit(): Promise<boolean> {
@@ -526,22 +518,43 @@ export function Session() {
       toast.show({ message: "Esc → main to chat", variant: "warning" })
       return false
     }
-    if (!hasPriorArtemisState()) {
+    const raw = promptTextForLoad()
+    if (looksLikeChallengePaste(raw)) {
+      if (hasPriorArtemisState()) {
+        const ok = await DialogConfirmRestart.show(dialog, confirmRestartOpts())
+        if (!ok) return false
+        await clearSolvedSession({ newChat: false })
+        if (route.sessionID) {
+          await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+        }
+      }
       daemon.setSuppressSolveGate(false)
-      // Any chat model: challenge paste/path → daemon load + solve gate.
-      if (await tryLoadChallengeFromPrompt()) return false
-      return true
-    }
-    const ok = await DialogConfirmRestart.show(dialog, confirmRestartOpts())
-    if (!ok) return false
-    const cleared = await clearSolvedSession({ newChat: true })
-    if (!cleared) {
-      toast.show({ message: "Cleared challenge data — could not open a new chat", variant: "warning" })
+      await tryLoadChallengeFromPrompt()
       return false
     }
-    armArtemisResubmit()
-    // Block this submit: Prompt remounts on the new session and auto-resends once.
-    return false
+    if (!hasPriorArtemisState()) {
+      toast.show({
+        message: "Paste a challenge, path, or @files. Artemis loads first, then asks flags / mode / models.",
+        variant: "info",
+      })
+      return false
+    }
+    if (daemon.solveLocked[0]() || daemon.swarmRunning[0]()) {
+      abortCoordinator()
+      return false
+    }
+    // Loaded but not finished — keep the chat model off until Start or a new paste.
+    if (daemon.sessionState[0]().challenge_dir && !daemon.flowCompleted[0]()) {
+      abortCoordinator()
+      return false
+    }
+    return true
+  }
+
+  function abortCoordinator() {
+    if (route.sessionID) {
+      void sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+    }
   }
 
   function startSolveGate(opts?: {
@@ -554,6 +567,7 @@ export function Session() {
     if (daemon.solveLocked[0]()) return false
     // Quota / CORRECT / stop: do not auto-reopen flags→mode→models.
     if (daemon.suppressSolveGate[0]()) return false
+    abortCoordinator()
     daemon.setSolveFlowBusy(true)
     // Drop previous swarm UI so the gate is not drawn over stale agents / esc-stop.
     // Keep lastModels until the operator confirms a new pick (cancel must not
@@ -594,6 +608,7 @@ export function Session() {
             force: true,
             auto_confirm: false,
           })
+          abortCoordinator()
         } catch {
           // startSwarm reconciles with daemon — do not clear running blindly
           // (RPC timeout can race a successful spawn).
@@ -630,6 +645,15 @@ export function Session() {
     }
     daemon.setSessionId(route.sessionID)
     void daemon.ensureConnected()
+
+    const pendingGate = daemon.takePendingSolveGate()
+    if (pendingGate) {
+      startSolveGate({
+        challengeName: pendingGate.challenge ?? daemon.sessionState[0]().challenge_name,
+        preselected: pendingGate.preselected,
+        defaultFlags: pendingGate.default_flags,
+      })
+    }
 
     const offSolve = daemon.onSolveFlow((push) => {
       // New load RPC — not a remount of a cancelled card.
@@ -2092,7 +2116,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   }
 
   return (
-    <Show when={content()}>
+    <Show when={process.env.ARTEMIS !== "1" && content()}>
       <box
         ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
         paddingLeft={3}

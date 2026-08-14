@@ -89,14 +89,6 @@ def parse_submit_flag(command: str) -> ParsedHarnessVerb | None:
     )
 
 
-def extract_submit_flag(command: str) -> str | None:
-    """Return a literal flag argument, or None if missing/expansion/unparsed."""
-    parsed = parse_submit_flag(command)
-    if parsed is None or parsed.has_expansion:
-        return None
-    return parsed.value or None
-
-
 def submit_flag_attempted(command: str) -> bool:
     """True when the line tries to invoke harness ``submit_flag`` (not a mention)."""
     if not command or "submit_flag" not in command:

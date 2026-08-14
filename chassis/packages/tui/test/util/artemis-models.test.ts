@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { fromRaceSpec, isArtemisChatModel, toRaceSpec } from "../../src/util/artemis-models"
+import { fromRaceSpec, isArtemisChatModel, toRaceSpec, typedConnectModelOptions } from "../../src/util/artemis-models"
 
 afterEach(() => {
   delete process.env.ARTEMIS
@@ -65,5 +65,29 @@ describe("race spec mapping", () => {
       providerID: "google",
       modelID: "gemini-2.5-pro",
     })
+    expect(toRaceSpec("anthropic", "bigmodel/glm-5.2")).toBe("claude-sdk/bigmodel/glm-5.2")
+    expect(fromRaceSpec("claude-sdk/bigmodel/glm-5.2")).toEqual({
+      providerID: "anthropic",
+      modelID: "bigmodel/glm-5.2",
+    })
+    expect(fromRaceSpec("claude-sdk/bigmodel/glm-5.2/max")).toEqual({
+      providerID: "anthropic",
+      modelID: "bigmodel/glm-5.2",
+    })
+  })
+})
+
+describe("typedConnectModelOptions", () => {
+  test("adds a typed id for Claude when it is connected", () => {
+    expect(typedConnectModelOptions("bigmodel/glm-5.2", ["anthropic"], [])).toEqual([
+      { providerID: "anthropic", modelID: "bigmodel/glm-5.2" },
+    ])
+    expect(
+      typedConnectModelOptions("bigmodel/glm-5.2", ["anthropic"], [
+        { providerID: "anthropic", modelID: "bigmodel/glm-5.2" },
+      ]),
+    ).toEqual([])
+    expect(typedConnectModelOptions("bigmodel/glm-5.2", ["cursor"], [])).toEqual([])
+    expect(typedConnectModelOptions("has space", ["anthropic"], [])).toEqual([])
   })
 })

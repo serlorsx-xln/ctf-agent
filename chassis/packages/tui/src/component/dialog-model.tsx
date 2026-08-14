@@ -16,6 +16,7 @@ import {
   fromRaceSpec,
   isArtemisChatModel,
   toRaceSpec,
+  typedConnectModelOptions,
 } from "../util/artemis-models"
 import { daemon } from "../artemis/client"
 import { useBindings } from "../keymap"
@@ -216,11 +217,32 @@ export function DialogModel(props: {
           )
 
     if (needle) {
+      const filtered = sortModelOptions(
+        fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
+        false,
+      )
+      const typed =
+        process.env.ARTEMIS === "1"
+          ? typedConnectModelOptions(
+              needle,
+              [...connectedProviders()],
+              filtered.map((opt) => opt.value),
+              props.providerID,
+            ).map((value) => ({
+              value,
+              title: value.modelID,
+              description: "Use this id on Claude",
+              category: "Custom",
+              disabled: false,
+              footer: artemisModelFooter(value.providerID),
+              onSelect() {
+                onSelect(value.providerID, value.modelID)
+              },
+            }))
+          : []
       return [
-        ...sortModelOptions(
-          fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
-          false,
-        ),
+        ...typed,
+        ...filtered,
         ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
       ]
     }

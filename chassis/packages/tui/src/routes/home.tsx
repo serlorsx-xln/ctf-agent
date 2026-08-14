@@ -16,9 +16,9 @@ import { HomeSessionDestinationProvider } from "./home/session-destination"
 let once = false
 const placeholder = {
   normal: [
-    "Solve ./challenges/foo (ask Flags required if needed)",
-    "Paste a challenge description and recover the flag",
-    "What's in this challenge folder?",
+    "Paste a challenge, path, or @files",
+    "Artemis loads first, then asks flags / mode / models",
+    "/Users/me/challenges/foo",
   ],
   // Host shell mode disabled under ARTEMIS=1; keep empty so prompts stay chat-first.
   shell: [] as string[],

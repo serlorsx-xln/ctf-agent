@@ -13,6 +13,54 @@ import { InstanceHttpApi } from "../api"
 import { ProviderAuthApiError } from "../groups/provider"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 
+function artemisConnectStub(input: {
+  id: string
+  name: string
+  env: string[]
+  options?: Record<string, unknown>
+  modelID: string
+  modelName: string
+  url?: string
+}) {
+  const id = ProviderV2.ID.make(input.id)
+  return {
+    id,
+    name: input.name,
+    source: "config" as const,
+    env: input.env,
+    options: input.options ?? {},
+    models: {
+      [input.modelID]: {
+        id: input.modelID as never,
+        name: input.modelName,
+        providerID: id,
+        api: {
+          id: input.modelID,
+          npm: "@ai-sdk/openai-compatible",
+          url: input.url ?? "",
+        },
+        status: "active" as const,
+        headers: {},
+        options: {},
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 200_000, output: 64_000 },
+        capabilities: {
+          temperature: true,
+          reasoning: false,
+          attachment: false,
+          toolcall: true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        release_date: "",
+        variants: {},
+        family: "",
+      },
+    },
+  }
+}
+
 function mapProviderAuthError<A, R>(self: Effect.Effect<A, ProviderAuth.Error, R>) {
   return self.pipe(
     Effect.mapError((error) => {
@@ -59,45 +107,21 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
         loaded,
       )
 
-      // Artemis: Cursor is a custom provider — keep it visible in /connect even when not auth'd
-      if (process.env.ARTEMIS === "1" && (!enabled || enabled.has("cursor")) && !providers["cursor"]) {
-        const cfgCursor = config.provider?.cursor
-        providers["cursor"] = {
-          id: ProviderV2.ID.make("cursor"),
-          name: cfgCursor?.name ?? "Cursor",
-          source: "config",
-          env: cfgCursor?.env ?? ["CURSOR_API_KEY"],
-          options: cfgCursor?.options ?? {},
-          models: {
-            default: {
-              id: "default" as never,
-              name: "Auto",
-              providerID: ProviderV2.ID.make("cursor"),
-              api: {
-                id: "default",
-                npm: "@ai-sdk/openai-compatible",
-                url: "http://127.0.0.1:18765/v1",
-              },
-              status: "active",
-              headers: {},
-              options: {},
-              cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-              limit: { context: 200_000, output: 64_000 },
-              capabilities: {
-                temperature: true,
-                reasoning: false,
-                attachment: false,
-                toolcall: true,
-                input: { text: true, audio: false, image: false, video: false, pdf: false },
-                output: { text: true, audio: false, image: false, video: false, pdf: false },
-                interleaved: false,
-              },
-              release_date: "",
-              variants: {},
-              family: "",
-            },
-          },
-        } as (typeof providers)[string]
+      // Custom providers are not in models.dev — inject so /connect can list them
+      // before credentials exist (same reason Cursor always appears).
+      if (process.env.ARTEMIS === "1") {
+        if ((!enabled || enabled.has("cursor")) && !providers["cursor"]) {
+          const cfgCursor = config.provider?.cursor
+          providers["cursor"] = artemisConnectStub({
+            id: "cursor",
+            name: cfgCursor?.name ?? "Cursor",
+            env: cfgCursor?.env ?? ["CURSOR_API_KEY"],
+            options: cfgCursor?.options ?? {},
+            modelID: "default",
+            modelName: "Auto",
+            url: "http://127.0.0.1:18765/v1",
+          }) as (typeof providers)[string]
+        }
       }
 
       // Artemis display names

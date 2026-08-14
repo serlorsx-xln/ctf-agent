@@ -33,6 +33,22 @@ _PROVIDER_METADATA_ENV: dict[str, dict[str, str]] = {
 }
 
 
+def normalize_anthropic_base_url(url: str) -> str:
+    """Strip trailing slash / ``/v1`` / ``/v1/models`` from a pasted custom URL.
+
+    Claude Code appends ``/v1/messages`` itself. Pasting the models probe
+    (``…/v1/models``) or an extra ``/v1`` makes every request 404.
+    """
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    low = u.lower()
+    for suffix in ("/v1/models", "/v1"):
+        if low.endswith(suffix):
+            return u[: -len(suffix)].rstrip("/")
+    return u
+
+
 def auth_json_path() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     root = Path(xdg) if xdg else Path.home() / ".local" / "share"
@@ -71,6 +87,8 @@ def read_tui_api_keys() -> dict[str, str]:
         if isinstance(meta, dict):
             for mkey, menv in _PROVIDER_METADATA_ENV.get(provider_id, {}).items():
                 mval = (str(meta.get(mkey) or "")).strip()
+                if menv == "ANTHROPIC_BASE_URL":
+                    mval = normalize_anthropic_base_url(mval)
                 if mval:
                     out[menv] = mval
     return out

@@ -57,6 +57,9 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { daemon } from "../../artemis/client"
+import { combinedPromptForLoad, looksLikeChallengePaste } from "../../util/artemis-challenge-paste"
+import { tuiLoadChallenge } from "../../util/artemis-tui-load"
 
 registerOpencodeSpinner()
 
@@ -141,12 +144,6 @@ function formatEditorContext(selection: EditorSelection) {
 }
 
 let stashed: { prompt: PromptInfo; cursor: number } | undefined
-/** After clear+newChat, Prompt remount restores stash then auto-submits once. */
-let pendingArtemisResubmit = false
-
-export function armArtemisResubmit() {
-  pendingArtemisResubmit = true
-}
 
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
@@ -647,18 +644,11 @@ export function Prompt(props: PromptProps) {
   onMount(() => {
     const saved = stashed
     stashed = undefined
-    const shouldResubmit = pendingArtemisResubmit
-    pendingArtemisResubmit = false
     if (!store.prompt.input && saved && saved.prompt.input) {
       input.setText(saved.prompt.input)
       setStore("prompt", saved.prompt)
       restoreExtmarksFromParts(saved.prompt.parts)
       input.cursorOffset = saved.cursor
-    }
-    if (shouldResubmit && (store.prompt.input || saved?.prompt.input)) {
-      // Double-tick so the new session route + Prompt are ready (same pattern as
-      // autocomplete submit).
-      setTimeout(() => setTimeout(() => void submit(), 0), 0)
     }
   })
 
@@ -852,7 +842,7 @@ export function Prompt(props: PromptProps) {
   })
 
   useBindings(() => {
-    // Artemis: host shell mode is off (bash:deny + CTF sandbox via artemis_bash only).
+    // Artemis: host shell mode is off. Solving is Docker sandbox only.
     const shellModeAllowed = process.env.ARTEMIS !== "1"
     return {
       target: inputTarget,
@@ -1016,6 +1006,17 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
+    if (process.env.ARTEMIS === "1" && store.mode !== "shell") {
+      const combined = combinedPromptForLoad(store.prompt.input, store.prompt.parts)
+      if (!looksLikeChallengePaste(combined) && (!props.sessionID || !daemon.flowCompleted[0]())) {
+        toast.show({
+          message: "Paste a challenge, path, or @files. Artemis loads first, then asks flags / mode / models.",
+          variant: "info",
+        })
+        return false
+      }
+    }
+
     const activeAgent = agent
 
     const workspaceSession = props.sessionID ? sync.session.get(props.sessionID) : undefined
@@ -1082,6 +1083,53 @@ export function Prompt(props: PromptProps) {
 
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
+
+    const isSlashCommand =
+      inputText.startsWith("/") &&
+      sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
+
+    if (process.env.ARTEMIS === "1" && store.mode !== "shell" && !isSlashCommand) {
+      const combined = combinedPromptForLoad(inputText, nonTextParts)
+      if (looksLikeChallengePaste(combined)) {
+        daemon.setSessionId(sessionID)
+        toast.show({ message: "Loading challenge…", variant: "info" })
+        const result = await tuiLoadChallenge(combined)
+        if (result.status === "error") {
+          toast.show({ message: result.message, variant: "error" })
+        } else if (result.status === "ok") {
+          daemon.setSuppressSolveGate(false)
+          if (!props.sessionID) {
+            daemon.setPendingSolveGate({
+              default_flags: Number(result.session_state.flags_required ?? 1) || 1,
+              challenge: result.session_state.challenge_name,
+              from_load: true,
+            })
+          }
+        }
+        history.append({
+          ...store.prompt,
+          mode: store.mode,
+        })
+        input.extmarks.clear()
+        setStore("prompt", {
+          input: "",
+          parts: [],
+        })
+        setStore("extmarkToPartIndex", new Map())
+        props.onSubmit?.()
+        if (!props.sessionID) {
+          setTimeout(() => {
+            route.navigate({
+              type: "session",
+              sessionID,
+            })
+          }, 50)
+        }
+        input.clear()
+        if (finishMoveProgress) move.finishSubmit()
+        return true
+      }
+    }
 
     // Capture mode before it gets reset
     const currentMode = store.mode

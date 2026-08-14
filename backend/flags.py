@@ -122,15 +122,6 @@ def is_counted_accept_message(message: str) -> bool:
     )
 
 
-def is_complete_accept_message(message: str) -> bool:
-    """True if the challenge is done (CORRECT or ALREADY SOLVED).
-
-    Use ``startswith`` — never ``"CORRECT" in text`` — because ACCEPTED
-    messages may mention the word CORRECT without being complete.
-    """
-    return bool(message) and (message.startswith("CORRECT") or message.startswith("ALREADY SOLVED"))
-
-
 def _flag_body(flag_lower: str) -> str:
     if "{" in flag_lower and flag_lower.endswith("}"):
         return flag_lower[flag_lower.find("{") + 1 : -1]
@@ -461,15 +452,16 @@ def prompt_flag_confirmation(flag: str, *, auto_confirm: bool = False) -> bool |
                 break
             retry = ">>> Type y or n (empty Enter ignored).\n"
             _emit_line(retry)
-        result = (
-            ">>> Confirmed — counting this flag.\n"
-            if ok
-            else ">>> Rejected by operator — not counting.\n"
-        )
-        _emit_line(result)
+        _emit_confirm_verdict(ok)
         return ok
     finally:
         _confirm_active = False
+
+
+def _emit_confirm_verdict(ok: bool) -> None:
+    """Accept is announced here. Reject is announced once by ``do_submit_flag``."""
+    if ok:
+        _emit_line(">>> Confirmed — counting this flag.\n")
 
 
 def _artemis_cache_dir() -> Path:
@@ -517,12 +509,7 @@ def _prompt_flag_confirmation_tui(flag: str) -> bool:
                 pending.unlink(missing_ok=True)
             except OSError:
                 pass
-            result = (
-                ">>> Confirmed — counting this flag.\n"
-                if ok
-                else ">>> Rejected by operator — not counting.\n"
-            )
-            _emit_line(result)
+            _emit_confirm_verdict(ok)
             return ok
         time.sleep(0.25)
 
@@ -620,12 +607,7 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
                 ):
                     ok = bool(msg.get("ok"))
                     reason = str(msg.get("reason") or "").strip()
-                    if ok:
-                        _emit_line(">>> Confirmed — counting this flag.\n")
-                    elif reason:
-                        _emit_line(f">>> Rejected by operator — not counting. ({reason})\n")
-                    else:
-                        _emit_line(">>> Rejected by operator — not counting.\n")
+                    _emit_confirm_verdict(ok)
                     return ok, reason
         _emit_line(">>> Confirm timed out — not counting.\n")
         return False, ""

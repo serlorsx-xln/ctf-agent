@@ -100,8 +100,19 @@ class DockerSandbox:
 
     @staticmethod
     def _is_container_gone_error(exc: BaseException) -> bool:
-        """True when Docker reports the container no longer exists."""
+        """True when Docker reports the container no longer exists.
+
+        File 404s from ``get_archive`` also say "404" and "container"
+        (``Could not find the file … in container <id>``). Those must not
+        recreate the sandbox.
+        """
         text = str(exc).lower()
+        if (
+            "could not find the file" in text
+            or "no such file" in text
+            or "no file found" in text
+        ):
+            return False
         if "no such container" in text:
             return True
         if "404" in text and "container" in text:

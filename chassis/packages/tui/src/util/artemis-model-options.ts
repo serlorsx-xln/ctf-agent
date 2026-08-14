@@ -4,15 +4,17 @@ import type { useLocal } from "../context/local"
 import type { useSync } from "../context/sync"
 import {
   ARTEMIS_CHAT_PROVIDERS,
+  type ArtemisModelValue,
   artemisModelFooter,
   artemisProviderName,
   isArtemisChatModel,
   toRaceSpec,
+  typedConnectModelOptions,
 } from "./artemis-models"
 import { sortModelOptions } from "../component/dialog-model"
 import * as fuzzysort from "fuzzysort"
 
-export type ArtemisModelValue = { providerID: string; modelID: string }
+export type { ArtemisModelValue }
 
 type Sync = ReturnType<typeof useSync>
 type Local = ReturnType<typeof useLocal>
@@ -147,10 +149,24 @@ export function buildArtemisModelOptions(input: {
   )
 
   if (needle) {
-    return sortModelOptions(
+    const filtered = sortModelOptions(
       fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
       false,
     )
+    const typed = typedConnectModelOptions(
+      needle,
+      input.connectedProviders ?? [],
+      filtered.map((opt) => opt.value),
+      input.providerID,
+    ).map((value) => ({
+      value,
+      title: value.modelID,
+      description: "Use this id on Claude",
+      category: "Custom",
+      disabled: false,
+      footer: artemisModelFooter(value.providerID),
+    }))
+    return [...typed, ...filtered]
   }
 
   return [...favoriteOptions, ...recentOptions, ...providerOptions]

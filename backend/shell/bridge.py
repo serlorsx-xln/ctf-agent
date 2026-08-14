@@ -222,18 +222,8 @@ async def _load_challenge(payload: dict) -> str:
         f"flags_required={flags}\n"
         f"flags_explicit={flags_explicit}\n"
         f"mode=artemis\n"
-        f"{next_step} Host bash is disabled for CTF."
+        f"{next_step}"
     )
-
-
-async def _set_flags(payload: dict) -> str:
-    from backend.flags import normalize_flags_required
-    from backend.shell.sandbox_session import save_session_state
-
-    sid = _sid(payload)
-    n = normalize_flags_required(int(payload.get("flags_required") or 1))
-    st = save_session_state(sid, flags_required=n, flags_explicit=True)
-    return f"flags_required={n} (challenge={st.get('challenge_dir', '?')})"
 
 
 async def _status(payload: dict) -> str:
@@ -647,7 +637,7 @@ async def main() -> None:
     if len(sys.argv) < 2:
         print(
             "Usage: python -m backend.shell.bridge "
-            "<bash|read_file|write_file|list_files|submit_flag|load|flags|status|clear_session|swarm|stop|stop_swarm>",
+            "<bash|read_file|write_file|list_files|submit_flag|load|status|clear_session|swarm|stop|stop_swarm>",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -662,7 +652,6 @@ async def main() -> None:
         "list_files": _list_files,
         "submit_flag": _submit_flag,
         "load": _load_challenge,
-        "flags": _set_flags,
         "status": _status,
         "clear_session": _clear_session,
         "swarm": _swarm,
