@@ -81,3 +81,18 @@ def test_bridge_detection_requires_ctf_workspace() -> None:
     assert not is_artemis_cursor_bridge_command(
         "node cursor-sdk-bridge.js --workspace /Users/me/app"
     )
+
+
+def test_start_semaphore_is_shared_and_does_not_shrink() -> None:
+    from backend.sandbox import docker_client as dc
+
+    old = dc._start_semaphore
+    try:
+        dc._start_semaphore = None
+        first = dc.ensure_start_semaphore(50)
+        assert dc.ensure_start_semaphore(4) is first
+        dc.configure_semaphore(8)
+        assert dc.ensure_start_semaphore() is dc._start_semaphore
+        assert dc.ensure_start_semaphore() is not first
+    finally:
+        dc._start_semaphore = old

@@ -70,7 +70,8 @@ def _sandbox_cache_key(challenge_dir: str, session_id: str | None = None) -> str
 async def get_sandbox(challenge_dir: str, session_id: str | None = None):
     """Return a started DockerSandbox for challenge_dir (cached per session)."""
     from backend.config import Settings
-    from backend.sandbox import DockerSandbox, cleanup_orphan_containers, configure_semaphore
+    from backend.sandbox import DockerSandbox, cleanup_orphan_containers
+    from backend.sandbox.docker_client import ensure_start_semaphore
 
     sid = resolve_session_id(session_id)
     chal = _key(challenge_dir)
@@ -89,7 +90,7 @@ async def get_sandbox(challenge_dir: str, session_id: str | None = None):
                 pass
             _SANDBOXES.pop(key, None)
 
-        configure_semaphore(4)
+        ensure_start_semaphore(50)
         now = time.monotonic()
         last = _ORPHAN_CLEANUP_AT.get(sid, 0.0)
         if now - last >= _ORPHAN_CLEANUP_TTL_S:

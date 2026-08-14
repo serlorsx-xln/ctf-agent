@@ -69,6 +69,7 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
     for candidate in \
       "${HOME}/.colima/default/docker.sock" \
       "${HOME}/.docker/run/docker.sock" \
+      /run/docker.sock \
       /var/run/docker.sock
     do
       if [[ -S "$candidate" ]]; then
@@ -80,7 +81,11 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
   if docker info >/dev/null 2>&1; then
     check ctf-sandbox-core docker image inspect ctf-sandbox-core >/dev/null 2>&1
   else
-    printf '  WARN Docker not running (start Desktop/Colima, then build L0)\n'
+    if docker info 2>&1 | grep -qi 'permission denied'; then
+      printf '  WARN Docker socket permission denied (usermod -aG docker, then re-login)\n'
+    else
+      printf '  WARN Docker not running (start Desktop/Colima/service, then build L0)\n'
+    fi
     fail=$((fail + 1))
   fi
 fi

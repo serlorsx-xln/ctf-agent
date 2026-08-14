@@ -86,6 +86,7 @@ class ChallengeSwarm:
     _steps_by_runner: dict[str, int] = field(default_factory=dict)
     # True after How: was streamed — print_swarm_outcome must not dump it again.
     _how_emitted: bool = False
+    _writeup_attempted: bool = False
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
@@ -402,10 +403,12 @@ class ChallengeSwarm:
                     logger.debug("sync_accepted_flags failed", exc_info=True)
                 if is_complete:
                     self.confirmed_flag = " | ".join(self.confirmed_flags)
+                    self.winner_runner_id = model_spec
                     # Sticky main-page recap NOW — do not wait for writeup / teardown.
                     # Writeup can hang for minutes; without these lines the TUI goes
                     # empty while sidebar already shows n/n flags.
                     self._emit_correct_recap(model_spec)
+                    self._emit_how_recap(interim=True)
                 return display, is_complete
 
             # Rejected / not counted — escalate cooldown only for attempts that
@@ -430,6 +433,20 @@ class ChallengeSwarm:
                 logger.error(f"[{self.meta.name}/{runner_id}] Fatal: {e}", exc_info=True)
                 return None
             finally:
+                # FLAG_FOUND path can be skipped (turn error/cancel after CORRECT).
+                # Recap before stop() while the agent is still alive.
+                if self.confirmed_flag and runner_id == self.winner_runner_id:
+                    try:
+                        await self._capture_and_emit_writeup(solver, runner_id)
+                    except Exception:
+                        logger.warning(
+                            "[%s] writeup fallback failed for %s",
+                            self.meta.name,
+                            runner_id,
+                            exc_info=True,
+                        )
+                        if not self._how_emitted:
+                            self._emit_how_recap()
                 await solver.stop()
 
     async def _run_solver_loop(
@@ -508,26 +525,7 @@ class ChallengeSwarm:
                     await self.message_bus.post(runner_id, note[:500])
 
             if result.status == FLAG_FOUND and self.confirmed_flag:
-                # Narrative writeup only — no command-trail recap.
-                from backend.writeup import (
-                    capture_solver_writeup,
-                    clean_how_lines,
-                    is_usable_narrative,
-                )
-
-                existing = (self.flag_notes.get(runner_id) or "").strip()
-                late = str(getattr(solver, "_findings", "") or "").strip()
-                if is_usable_narrative(late) and (
-                    not is_usable_narrative(existing) or len(late) > len(existing) + 40
-                ):
-                    existing = "\n".join(clean_how_lines(late)).strip()
-                    self.flag_notes[runner_id] = existing
-
-                writeup = await capture_solver_writeup(solver)
-                if writeup and is_usable_narrative(writeup):
-                    self.flag_notes[runner_id] = writeup
-                    self.findings[runner_id] = writeup[:800]
-                self._emit_how_recap()
+                await self._capture_and_emit_writeup(solver, runner_id)
                 self.cancel_event.set()
                 if result.flag != self.confirmed_flag:
                     result = SolverResult(
@@ -885,8 +883,17 @@ class ChallengeSwarm:
         who = ", ".join(labels) if labels else agent_display_key(credited_spec, credited_spec)
         emit_line(f"[artemis] summary Solved by {who}")
 
-    def _emit_how_recap(self) -> None:
-        """Stream narrative writeup once (no command trail)."""
+    def _how_has_body(self, how_lines: list[str]) -> bool:
+        from backend.writeup import is_usable_narrative
+
+        return is_usable_narrative("\n".join(how_lines))
+
+    def _emit_how_recap(self, *, interim: bool = False) -> None:
+        """Stream narrative writeup once (no command trail).
+
+        ``interim=True`` (last-flag accept): print notes now, or a pending line,
+        without blocking the later writeup turn.
+        """
         if self._how_emitted:
             return
         from backend.agents.live_log import emit_line
@@ -894,11 +901,44 @@ class ChallengeSwarm:
         lines = self.solve_writeup()
         # solve_writeup starts with Solved by — already emitted on accept.
         how_lines = [ln for ln in lines if not ln.startswith("Solved by ")]
+        if interim and not self._how_has_body(how_lines):
+            emit_line("[artemis] summary How:")
+            emit_line("[artemis] summary   Writing recap from the winning solver…")
+            return
         if not how_lines:
             return
         for line in how_lines:
             emit_line(f"[artemis] summary {line}")
         self._how_emitted = True
+
+    async def _capture_and_emit_writeup(self, solver: Any, runner_id: str) -> None:
+        """Ask the winning solver for a recap; always leave How: on the main page."""
+        if self._writeup_attempted:
+            if not self._how_emitted:
+                self._emit_how_recap()
+            return
+        self._writeup_attempted = True
+        from backend.writeup import (
+            capture_solver_writeup,
+            clean_how_lines,
+            is_usable_narrative,
+        )
+
+        existing = (self.flag_notes.get(runner_id) or "").strip()
+        late = str(getattr(solver, "_findings", "") or "").strip()
+        if is_usable_narrative(late) and (
+            not is_usable_narrative(existing) or len(late) > len(existing) + 40
+        ):
+            existing = "\n".join(clean_how_lines(late)).strip()
+            self.flag_notes[runner_id] = existing
+
+        writeup = await capture_solver_writeup(solver)
+        if writeup and (is_usable_narrative(writeup) or len(writeup) >= 80):
+            self.flag_notes[runner_id] = writeup
+            self.findings[runner_id] = writeup[:800]
+            self._how_emitted = False
+        if not self._how_emitted:
+            self._emit_how_recap()
 
     def solve_writeup(self) -> list[str]:
         """Operator recap: who solved it and a narrative writeup only."""

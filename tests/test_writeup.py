@@ -48,6 +48,14 @@ async def test_capture_times_out():
         writeup_mod.WRITEUP_TIMEOUT_S = old
 
 
+def test_coalesce_writeup_falls_back_to_run_result():
+    from backend.writeup import coalesce_writeup_output
+
+    result = SimpleNamespace(result="## Challenge\nShop PIN in libapp.so.")
+    assert "Shop PIN" in coalesce_writeup_output([], result)
+    assert coalesce_writeup_output(["streamed body here"], result) == "streamed body here"
+
+
 def test_writeup_prompt_asks_for_structured_prose():
     assert "Do not call any tools" in WRITEUP_PROMPT
     assert "## Challenge" in WRITEUP_PROMPT
@@ -155,6 +163,7 @@ def test_usable_narrative_rejects_accept_spam():
     from backend.writeup import is_usable_narrative
 
     assert not is_usable_narrative("The flag was accepted as CORRECT. FLAG: flag{x}")
+    assert not is_usable_narrative("redo it to match the ARM register width.")
     assert is_usable_narrative(
         "Challenge\nPCAP with DNS + TCP.\n\n"
         "Key insight\nTXT holds the XOR key.\n\n"

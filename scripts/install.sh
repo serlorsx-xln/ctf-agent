@@ -84,6 +84,7 @@ pick_docker_host() {
   for candidate in \
     "${HOME}/.colima/default/docker.sock" \
     "${HOME}/.docker/run/docker.sock" \
+    /run/docker.sock \
     /var/run/docker.sock
   do
     if [[ -S "$candidate" ]]; then
@@ -95,12 +96,22 @@ pick_docker_host() {
   return 1
 }
 
+docker_permission_denied() {
+  docker info 2>&1 | grep -qi 'permission denied'
+}
+
 wait_docker() {
   local i
   for i in $(seq 1 72); do
     pick_docker_host || true
     if docker_ready; then
       return 0
+    fi
+    if docker_permission_denied; then
+      warn "Docker is running but this user cannot use it (socket permission denied)."
+      warn "  sudo usermod -aG docker \"$USER\""
+      warn "  then log out and back in (or reboot), and re-run install."
+      return 1
     fi
     [[ "$i" -eq 1 ]] && log "Waiting for Docker (start Desktop / Colima / system daemon)…"
     sleep 5
@@ -189,9 +200,10 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
       uv run artemis setup -v
     fi
   else
-    warn "Docker not running — skipped image build."
+    warn "Docker not usable — skipped image build."
     warn "  macOS: open Docker Desktop or run 'colima start'"
-    warn "  Linux: start docker service"
+    warn "  Linux: sudo systemctl enable --now docker"
+    warn "         sudo usermod -aG docker \"\$USER\"  (then log out / reboot)"
     warn "  WSL2: enable Docker Desktop WSL integration"
     warn "  Then: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core ."
   fi

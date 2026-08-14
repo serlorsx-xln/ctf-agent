@@ -20,6 +20,7 @@ if [[ -z "${DOCKER_HOST:-}" ]]; then
   for candidate in \
     "${HOME}/.colima/default/docker.sock" \
     "${HOME}/.docker/run/docker.sock" \
+    "/run/docker.sock" \
     "/var/run/docker.sock"; do
     if [[ -S "${candidate}" ]]; then
       export DOCKER_HOST="unix://${candidate}"

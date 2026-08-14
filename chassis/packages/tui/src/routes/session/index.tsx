@@ -2630,10 +2630,12 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
               <Show
                 when={(group as { lines: string[] }).lines.some((line) => {
                   const t = line.trim()
+                  if (!t || /no writeup recorded|Writing recap/i.test(t)) return false
+                  if (/^(How|Solved by|Solved ·|Flag)\b/i.test(t)) return false
                   return (
-                    /^(How)\b/i.test(t) ||
                     /^\d+\.\s/.test(t) ||
-                    (/^(Challenge|Key insight|Solution summary|What I tried|Why it worked|Dead ends)\b/i.test(t))
+                    (/^(Challenge|Key insight|Solution summary|What I tried|Why it worked|Dead ends)\b/i.test(t)) ||
+                    t.length >= 80
                   )
                 })}
               >

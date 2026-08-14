@@ -45,9 +45,22 @@ def _docker_client() -> aiodocker.Docker:
 
 
 def configure_semaphore(max_concurrent: int = 50) -> None:
-    """Set the max concurrent container starts. Call once at startup."""
+    """Replace the start gate (CLI sets this from challenge × model count)."""
     global _start_semaphore
     _start_semaphore = asyncio.Semaphore(max_concurrent)
+
+
+def ensure_start_semaphore(max_concurrent: int = 50) -> asyncio.Semaphore:
+    """Return the shared start gate. Create once; never shrink an existing one.
+
+    ``from … import _start_semaphore`` copies the name at import time, so
+    callers must use this (or ``docker_client._start_semaphore``) after
+    ``configure_semaphore``.
+    """
+    global _start_semaphore
+    if _start_semaphore is None:
+        _start_semaphore = asyncio.Semaphore(max_concurrent)
+    return _start_semaphore
 
 
 async def _track_start() -> None:

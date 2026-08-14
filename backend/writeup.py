@@ -170,6 +170,17 @@ def collapse_prose_fragments(text: str) -> str:
     return "\n".join(out).strip()
 
 
+def coalesce_writeup_output(parts: list[str], result: Any = None) -> str:
+    """Prefer streamed text; fall back to ``run.wait().result`` (Cursor/Grok)."""
+    text = join_streamed_text_parts(parts)
+    if text:
+        return text
+    raw = getattr(result, "result", None)
+    if raw is None:
+        raw = getattr(result, "text", None)
+    return str(raw or "").strip()
+
+
 def join_streamed_text_parts(parts: list[str]) -> str:
     """Join Cursor/Gemini writeup deltas without word-per-line paragraphs."""
     chunks = [p.strip() for p in parts if (p or "").strip()]
@@ -320,7 +331,22 @@ def is_usable_narrative(text: str) -> bool:
     blob = " ".join(substance)
     blob = _FLAG_TOKEN_RE.sub("", blob)
     blob = re.sub(r"\s+", " ", blob).strip()
-    if len(blob) < 40:
+    if not blob:
+        return False
+    has_section = any(
+        re.match(
+            r"(?i)^(Challenge|Key insight|Solution summary|What I tried|"
+            r"Why it worked|Dead ends)\b",
+            ln,
+        )
+        for ln in lines
+    )
+    n_steps = sum(1 for ln in lines if re.match(r"^\d+\.\s", ln))
+    # One mid-solve fragment ("redo it to match the ARM…") is not a recap.
+    if has_section or n_steps >= 2:
+        if len(blob) < 40:
+            return False
+    elif len(blob) < 160:
         return False
     # Reject pure accept-message regurgitation.
     return not (_ACCEPT_NOISE_RE.search(blob) and len(blob) < 100)

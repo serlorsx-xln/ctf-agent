@@ -23,10 +23,10 @@ from backend.sandbox.docker_client import (
     SESSION_ID_LABEL,
     _docker_cli,
     _docker_client,
-    _start_semaphore,
     _track_start,
     _track_stop,
     docker_cp_from_container,
+    ensure_start_semaphore,
 )
 
 # _docker_cli still used by pack materialize / finalize paths.
@@ -190,7 +190,7 @@ class DockerSandbox:
         }
 
     async def start(self) -> None:
-        sem = _start_semaphore or asyncio.Semaphore(50)
+        sem = ensure_start_semaphore()
         async with sem:
             self._docker = _docker_client()
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
+
+import pytest
 
 from backend.agents.swarm import ChallengeSwarm
 from backend.flags import accept_flag
@@ -50,6 +53,7 @@ def _swarm(specs: list[str]) -> ChallengeSwarm:
     swarm._last_status = ""
     swarm._last_flag = None
     swarm._how_emitted = False
+    swarm._writeup_attempted = False
     return swarm
 
 
@@ -194,6 +198,64 @@ def test_writeup_is_empty_without_an_accepted_flag():
     swarm = _swarm(["cursor/grok-4.5"])
     swarm.findings = {"cursor/grok-4.5": "tried a lot"}
     assert swarm.solve_writeup() == []
+
+
+def test_interim_how_prints_notes_immediately(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+    swarm = _swarm(["cursor/grok-4.5"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
+    swarm.flag_notes = {
+        "cursor/grok-4.5": (
+            "Challenge\nFlutter APK hid the key in libapp.so.\n\n"
+            "Key insight\nXOR with the APK signature recovers the blob.\n\n"
+            "How\n1. strings on libapp.so\n2. XOR the blob with the signature"
+        )
+    }
+    swarm._emit_how_recap(interim=True)
+    joined = "\n".join(lines)
+    assert "[artemis] summary How:" in joined
+    assert "libapp.so" in joined
+    assert swarm._how_emitted is True
+
+
+def test_interim_how_prints_pending_without_notes(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+    swarm = _swarm(["cursor/grok-4.5"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
+    swarm._emit_how_recap(interim=True)
+    joined = "\n".join(lines)
+    assert "[artemis] summary How:" in joined
+    assert "Writing recap from the winning solver" in joined
+    assert swarm._how_emitted is False
+
+
+@pytest.mark.asyncio
+async def test_writeup_still_emits_when_flag_found_path_is_skipped(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+
+    async def produce_writeup() -> str:
+        return (
+            "Challenge\nShop PIN in the Flutter binary.\n\n"
+            "Key insight\nClient-side check before the buy call.\n\n"
+            "How\n1. strings libapp.so\n2. call the buy endpoint"
+        )
+
+    swarm = _swarm(["cursor/grok-4.5"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.confirmed_flag = "CTF{aaaaaaaaaaaa}"
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
+    swarm.winner_runner_id = "cursor/grok-4.5"
+    solver = SimpleNamespace(produce_writeup=produce_writeup, _findings="")
+    await swarm._capture_and_emit_writeup(solver, "cursor/grok-4.5")
+    joined = "\n".join(lines)
+    assert "Shop PIN" in joined
+    assert swarm._how_emitted is True
+    assert swarm._writeup_attempted is True
 
 
 def test_solved_by_falls_back_to_the_winner_runner():

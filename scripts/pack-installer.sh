@@ -6,6 +6,8 @@
 #   bash scripts/pack-installer.sh          # build installers
 #   bash scripts/pack-installer.sh --test     # build + self-test extract/structure
 set -euo pipefail
+# macOS otherwise embeds com.apple.provenance xattrs; Linux tar then warns.
+export COPYFILE_DISABLE=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$REPO_ROOT/dist"

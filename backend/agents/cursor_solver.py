@@ -1042,15 +1042,16 @@ class CursorSolver:
                         # Do not stream token deltas to the live log — hundreds of
                         # ``[agent writeup] x`` lines drown CORRECT / summary and
                         # invent phantom status on the main page.
+        result = None
         try:
             from backend.writeup import WRITEUP_TIMEOUT_S
 
-            await asyncio.wait_for(run.wait(), timeout=WRITEUP_TIMEOUT_S)
+            result = await asyncio.wait_for(run.wait(), timeout=WRITEUP_TIMEOUT_S)
         except TimeoutError:
             pass
-        from backend.writeup import join_streamed_text_parts
+        from backend.writeup import coalesce_writeup_output
 
-        return join_streamed_text_parts(parts)
+        return coalesce_writeup_output(parts, result)
 
     async def stop(self) -> None:
         if self._step_count == 0 and not getattr(self, "_started", False):
