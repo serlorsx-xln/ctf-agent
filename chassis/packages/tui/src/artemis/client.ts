@@ -15,7 +15,7 @@ import path from "node:path"
 import os from "node:os"
 import { createRoot, createSignal } from "solid-js"
 import { parseLine, coalesceEvents, dedupeEvents, expandSummaryLine, hasTerminalSolveOutcome, type ArtemisEvent } from "../util/artemis-live-log"
-import { rosterFromSpecs } from "../util/artemis-swarm-agents"
+import { rosterFromDaemonPush, rosterFromSpecs } from "../util/artemis-swarm-agents"
 
 export type ArtemisUsage = {
   tokens: number
@@ -513,7 +513,12 @@ class DaemonClient {
         const agents = Array.isArray(msg.agents)
           ? (msg.agents as unknown[]).map((a) => String(a)).filter(Boolean)
           : []
-        this.setSwarmRoster(agents)
+        const models = Array.isArray(msg.models)
+          ? (msg.models as unknown[]).map((m) => String(m)).filter(Boolean)
+          : []
+        if (models.length) this.lastModels[1](models)
+        const next = rosterFromDaemonPush(agents, this.lastModels[0]())
+        if (next.length) this.setSwarmRoster(next)
         this.swarmFocus[1](null)
         this.swarmNavCursor[1](0)
         this.swarmNavArmed[1](false)

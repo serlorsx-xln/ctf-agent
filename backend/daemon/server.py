@@ -94,6 +94,13 @@ class Daemon:
     async def start(self) -> None:
         self.state.hydrate_all()
         self.server, addr = await start_daemon_server(self._on_connect)
+        try:
+            from backend.cache import cache_dir
+            from backend.daemon.code_stamp import write_running_stamp
+
+            write_running_stamp(cache_dir(), pid=os.getpid())
+        except OSError:
+            logger.debug("could not write daemon.code / daemon.pid", exc_info=True)
         logger.info("daemon listening on %s", addr)
 
         # Re-adopt a swarm that outlived a previous daemon instance.

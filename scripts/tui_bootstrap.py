@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -81,6 +82,79 @@ def _daemon_connectable(*, timeout: float = 0.05) -> bool:
 def services_already_up() -> bool:
     """True when daemon + cursor stub already accept connections."""
     return _daemon_connectable() and port_open("127.0.0.1", 18765)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def daemon_code_stale() -> bool:
+    """True when the live daemon was started from an older backend tree."""
+    ensure_import_path()
+    from backend.cache import cache_dir
+    from backend.daemon.code_stamp import backend_code_stamp, running_stamp
+
+    have = running_stamp(cache_dir())
+    if not have:
+        return True
+    return have != backend_code_stamp(repo_root())
+
+
+def _live_swarm() -> bool:
+    ensure_import_path()
+    from backend.cache import cache_dir
+
+    cache = cache_dir()
+    candidates = [cache / "swarm.pid"]
+    sessions = cache / "sessions"
+    if sessions.is_dir():
+        candidates.extend(sessions.glob("*/swarm.pid"))
+    for path in candidates:
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if _pid_alive(pid):
+            return True
+    return False
+
+
+def _stop_stale_daemon() -> None:
+    ensure_import_path()
+    from backend.cache import cache_dir
+    from backend.daemon.code_stamp import pid_path
+    from backend.daemon.transport import clear_stale_endpoint_files
+
+    cache = cache_dir()
+    try:
+        pid = int(pid_path(cache).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = 0
+    if _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        _wait_until(lambda: not _pid_alive(pid), timeout_s=2.0)
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:
+        clear_stale_endpoint_files()
+    except OSError:
+        pass
+    try:
+        pid_path(cache).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def python_cmd() -> list[str]:
@@ -174,7 +248,13 @@ def ensure_background_services() -> None:
     ensure_standard_streams()
 
     if daemon_alive(timeout=0.05) and port_open("127.0.0.1", 18765):
-        return
+        if not daemon_code_stale():
+            return
+        if _live_swarm():
+            _warn("backend changed but a swarm is still running — keep current daemon")
+            return
+        _warn("restarting daemon (backend code changed)")
+        _stop_stale_daemon()
 
     # Cold start only — daemon also sweeps bridges on boot.
     _refresh_install_path()
@@ -242,8 +322,9 @@ def _emit_mode(argv: list[str]) -> str:
 
 def main() -> None:
     mode = _emit_mode(sys.argv[1:])
-    # Hot path: services already up — skip backend/asyncio imports and spawn.
-    if services_already_up():
+    # Hot path: current daemon + stub — skip spawn. A stale daemon (quit TUI,
+    # code changed, daemon kept running) must be replaced so roster/writeup fixes load.
+    if services_already_up() and not daemon_code_stale():
         emit_credentials(mode)
         return
     ensure_background_services()

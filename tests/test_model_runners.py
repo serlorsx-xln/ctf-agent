@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from backend.models import assign_runner_ids, effort_from_spec, expand_model_cli_args, model_id_from_spec
+from backend.models import (
+    agent_display_key,
+    assign_runner_ids,
+    effort_from_spec,
+    expand_model_cli_args,
+    model_id_from_spec,
+)
 
 
 def test_expand_star_multiplier():
@@ -64,6 +70,22 @@ def test_model_id_keeps_custom_claude_slashes():
     assert model_id_from_spec("claude-sdk/claude-opus-4-6/max") == "claude-opus-4-6"
     assert effort_from_spec("claude-sdk/bigmodel/glm-5.2/max") == "max"
     assert effort_from_spec("claude-sdk/bigmodel/glm-5.2") is None
+
+
+def test_agent_display_key_keeps_slashy_claude_ids():
+    specs = [
+        "claude-sdk/PSU-araya/psu-gemma",
+        "claude-sdk/aliyuncs/MiniMax-M2.1",
+        "claude-sdk/aliyuncs/MiniMax-M2.5",
+        "claude-sdk/aliyuncs/glm-4.7",
+    ]
+    keys = [agent_display_key(rid, spec) for rid, spec in assign_runner_ids(specs)]
+    assert keys == [
+        "PSU-araya/psu-gemma",
+        "aliyuncs/MiniMax-M2.1",
+        "aliyuncs/MiniMax-M2.5",
+        "aliyuncs/glm-4.7",
+    ]
 
 
 def test_assign_runner_ids_unique():

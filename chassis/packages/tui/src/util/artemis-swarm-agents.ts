@@ -50,6 +50,17 @@ export function rosterFromSpecs(specs: string[]): string[] {
   return out
 }
 
+/** Box labels for a run: model specs win over a collapsed daemon agent list.
+
+ * Old daemons labeled every ``claude-sdk/aliyuncs/…`` box ``aliyuncs``, so four
+ * picks became two. Rebuild from the specs the operator actually confirmed.
+ */
+export function rosterFromDaemonPush(agents: string[], models: string[]): string[] {
+  const fromModels = rosterFromSpecs(models)
+  if (fromModels.length > 0) return fromModels
+  return agents.map((a) => a.trim()).filter(Boolean)
+}
+
 function eventAgent(ev: ArtemisEvent): string | null {
   // Boot lines name their container's owner but are not that agent's work:
   // counting them would flip a still-booting box to active with no output.
@@ -92,11 +103,13 @@ export function listSwarmAgents(
     seen.add(key)
     ordered.push(key)
   }
+  const fromSpecs = rosterFromSpecs(modelSpecs)
   for (const key of roster) push(key)
-  // Explicit roster is the current run — ignore specs/log discovery.
-  if (roster.length > 0) return ordered
-  for (const key of rosterFromSpecs(modelSpecs)) push(key)
-  if (modelSpecs.length > 0) return ordered
+  // Explicit roster is the current run — unless it is shorter than the pick
+  // (old daemon collapsed ``aliyuncs/MiniMax-M2.1`` + ``aliyuncs/glm-4.7``).
+  if (roster.length > 0 && ordered.length >= fromSpecs.length) return ordered
+  if (fromSpecs.length > ordered.length) return fromSpecs
+  if (roster.length > 0 || modelSpecs.length > 0) return ordered
   for (const ev of events) {
     if (!isWorkEvent(ev)) continue
     const a = eventAgent(ev)

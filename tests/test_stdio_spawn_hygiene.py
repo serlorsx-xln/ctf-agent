@@ -198,6 +198,7 @@ def test_clear_stale_skipped_when_daemon_alive(
         lambda: calls.append("clear"),
     )
     monkeypatch.setattr(boot, "port_open", lambda *a, **k: True)
+    monkeypatch.setattr(boot, "daemon_code_stale", lambda: False)
     monkeypatch.setattr(boot, "spawn_background", lambda *a, **k: calls.append("spawn"))
 
     boot.ensure_background_services()
@@ -222,11 +223,69 @@ def test_main_hot_path_skips_full_bootstrap(monkeypatch: pytest.MonkeyPatch) -> 
 
     calls: list[str] = []
     monkeypatch.setattr(boot, "services_already_up", lambda: True)
+    monkeypatch.setattr(boot, "daemon_code_stale", lambda: False)
     monkeypatch.setattr(boot, "ensure_background_services", lambda: calls.append("full"))
     monkeypatch.setattr(boot, "emit_credentials", lambda mode: calls.append(f"emit:{mode}"))
     monkeypatch.setattr(boot.sys, "argv", ["tui_bootstrap.py", "--emit", "export"])
     boot.main()
     assert calls == ["emit:export"]
+
+
+def test_main_stale_daemon_runs_full_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.tui_bootstrap as boot
+
+    calls: list[str] = []
+    monkeypatch.setattr(boot, "services_already_up", lambda: True)
+    monkeypatch.setattr(boot, "daemon_code_stale", lambda: True)
+    monkeypatch.setattr(boot, "ensure_background_services", lambda: calls.append("full"))
+    monkeypatch.setattr(boot, "emit_credentials", lambda mode: calls.append(f"emit:{mode}"))
+    monkeypatch.setattr(boot.sys, "argv", ["tui_bootstrap.py", "--emit", "export"])
+    boot.main()
+    assert calls == ["full", "emit:export"]
+
+
+def test_stale_idle_daemon_is_restarted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import backend.daemon.transport as transport
+    import scripts.tui_bootstrap as boot
+
+    monkeypatch.setenv("ARTEMIS_CACHE", str(tmp_path))
+    calls: list[str] = []
+    alive = {"v": True}
+
+    def stop() -> None:
+        calls.append("stop")
+        alive["v"] = False
+
+    monkeypatch.setattr(transport, "daemon_alive", lambda timeout=0.25: alive["v"])
+    monkeypatch.setattr(boot, "port_open", lambda *a, **k: True)
+    monkeypatch.setattr(boot, "daemon_code_stale", lambda: True)
+    monkeypatch.setattr(boot, "_live_swarm", lambda: False)
+    monkeypatch.setattr(boot, "_stop_stale_daemon", stop)
+    monkeypatch.setattr(boot, "spawn_background", lambda *a, **k: calls.append("spawn"))
+    monkeypatch.setattr(boot, "_wait_until", lambda *a, **k: True)
+    monkeypatch.setattr(boot, "_refresh_install_path", lambda: None)
+
+    boot.ensure_background_services()
+    assert calls[0] == "stop"
+    assert "spawn" in calls
+
+
+def test_stale_daemon_kept_while_swarm_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import backend.daemon.transport as transport
+    import scripts.tui_bootstrap as boot
+
+    monkeypatch.setenv("ARTEMIS_CACHE", str(tmp_path))
+    calls: list[str] = []
+    monkeypatch.setattr(transport, "daemon_alive", lambda timeout=0.25: True)
+    monkeypatch.setattr(boot, "port_open", lambda *a, **k: True)
+    monkeypatch.setattr(boot, "daemon_code_stale", lambda: True)
+    monkeypatch.setattr(boot, "_live_swarm", lambda: True)
+    monkeypatch.setattr(boot, "_stop_stale_daemon", lambda: calls.append("stop"))
+    monkeypatch.setattr(boot, "spawn_background", lambda *a, **k: calls.append("spawn"))
+    monkeypatch.setattr(boot, "_refresh_install_path", lambda: None)
+
+    boot.ensure_background_services()
+    assert calls == []
 
 
 def test_supervisor_stop_runs_bridge_cleanup(

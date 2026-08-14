@@ -127,12 +127,6 @@ def missing_swarm_credentials(specs: list[str], settings: Settings | None = None
     return missing
 
 
-# Legacy aliases — prefer normalize_swarm_* / missing_swarm_credentials.
-normalize_race_spec = normalize_swarm_spec
-normalize_race_specs = normalize_swarm_specs
-missing_race_credentials = missing_swarm_credentials
-
-
 def missing_models_error() -> str:
     """Shared error string for 'no models passed' (bridge + daemon parity)."""
     return (

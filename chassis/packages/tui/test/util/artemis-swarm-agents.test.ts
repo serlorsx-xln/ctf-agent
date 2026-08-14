@@ -5,6 +5,7 @@ import {
   globalSwarmEvents,
   listSwarmAgents,
   partitionEventsByAgent,
+  rosterFromDaemonPush,
   rosterFromSpecs,
   winnerAgents,
 } from "../../src/util/artemis-swarm-agents"
@@ -43,6 +44,23 @@ describe("artemis-swarm-agents", () => {
       "grok-4.5#1",
       "grok-4.5#2",
     ])
+  })
+
+  test("slashy Claude picks stay one box each", () => {
+    const specs = [
+      "claude-sdk/PSU-araya/psu-gemma",
+      "claude-sdk/aliyuncs/MiniMax-M2.1",
+      "claude-sdk/aliyuncs/MiniMax-M2.5",
+      "claude-sdk/aliyuncs/glm-4.7",
+    ]
+    expect(rosterFromSpecs(specs)).toEqual([
+      "PSU-araya/psu-gemma",
+      "aliyuncs/MiniMax-M2.1",
+      "aliyuncs/MiniMax-M2.5",
+      "aliyuncs/glm-4.7",
+    ])
+    expect(rosterFromDaemonPush(["PSU-araya", "aliyuncs"], specs)).toEqual(rosterFromSpecs(specs))
+    expect(listSwarmAgents([], specs, ["PSU-araya", "aliyuncs"])).toEqual(rosterFromSpecs(specs))
   })
 
   test("listSwarmAgents roster is exclusive — no leftover log agents", () => {
