@@ -132,21 +132,23 @@ def test_writeup_prefers_late_findings_over_command_trail():
 
     class _Solver:
         _findings = (
-            "**FLAG: flag{50fba}** ## Solution Summary "
-            "1. **DNS exfiltration** — mango "
-            "2. **TCP chat** — CIPHER_PART_1/2. "
-            "3. **ICMP noise** — decoy"
+            "Challenge\nPCAP with DNS TXT plus a TCP chat.\n\n"
+            "Key insight\nTXT record mango is the XOR key.\n\n"
+            "How\n"
+            "1. DNS exfiltration recovered mango from TXT\n"
+            "2. TCP chat recovered CIPHER_PART_1/2\n"
+            "3. XOR the stream with mango"
         )
 
     swarm.solvers = {"cursor/composer-2.5": _Solver()}  # type: ignore[assignment]
 
     # Simulate the FLAG_FOUND late-findings promotion used in _run_solver.
-    from backend.writeup import clean_how_lines, is_usable_narrative
+    from backend.writeup import clean_how_lines, is_detailed_writeup, is_usable_narrative
 
     existing = swarm.flag_notes["cursor/composer-2.5"]
     late = swarm.solvers["cursor/composer-2.5"]._findings
     assert not is_usable_narrative(existing)
-    assert is_usable_narrative(late)
+    assert is_detailed_writeup(late)
     swarm.flag_notes["cursor/composer-2.5"] = "\n".join(clean_how_lines(late))
 
     lines = swarm.solve_writeup()
@@ -238,6 +240,7 @@ def test_interim_how_keeps_pending_for_teaser_paragraph(monkeypatch):
     joined = "\n".join(lines)
     assert "Writing recap from the winning solver" in joined
     assert "Alan Turing" not in joined
+    assert "[artemis] summary How:" not in joined
     assert swarm._how_emitted is False
 
 
@@ -249,7 +252,7 @@ def test_interim_how_prints_pending_without_notes(monkeypatch):
     swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
     swarm._emit_how_recap(interim=True)
     joined = "\n".join(lines)
-    assert "[artemis] summary How:" in joined
+    assert "[artemis] summary How:" not in joined
     assert "Writing recap from the winning solver" in joined
     assert swarm._how_emitted is False
 
@@ -275,6 +278,35 @@ async def test_failed_writeup_replaces_pending_how(monkeypatch):
     assert "Writing recap from the winning solver" in joined
     assert "(no writeup recorded)" in joined
     assert swarm._how_emitted is True
+
+
+@pytest.mark.asyncio
+async def test_teaser_writeup_is_not_the_operator_recap(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+    teaser = (
+        "The decoded text reveals the instruction: take each word in the quote "
+        "'machines take me by surprise with great frequency', join with "
+        "underscores, put in flag format. Let me submit candidates."
+    )
+
+    async def produce_writeup() -> str:
+        return teaser
+
+    swarm = _swarm(["claude-sdk/bigmodel/glm-5.2"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.confirmed_flag = "CTF{aaaaaaaaaaaa}"
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "claude-sdk/bigmodel/glm-5.2"}
+    swarm.winner_runner_id = "claude-sdk/bigmodel/glm-5.2"
+    swarm.flag_notes = {"claude-sdk/bigmodel/glm-5.2": teaser}
+    swarm._emit_how_recap(interim=True)
+    solver = SimpleNamespace(produce_writeup=produce_writeup, _findings=teaser)
+    await swarm._capture_and_emit_writeup(solver, "claude-sdk/bigmodel/glm-5.2")
+    joined = "\n".join(lines)
+    assert "Let me submit candidates" not in joined
+    assert "(no writeup recorded)" in joined
+    how_headers = [ln for ln in lines if ln.strip() == "[artemis] summary How:"]
+    assert len(how_headers) == 1
 
 
 @pytest.mark.asyncio

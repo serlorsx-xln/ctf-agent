@@ -2682,6 +2682,10 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
                     )
                   })
                   const hidePending = /Writing recap/i.test(t) && hasRecapBody
+                  // Title already says "How the flag was found" — drop leftover How: labels
+                  // (interim + final both used to print one).
+                  const hideHowLabel =
+                    hasRecapBody && /^How(?:\s*\(.*\))?\s*:?\s*$/i.test(t)
                   const isSolvedBy = /^Solved by /i.test(t)
                   const isHeader =
                     /^(How|Challenge|Key insight|Flag|Solution summary|Steps|What I tried|Why it worked|Dead ends)\b/i.test(t) ||
@@ -2694,7 +2698,7 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
                       : theme.text
                   const attrs = isSolvedBy || isHeader ? TextAttributes.BOLD : undefined
                   return (
-                    <Show when={!hidePending}>
+                    <Show when={!hidePending && !hideHowLabel}>
                       <text fg={fg} attributes={attrs} wrapMode="word">
                         {line}
                       </text>

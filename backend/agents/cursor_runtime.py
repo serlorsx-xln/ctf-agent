@@ -15,6 +15,7 @@ from cursor_sdk import AsyncClient
 logger = logging.getLogger(__name__)
 
 _lock = asyncio.Lock()
+_agent_op_lock = asyncio.Lock()
 _client: AsyncClient | None = None  # owns the bridge subprocess
 _agent_client: AsyncClient | None = None  # timeout-tuned view for agents
 _refs = 0
@@ -132,6 +133,27 @@ async def current_client() -> AsyncClient | None:
     """Return the live agent client view without changing refcount."""
     async with _lock:
         return _agent_client
+
+
+async def create_on_live_bridge(factory):
+    """Run ``factory(client)`` on the shared bridge.
+
+    Concurrent Cursor solvers share one bridge. If create/connect fails because
+    a sibling just closed or poisoned it, relaunch once under a lock so three
+    grok runners do not kill each other's new process.
+    """
+    async with _agent_op_lock:
+        client = _agent_client
+        if client is None:
+            raise RuntimeError("Cursor bridge is not acquired")
+        try:
+            return await factory(client)
+        except Exception as e:
+            if not is_infra_error_message(str(e)):
+                raise
+            logger.warning("Cursor bridge call failed (%s) — relaunching", e)
+            client = await force_recreate_client()
+            return await factory(client)
 
 
 async def force_recreate_client() -> AsyncClient:

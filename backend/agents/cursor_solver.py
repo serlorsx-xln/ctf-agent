@@ -31,6 +31,7 @@ from cursor_sdk import (
 
 from backend.agents.cursor_runtime import (
     acquire_client,
+    create_on_live_bridge,
     current_client,
     force_recreate_client,
     format_cursor_run_error,
@@ -291,7 +292,11 @@ class CursorSolver:
             has_named_tools=True,
         )
         try:
-            self._agent = await self._create_agent()
+            async def _factory(client):
+                self._client = client
+                return await self._create_agent()
+
+            self._agent = await create_on_live_bridge(_factory)
         except Exception:
             await release_client()
             self._client = None

@@ -430,7 +430,20 @@ class ChallengeSwarm:
                 solver = final_solver
                 return result
             except Exception as e:
-                logger.error(f"[{self.meta.name}/{runner_id}] Fatal: {e}", exc_info=True)
+                infra = False
+                try:
+                    from backend.agents.cursor_runtime import is_infra_error_message
+
+                    infra = is_infra_error_message(str(e))
+                except Exception:
+                    pass
+                logger.error(
+                    "[%s/%s] Fatal: %s",
+                    self.meta.name,
+                    runner_id,
+                    e,
+                    exc_info=not infra,
+                )
                 return None
             finally:
                 # FLAG_FOUND path can be skipped (turn error/cancel after CORRECT).
@@ -902,7 +915,8 @@ class ChallengeSwarm:
         # solve_writeup starts with Solved by — already emitted on accept.
         how_lines = [ln for ln in lines if not ln.startswith("Solved by ")]
         if interim and not self._how_has_body(how_lines):
-            emit_line("[artemis] summary How:")
+            # No How: header here — the final emit owns that label. Printing it
+            # now left the TUI with How: / How: once the recap arrived.
             emit_line("[artemis] summary   Writing recap from the winning solver…")
             return
         if not how_lines:
@@ -922,7 +936,6 @@ class ChallengeSwarm:
             capture_solver_writeup,
             clean_how_lines,
             is_detailed_writeup,
-            is_usable_narrative,
         )
 
         existing = (self.flag_notes.get(runner_id) or "").strip()
@@ -935,7 +948,8 @@ class ChallengeSwarm:
             self.flag_notes[runner_id] = existing
 
         writeup = await capture_solver_writeup(solver)
-        if writeup and is_usable_narrative(writeup):
+        # A one-paragraph teaser is usable prose but not the operator recap.
+        if writeup and is_detailed_writeup(writeup):
             self.flag_notes[runner_id] = writeup
             self.findings[runner_id] = writeup[:800]
             self._how_emitted = False
@@ -947,7 +961,7 @@ class ChallengeSwarm:
         flags = list(self.confirmed_flags)
         if not flags:
             return []
-        from backend.writeup import clean_how_lines, is_usable_narrative
+        from backend.writeup import clean_how_lines, is_detailed_writeup
 
         specs = dict(assign_runner_ids(self.model_specs))
         winners = self.solved_by()
@@ -958,13 +972,13 @@ class ChallengeSwarm:
         for rid in winners:
             note = (self.flag_notes.get(rid) or "").strip()
             finding = (self.findings.get(rid) or "").strip()
-            if not is_usable_narrative(note) and is_usable_narrative(finding):
+            if not is_detailed_writeup(note) and is_detailed_writeup(finding):
                 note = finding
             if shared:
                 lines.append(f"How ({key[rid]}):")
             else:
                 lines.append("How:")
-            if note and is_usable_narrative(note):
+            if note and is_detailed_writeup(note):
                 for piece in clean_how_lines(note):
                     if not piece.strip():
                         lines.append("")
