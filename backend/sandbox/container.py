@@ -16,6 +16,7 @@ from typing import Any
 
 import aiodocker
 
+from backend.sandbox.container_paths import container_path_parts
 from backend.sandbox.docker_client import (
     CONTAINER_LABEL,
     OWNER_PID_LABEL,
@@ -25,6 +26,7 @@ from backend.sandbox.docker_client import (
     _start_semaphore,
     _track_start,
     _track_stop,
+    docker_cp_from_container,
 )
 
 # _docker_cli still used by pack materialize / finalize paths.
@@ -192,12 +194,14 @@ class DockerSandbox:
         async with sem:
             self._docker = _docker_client()
 
+            from backend.platform_paths import docker_volume_path, ensure_docker_bind_dir
+
             self.workspace_dir = tempfile.mkdtemp(prefix="ctf-workspace-")
+            ensure_docker_bind_dir(self.workspace_dir)
 
             challenge_root = Path(self.challenge_dir).resolve()
             from backend.challenge import distfiles_host_path
             from backend.pack_preflight import resolve_prefetch_packs
-            from backend.platform_paths import docker_volume_path
             from backend.tool_router import pack_binds_enabled
 
             dist_host = distfiles_host_path(challenge_root)
@@ -209,6 +213,7 @@ class DockerSandbox:
             else:
                 # Web/link-only: empty distfiles so the path still exists in-container.
                 empty_dist = tempfile.mkdtemp(prefix="ctf-dist-empty-")
+                ensure_docker_bind_dir(empty_dist)
                 self._temp_dirs.append(empty_dist)
                 binds.append(f"{docker_volume_path(empty_dist)}:/challenge/distfiles:ro")
             for name in (
@@ -246,30 +251,37 @@ class DockerSandbox:
             # CTF_PACK_BIND=0 forces docker-cp for RO donor trees — otherwise every
             # container recompiles the Dart VM from scratch.
             binds.extend(self._pack_state_bind_strings())
-            if pack_binds_enabled():
-                for pack in prefetch:
+            if pack_binds_enabled() and prefetch:
+                async def _materialize_one(pack: str) -> tuple[str, list[str]]:
                     pack_t0 = time.monotonic()
-                    try:
-                        cache = await self._materialize_pack_cache(pack)
-                        pack_binds = self._pack_bind_strings(cache, pack)
-                        if pack_binds:
-                            binds.extend(pack_binds)
-                            self._bind_mounted_packs.add(pack)
-                            logger.info(
-                                "Pack %s: %d RO bind(s) from host cache %s (%.0fms)",
-                                pack,
-                                len(pack_binds),
-                                cache,
-                                (time.monotonic() - pack_t0) * 1000,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Pack %s bind prep failed (will docker cp on ensure): %s",
+                    cache = await self._materialize_pack_cache(pack)
+                    pack_binds = self._pack_bind_strings(cache, pack)
+                    if pack_binds:
+                        logger.info(
+                            "Pack %s: %d RO bind(s) from host cache %s (%.0fms)",
                             pack,
-                            e,
+                            len(pack_binds),
+                            cache,
+                            (time.monotonic() - pack_t0) * 1000,
+                        )
+                    return pack, pack_binds
+
+                for item in await asyncio.gather(
+                    *[_materialize_one(p) for p in prefetch],
+                    return_exceptions=True,
+                ):
+                    if isinstance(item, BaseException):
+                        logger.warning(
+                            "Pack bind prep failed (will docker cp on ensure): %s",
+                            item,
                         )
                         if strict:
-                            raise
+                            raise item
+                        continue
+                    pack, pack_binds = item
+                    if pack_binds:
+                        binds.extend(pack_binds)
+                        self._bind_mounted_packs.add(pack)
 
             self._binds = binds
 
@@ -325,10 +337,10 @@ class DockerSandbox:
                     await self._calibrate_host_proxy_routing()
                 await self.refresh_tools_doc()
 
-                # Bootstrap prefetched packs (bind-mounted trees skip the copy).
+                # Bootstrap prefetched packs in parallel (bind-mounted trees skip the copy).
                 # Refresh /tools.txt once after all packs (not per-pack).
-                try:
-                    for pack in prefetch:
+                if prefetch:
+                    async def _prefetch_one(pack: str) -> None:
                         pack_t0 = time.monotonic()
                         if pack == "pwn" and "pwn" in (self.image or ""):
                             hint = "baked pwn runtime (usually seconds)"
@@ -338,11 +350,7 @@ class DockerSandbox:
                             hint = "pwn pip/angr ~5–8 min on fresh core"
                         else:
                             hint = "usually under 2 min"
-                        logger.info(
-                            "Prefetch bootstrap pack=%s (%s)…",
-                            pack,
-                            hint,
-                        )
+                        logger.info("Prefetch bootstrap pack=%s (%s)…", pack, hint)
                         msg = await self.ensure_pack(pack, refresh_tools=False)
                         logger.info(
                             "Prefetch pack %s: %s (%.0fms)",
@@ -350,12 +358,17 @@ class DockerSandbox:
                             msg,
                             (time.monotonic() - pack_t0) * 1000,
                         )
-                    if prefetch:
-                        await self.refresh_tools_doc()
-                except Exception as e:
-                    logger.warning("Pack prefetch failed: %s", e)
-                    if strict:
-                        raise
+
+                    results = await asyncio.gather(
+                        *[_prefetch_one(p) for p in prefetch],
+                        return_exceptions=True,
+                    )
+                    for item in results:
+                        if isinstance(item, BaseException):
+                            logger.warning("Pack prefetch failed: %s", item)
+                            if strict:
+                                raise item
+                    await self.refresh_tools_doc()
             except Exception:
                 if self._host_proxy_port is not None:
                     await release_host_proxy()
@@ -424,9 +437,8 @@ class DockerSandbox:
         await self._container.start()
         self.image = image
         await _track_start()
-        info = await self._container.show()
-        short_id = info["Id"][:12]
-        logger.info("Sandbox started: %s (image=%s)", short_id, image)
+        cid = getattr(self._container, "id", None) or getattr(self._container, "_id", "")
+        logger.info("Sandbox started: %s (image=%s)", str(cid)[:12] or "?", image)
 
     async def _install_host_proxy_client(self, port: int) -> None:
         """Install proxychains + config so agent bash *can* use the host VPN SOCKS.
@@ -945,7 +957,7 @@ class DockerSandbox:
         ones) so an on-demand ``ensure_pack`` still reuses an earlier build.
         Session-scoped unless the pack sets ``shared_state`` (blutter Dart VMs).
         """
-        from backend.platform_paths import docker_volume_path
+        from backend.platform_paths import docker_volume_path, ensure_docker_bind_dir
         from backend.tool_router import PACK_SPECS, pack_state_dir
 
         out: list[str] = []
@@ -955,6 +967,7 @@ class DockerSandbox:
                 host = pack_state_dir(pack_id, container_path, session_id=sid)
                 try:
                     host.mkdir(parents=True, exist_ok=True)
+                    ensure_docker_bind_dir(host)
                 except OSError as e:
                     logger.warning("Pack %s state dir %s unusable: %s", pack_id, host, e)
                     continue
@@ -1074,11 +1087,14 @@ class DockerSandbox:
                         dest.unlink(missing_ok=True)
                 # Sage / large pack trees can exceed 300s on first extract.
                 cp_timeout = 1800 if pack_id in ("crypto", "crypto-tools") else 300
-                rc, _, err = await _docker_cli(
-                    "cp", f"{name}:{src}", str(dest), timeout_s=cp_timeout
-                )
-                if rc != 0:
-                    raise RuntimeError(f"docker cp {src} from {spec.image} failed: {err.strip()}")
+                try:
+                    await docker_cp_from_container(
+                        name, src, dest, timeout_s=cp_timeout
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"docker cp {src} from {spec.image} failed: {exc}"
+                    ) from exc
             marker.write_text("ok\n", encoding="utf-8")
             try:
                 from backend.sandbox.setup_bake import write_pack_ready_marker
@@ -1410,16 +1426,17 @@ class DockerSandbox:
 
     async def _write_file_inner(self, path: str, content: bytes) -> None:
         assert self._container is not None
+        parent, name = container_path_parts(path)
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
-            info = tarfile.TarInfo(name=Path(path).name)
+            info = tarfile.TarInfo(name=name)
             info.size = len(content)
             tar.addfile(info, io.BytesIO(content))
         buf.seek(0)
 
         try:
             await asyncio.wait_for(
-                self._container.put_archive(str(Path(path).parent), buf.getvalue()),
+                self._container.put_archive(parent, buf.getvalue()),
                 timeout=30,
             )
         except TimeoutError as e:

@@ -7,14 +7,18 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+. (Join-Path $PSScriptRoot "lib\windows-docker.ps1")
 
 function Log($m) { Write-Host "[qa] $m" -ForegroundColor Cyan }
 function Fail($m) { Write-Host "[qa] FAIL: $m" -ForegroundColor Red; exit 1 }
 
+function Initialize-DockerCli { Initialize-ArtemisDockerCli }
+function Wait-DockerReady { Wait-ArtemisDockerReady @args }
+
 $uv = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
 if (-not (Test-Path $uv)) { Fail "run scripts/install.ps1 first" }
 $env:Path = "$(Split-Path $uv);$env:Path"
-if (-not $env:DOCKER_HOST) { $env:DOCKER_HOST = "npipe:////./pipe/docker_engine" }
+if (-not $SkipDocker) { Initialize-DockerCli }
 
 Log "ruff..."
 & $uv run ruff check backend tests scripts
@@ -36,14 +40,10 @@ if (-not $SkipTui) {
 }
 
 if (-not $SkipDocker) {
-  docker info 2>$null | Out-Null
-  if ($LASTEXITCODE -eq 0) {
-    Log "Docker pack smoke..."
-    & $uv run python scripts/smoke_packs.py
-    if ($LASTEXITCODE -ne 0) { Fail "smoke_packs" }
-  } else {
-    Log "Docker smoke skipped (daemon not running)"
-  }
+  if (-not (Wait-DockerReady)) { Fail "Docker not running" }
+  Log "Docker pack smoke..."
+  & $uv run python scripts/smoke_packs.py
+  if ($LASTEXITCODE -ne 0) { Fail "smoke_packs" }
 }
 
 Log "ALL QA PASSED"

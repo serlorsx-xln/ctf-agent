@@ -11,10 +11,18 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from typing import Any
 
 logger = logging.getLogger("backend.agents.live")
+
+if sys.platform == "win32":
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
 
 _lock = threading.Lock()
 _stream_tag: str | None = None
@@ -72,6 +80,9 @@ def emit_line(line: str) -> None:
     _disk_tee(text)
     try:
         print(text, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(enc, errors="replace").decode(enc, errors="replace"), flush=True)
     except (BrokenPipeError, OSError):
         pass
     logger.debug("%s", text)

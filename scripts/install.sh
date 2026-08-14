@@ -21,6 +21,8 @@ Artemis install — Python 3.14 + uv + Bun + Docker L0 (+ optional pack warm).
   bash scripts/install.sh              # deps + L0 image
   bash scripts/install.sh --full       # also warm common pack caches (slow)
   bash scripts/install.sh --skip-docker  # no docker build (CI / no daemon)
+
+Platforms: macOS (Intel/ARM), Linux, WSL2 (use this script, not .ps1).
 EOF
       exit 0
       ;;
@@ -28,8 +30,26 @@ EOF
   esac
 done
 
+export PYTHONIOENCODING=utf-8
+
 log() { printf '==> %s\n' "$*"; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+detect_platform() {
+  local uname_s uname_m
+  uname_s="$(uname -s 2>/dev/null || echo unknown)"
+  uname_m="$(uname -m 2>/dev/null || echo unknown)"
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    log "Platform: WSL2 ($uname_m)"
+  elif [[ "$uname_s" == "Darwin" ]]; then
+    log "Platform: macOS ($uname_m)"
+  elif [[ "$uname_s" == "Linux" ]]; then
+    log "Platform: Linux ($uname_m)"
+  else
+    log "Platform: $uname_s ($uname_m)"
+  fi
+}
 
 install_uv() {
   if have uv; then
@@ -75,6 +95,19 @@ pick_docker_host() {
   return 1
 }
 
+wait_docker() {
+  local i
+  for i in $(seq 1 72); do
+    pick_docker_host || true
+    if docker_ready; then
+      return 0
+    fi
+    [[ "$i" -eq 1 ]] && log "Waiting for Docker (start Desktop / Colima / system daemon)…"
+    sleep 5
+  done
+  return 1
+}
+
 build_l0() {
   log "Building ctf-sandbox-core (L0)…"
   docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
@@ -90,19 +123,63 @@ build_donors() {
   docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
 }
 
+install_cli() {
+  local bindir="${HOME}/.local/bin"
+  local share="${HOME}/.local/share/artemis"
+  mkdir -p "$bindir" "$share"
+  printf '%s\n' "${REPO_ROOT}" > "${share}/install-path.txt"
+  # Wrapper (not a symlink) so a later launch from a moved USB can refresh the path.
+  cat > "${bindir}/artemis" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+FILE="${HOME}/.local/share/artemis/install-path.txt"
+if [[ -n "${ARTEMIS_REPO_ROOT:-}" && -x "${ARTEMIS_REPO_ROOT}/chassis/bin/artemis" ]]; then
+  exec "${ARTEMIS_REPO_ROOT}/chassis/bin/artemis" "$@"
+fi
+if [[ -f "$FILE" ]]; then
+  REPO="$(tr -d '\r\n' < "$FILE")"
+  if [[ -x "${REPO}/chassis/bin/artemis" ]]; then
+    exec "${REPO}/chassis/bin/artemis" "$@"
+  fi
+fi
+echo "Artemis repo not found. cd to the checkout and run: bash scripts/install.sh" >&2
+exit 1
+EOF
+  chmod +x "${bindir}/artemis"
+  log "Global command: artemis (open a new terminal)"
+}
+
+sync_python_deps() {
+  # External/USB volumes often cannot hardlink; copy avoids partial pydantic_ai installs.
+  export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+  uv sync --python 3.14
+  if ! uv run python -c "from pydantic_ai.usage import RunUsage" 2>/dev/null; then
+    warn "Repairing incomplete pydantic-ai install…"
+    uv sync --reinstall-package pydantic-ai-slim --reinstall-package pydantic-ai --python 3.14
+    uv run python -c "from pydantic_ai.usage import RunUsage" \
+      || { echo "pydantic-ai install failed" >&2; exit 1; }
+  fi
+}
+
+detect_platform
 log "Artemis install @ ${REPO_ROOT}"
 install_uv
 install_bun
+export PATH="${HOME}/.local/bin:${HOME}/.bun/bin:${PATH:-}"
 
 log "Python deps (uv sync, Python 3.14)…"
-uv sync --python 3.14
+sync_python_deps
 
 log "TUI deps (bun install in chassis/)…"
-( cd chassis && bun install )
+if ! ( cd chassis && bun install ); then
+  warn "bun install failed (often missing native build tools) — retrying with --ignore-scripts"
+  ( cd chassis && bun install --ignore-scripts )
+fi
+
+install_cli
 
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
-  pick_docker_host || true
-  if docker_ready; then
+  if wait_docker; then
     build_l0
     if [[ "$FULL" -eq 1 ]]; then
       build_donors
@@ -112,19 +189,25 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
       uv run artemis setup -v
     fi
   else
-    log "Docker not running — skipped image build."
-    log "  Start Docker Desktop / Colima, then: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core ."
+    warn "Docker not running — skipped image build."
+    warn "  macOS: open Docker Desktop or run 'colima start'"
+    warn "  Linux: start docker service"
+    warn "  WSL2: enable Docker Desktop WSL integration"
+    warn "  Then: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core ."
   fi
 else
   log "Skipping Docker (--skip-docker)."
 fi
 
+log "Running verify-install…"
+bash scripts/verify-install.sh $( [[ "$SKIP_DOCKER" -eq 1 ]] && echo --skip-docker )
+
 cat <<EOF
 
 Artemis install complete.
 
-  Launch TUI:     ./chassis/bin/artemis
-  Headless:       uv run artemis swarm --challenge PATH --models 'cursor/composer-2.5' -v
+  Open a NEW terminal, then run:  artemis
+  Headless:       artemis swarm --challenge PATH --models 'cursor/composer-2.5' -v
   QA smoke:       bash scripts/qa.sh
   Connect keys:   open TUI → /connect
 

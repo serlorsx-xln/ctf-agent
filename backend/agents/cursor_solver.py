@@ -241,16 +241,6 @@ class CursorSolver:
     async def start(self) -> None:
         from backend.agents.solver_control import start_sandbox_basics
 
-        container_arch, distfile_names = await start_sandbox_basics(
-            self.sandbox, self.meta, self.challenge_dir
-        )
-        self._system_prompt = SOLVER_PREAMBLE + build_prompt(
-            self.meta,
-            distfile_names,
-            container_arch=container_arch,
-            has_named_tools=True,
-        )
-
         self._api_key = resolve_api_key(self.settings)
         self._workdir = tempfile.TemporaryDirectory(prefix="ctf-cursor-")
         workdir = Path(self._workdir.name)
@@ -281,7 +271,25 @@ class CursorSolver:
             agents_md += "\n" + skill_body + "\n"
         (workdir / "AGENTS.md").write_text(agents_md, encoding="utf-8")
 
-        self._client = await acquire_client(workspace=str(workdir))
+        sandbox_result, client_result = await asyncio.gather(
+            start_sandbox_basics(self.sandbox, self.meta, self.challenge_dir),
+            acquire_client(),
+            return_exceptions=True,
+        )
+        if isinstance(client_result, BaseException):
+            raise client_result
+        self._client = client_result
+        if isinstance(sandbox_result, BaseException):
+            await release_client()
+            self._client = None
+            raise sandbox_result
+        container_arch, distfile_names = sandbox_result
+        self._system_prompt = SOLVER_PREAMBLE + build_prompt(
+            self.meta,
+            distfile_names,
+            container_arch=container_arch,
+            has_named_tools=True,
+        )
         try:
             self._agent = await self._create_agent()
         except Exception:
@@ -322,14 +330,13 @@ class CursorSolver:
                 pass
             self._agent = None
 
-        workdir = str(self._workdir.name)
         try:
             # Prefer the live shared view (sibling may have force-recreated).
             live = await current_client()
             if live is not None:
                 self._client = live
             elif self._client is None:
-                self._client = await acquire_client(workspace=workdir)
+                self._client = await acquire_client()
             self._agent = await self._create_agent()
         except Exception as e:
             logger.warning(
@@ -338,7 +345,7 @@ class CursorSolver:
                 e,
             )
             # Keep our ref count; replace the underlying shared bridge process.
-            self._client = await force_recreate_client(workspace=workdir)
+            self._client = await force_recreate_client()
             self._agent = await self._create_agent()
 
         self._infra_recovery = True

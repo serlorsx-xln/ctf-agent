@@ -44,7 +44,7 @@ def fake_swarm_script(tmp_path: Path, repo_root: str) -> str:
 def _patch_subprocess_exec(monkeypatch: pytest.MonkeyPatch, fake_swarm_script: str) -> None:
     """Replace the swarm CLI spawn with the fake swarm script."""
     import backend.daemon.supervisor as sup_mod
-    from backend.subprocess_platform import detached_subprocess_kwargs
+    from backend.subprocess_platform import swarm_subprocess_kwargs
 
     orig = sup_mod.asyncio.create_subprocess_exec
 
@@ -52,10 +52,8 @@ def _patch_subprocess_exec(monkeypatch: pytest.MonkeyPatch, fake_swarm_script: s
         return await orig(
             sys.executable,
             fake_swarm_script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
             env=kw.get("env", os.environ.copy()),
-            **detached_subprocess_kwargs(),
+            **swarm_subprocess_kwargs(),
         )
 
     monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
@@ -181,6 +179,7 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
         encoding="utf-8",
     )
     import backend.daemon.supervisor as sup_mod
+    from backend.subprocess_platform import swarm_subprocess_kwargs
 
     orig = sup_mod.asyncio.create_subprocess_exec
 
@@ -188,10 +187,8 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
         return await orig(
             sys.executable,
             str(long_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
             env=kw.get("env", os.environ.copy()),
+            **swarm_subprocess_kwargs(),
         )
 
     monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
@@ -240,6 +237,7 @@ def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
         encoding="utf-8",
     )
     import backend.daemon.supervisor as sup_mod
+    from backend.subprocess_platform import swarm_subprocess_kwargs
 
     orig = sup_mod.asyncio.create_subprocess_exec
 
@@ -247,10 +245,8 @@ def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
         return await orig(
             sys.executable,
             str(long_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
             env=kw.get("env", os.environ.copy()),
+            **swarm_subprocess_kwargs(),
         )
 
     monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)

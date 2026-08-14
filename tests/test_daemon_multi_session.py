@@ -47,7 +47,7 @@ def test_many_sessions_spawn_without_cap(
         encoding="utf-8",
     )
     import backend.daemon.supervisor as sup_mod
-    from backend.subprocess_platform import detached_subprocess_kwargs
+    from backend.subprocess_platform import swarm_subprocess_kwargs
 
     orig = sup_mod.asyncio.create_subprocess_exec
 
@@ -55,10 +55,8 @@ def test_many_sessions_spawn_without_cap(
         return await orig(
             sys.executable,
             str(long_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
             env=kw.get("env", os.environ.copy()),
-            **detached_subprocess_kwargs(),
+            **swarm_subprocess_kwargs(),
         )
 
     monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)

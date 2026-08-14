@@ -4,6 +4,7 @@
  */
 import type { CommandModule } from "yargs"
 import { spawn } from "child_process"
+import { existsSync } from "fs"
 import path from "path"
 
 function pythonCmd(): { cmd: string; prefix: string[] } {
@@ -12,6 +13,13 @@ function pythonCmd(): { cmd: string; prefix: string[] } {
     (process.env.ARTEMIS_CHASSIS_ROOT
       ? path.resolve(process.env.ARTEMIS_CHASSIS_ROOT, "..")
       : process.cwd())
+  const venv =
+    process.platform === "win32"
+      ? path.join(repo, ".venv", "Scripts", "python.exe")
+      : path.join(repo, ".venv", "bin", "python")
+  if (existsSync(venv)) {
+    return { cmd: venv, prefix: ["-m", "backend.cli", "swarm"] }
+  }
   return { cmd: "uv", prefix: ["run", "--directory", repo, "artemis", "swarm"] }
 }
 

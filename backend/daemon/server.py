@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Any
 
 from backend.daemon import handlers as handlers_mod
@@ -503,10 +504,36 @@ class _PeerConn:
 
 
 async def _async_main() -> None:
+    from backend.cache import cache_dir
+    from backend.process_hygiene import cleanup_orphan_cursor_bridges
+
+    log_dir = cache_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "daemon.log"
+    handlers: list[logging.Handler] = [
+        logging.FileHandler(log_path, encoding="utf-8"),
+    ]
+    # Also mirror to stderr when it is a real console (manual `python -m` debug).
+    try:
+        if (
+            sys.stderr is not None
+            and not getattr(sys.stderr, "closed", False)
+            and (sys.stderr.isatty() or os.environ.get("ARTEMIS_DAEMON_LOG_STDERR") == "1")
+        ):
+            handlers.append(logging.StreamHandler(sys.stderr))
+    except OSError:
+        pass
     logging.basicConfig(
         level=os.environ.get("ARTEMIS_DAEMON_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
+    try:
+        cleanup_orphan_cursor_bridges()
+    except Exception:
+        logger.debug("orphan bridge cleanup at daemon start failed", exc_info=True)
+
     daemon = Daemon()
     await daemon.start()
 
@@ -529,9 +556,16 @@ async def _async_main() -> None:
         except Exception:
             logger.debug("daemon.shutdown failed", exc_info=True)
         handlers_mod.cancel_pending_dialogs()
+        try:
+            cleanup_orphan_cursor_bridges()
+        except Exception:
+            logger.debug("orphan bridge cleanup at daemon shutdown failed", exc_info=True)
 
 
 def main() -> None:
+    from backend.stdio_platform import ensure_standard_streams
+
+    ensure_standard_streams()
     try:
         asyncio.run(_async_main())
     except KeyboardInterrupt:

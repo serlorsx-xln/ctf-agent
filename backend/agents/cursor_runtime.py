@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ _client: AsyncClient | None = None  # owns the bridge subprocess
 _agent_client: AsyncClient | None = None  # timeout-tuned view for agents
 _refs = 0
 _token_patch_applied = False
+_bridge_workspace: str | None = None
 
 # ObserveRun streams must outlive long bash tools (crypto factoring, memory
 # scans). SDK default stream timeout is 600s — that kills productive turns.
@@ -82,6 +84,26 @@ def _timeout_view(owner: AsyncClient) -> AsyncClient:
     return owner.with_options(unary_timeout=unary, stream_timeout=stream)
 
 
+def shared_bridge_workspace() -> str:
+    """Stable temp tree for the process-wide Cursor SDK bridge.
+
+    Solvers still use their own ``LocalAgentOptions.cwd``. The bridge must not
+    bind to the first solver's ephemeral dir (that directory can vanish while
+    siblings are still running).
+    """
+    global _bridge_workspace
+    if _bridge_workspace and Path(_bridge_workspace).is_dir():
+        return _bridge_workspace
+    root = Path(tempfile.mkdtemp(prefix="ctf-cursor-bridge-"))
+    (root / "AGENTS.md").write_text(
+        "# CTF Solver Workspace\n\n"
+        "Use only the custom sandbox tools. Do not use host Shell/Read/Write.\n",
+        encoding="utf-8",
+    )
+    _bridge_workspace = str(root)
+    return _bridge_workspace
+
+
 async def _launch_owner(cwd: str) -> AsyncClient:
     _patch_sdk_auth_tokens()
     logger.info("Launching Cursor SDK bridge (workspace=%s)", cwd)
@@ -89,12 +111,16 @@ async def _launch_owner(cwd: str) -> AsyncClient:
     return await AsyncClient.launch_bridge(workspace=cwd, timeout=60)
 
 
-async def acquire_client(workspace: str | None = None) -> AsyncClient:
-    """Return a process-wide AsyncClient view, launching the bridge on first use."""
+async def acquire_client() -> AsyncClient:
+    """Return a process-wide AsyncClient view, launching the bridge on first use.
+
+    The bridge always uses ``shared_bridge_workspace()``. Each ``CursorSolver``
+    still sets its own cwd via ``LocalAgentOptions``.
+    """
     global _client, _agent_client, _refs
     async with _lock:
         if _client is None:
-            cwd = workspace or str(Path.cwd())
+            cwd = shared_bridge_workspace()
             _client = await _launch_owner(cwd)
             _agent_client = _timeout_view(_client)
         _refs += 1
@@ -108,7 +134,7 @@ async def current_client() -> AsyncClient | None:
         return _agent_client
 
 
-async def force_recreate_client(workspace: str | None = None) -> AsyncClient:
+async def force_recreate_client() -> AsyncClient:
     """Kill and relaunch the shared bridge (poisoned session / dead process).
 
     Callers that already hold a ref keep their ref count; only the underlying
@@ -124,7 +150,7 @@ async def force_recreate_client(workspace: str | None = None) -> AsyncClient:
                 logger.warning("Error closing old bridge during recreate: %s", e)
             _client = None
             _agent_client = None
-        cwd = workspace or str(Path.cwd())
+        cwd = shared_bridge_workspace()
         _client = await _launch_owner(cwd)
         _agent_client = _timeout_view(_client)
         assert _agent_client is not None

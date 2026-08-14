@@ -258,6 +258,27 @@ class Handlers:
         text = await self.supervisor.stop(session_id=session)
         return {"text": text}
 
+    async def _h_swarm_replay(self, _payload: dict, *, session: str) -> dict:
+        """Re-push roster + log tail when the TUI missed boot/swarm_log pushes."""
+        if not self.supervisor.is_running(session):
+            return {"ok": True, "running": False}
+        sess = self.state.get_session(session)
+        challenge = str(sess.get("challenge_dir") or "").strip()
+        roster = self.supervisor.last_roster(session)
+        models = self.supervisor.last_models(session)
+        if roster:
+            self.state.broadcast(
+                {
+                    "type": "swarm_roster",
+                    "session": session,
+                    "agents": list(roster),
+                    "models": list(models),
+                }
+            )
+        for text in self.supervisor.replay_tail(challenge or None, session):
+            self.state.broadcast({"type": "swarm_log", "session": session, "text": text})
+        return {"ok": True, "running": True}
+
     # ---- dialog answers (TUI → daemon → swarm) --------------------------
     async def _h_flag_confirm_answer(self, payload: dict, *, session: str) -> dict:
         rid = payload.get("request_id")

@@ -405,6 +405,11 @@ class DaemonClient {
     }
   }
 
+  /** Drop stale replay while flags→mode→models dialogs are open — never drop a live run. */
+  private shouldDropSwarmPush(): boolean {
+    return this.solveFlowBusy[0]() && !this.swarmRunning[0]()
+  }
+
   private dispatch(msg: Envelope): void {
     const t = msg.type
     // Drop pushes stamped for another OpenCode session (multi-window daemon).
@@ -451,7 +456,7 @@ class DaemonClient {
         this.clearFlagConfirm(msg.request_id ? String(msg.request_id) : undefined)
         break
       case "flags_ask_request": {
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         const faReq = {
           request_id: String(msg.request_id),
           default: Number(msg.default ?? 1),
@@ -472,11 +477,11 @@ class DaemonClient {
       }
       case "swarm_log":
         // During flags/mode/models gate, ignore reconnect replay / late old logs.
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         this.appendSwarmLog(String(msg.text ?? ""))
         break
       case "boot":
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         this.swarmRunning[1](true)
         // A "Starting swarm" boot line begins a fresh run → reset the buffer.
         if (String(msg.text ?? "").startsWith("Starting swarm")) {
@@ -493,7 +498,7 @@ class DaemonClient {
         }
         break
       case "swarm_roster": {
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         const agents = Array.isArray(msg.agents)
           ? (msg.agents as unknown[]).map((a) => String(a)).filter(Boolean)
           : []
@@ -517,12 +522,12 @@ class DaemonClient {
         }
         break
       case "swarm_adopted":
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         this.swarmRunning[1](true)
         this.adoptStartedAt(msg.started_at)
         break
       case "replay_done": {
-        if (this.solveFlowBusy[0]()) break
+        if (this.shouldDropSwarmPush()) break
         // Reconcile running state after reconnect. If the log already has a
         // terminal outcome (quota / CORRECT) but the process is still in
         // sandbox cleanup, keep the UI unlocked and do not reopen the gate.
@@ -642,12 +647,14 @@ class DaemonClient {
     this.swarmEndedAt[1](null)
     this.usage[1](null)
     try {
-      return await this.request("swarm_start", {
+      const res = await this.request("swarm_start", {
         models: opts.models,
         flags_required: opts.flags_required,
         force: opts.force !== false,
         auto_confirm: opts.auto_confirm === true,
       })
+      this.scheduleSwarmReplayIfEmpty()
+      return res
     } catch (e) {
       // RPC timeout/error can race a successful spawn — only clear UI if daemon idle.
       const stillRunning = await this.reconcileSwarmRunning()
@@ -657,6 +664,19 @@ class DaemonClient {
       }
       throw e
     }
+  }
+
+  /** Recover missed boot/log pushes (Windows race / dialog timing). */
+  scheduleSwarmReplayIfEmpty(): void {
+    queueMicrotask(() => {
+      setTimeout(() => {
+        if (!this.swarmRunning[0]()) return
+        const ev = this.swarmEvents[0]()
+        const hasBoot = ev.some((e) => e.kind === "boot")
+        if (hasBoot || hasTerminalSolveOutcome(ev, this.isMultiAgent())) return
+        void this.request("swarm_replay", {}).catch(() => {})
+      }, 700)
+    })
   }
 
   /** Ask daemon whether this session's swarm is still live. */

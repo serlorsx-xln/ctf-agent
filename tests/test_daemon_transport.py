@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from backend.daemon.server import Daemon
-from backend.daemon.transport import daemon_alive, open_connection, uses_tcp
+from backend.daemon.transport import daemon_alive, daemon_alive_async, open_connection, uses_tcp
 from tests.daemon_fixtures import daemon_cache_dir
 
 
@@ -31,11 +31,11 @@ async def _start_daemon() -> tuple[Daemon, asyncio.Task]:
     d = Daemon()
     await d.start()
     task = asyncio.create_task(d.serve())
-    for _ in range(20):
-        if daemon_alive():
+    for _ in range(40):
+        if await daemon_alive_async(timeout=0.2):
             break
         await asyncio.sleep(0.05)
-    assert daemon_alive()
+    assert await daemon_alive_async(timeout=0.5)
     return d, task
 
 
@@ -60,6 +60,42 @@ def test_daemon_alive_false_before_tcp_bind(monkeypatch: pytest.MonkeyPatch) -> 
     cache = daemon_cache_dir("artemis-alive")
     monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
     assert daemon_alive() is False
+
+
+def test_daemon_alive_rejects_dumb_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare TCP accept() without Artemis hello must not count as alive."""
+    import socket
+    import threading
+
+    cache = daemon_cache_dir("artemis-dumb")
+    monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
+    monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "1")
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = int(srv.getsockname()[1])
+    (cache / "daemon.port").write_text(f"{port}\n", encoding="utf-8")
+    monkeypatch.setenv("ARTEMIS_DAEMON_PORT", str(port))
+
+    def _accept_once() -> None:
+        try:
+            conn, _ = srv.accept()
+            conn.close()
+        except OSError:
+            pass
+
+    t = threading.Thread(target=_accept_once, daemon=True)
+    t.start()
+    try:
+        assert daemon_alive(timeout=0.5) is False
+    finally:
+        try:
+            srv.close()
+        except OSError:
+            pass
+        t.join(timeout=1.0)
 
 
 def test_tcp_daemon_roundtrip(tcp_daemon_env: Path) -> None:

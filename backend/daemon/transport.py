@@ -153,18 +153,85 @@ async def open_connection() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]
     return await asyncio.open_unix_connection(addr)
 
 
+def _tcp_endpoint_configured() -> bool:
+    if not uses_tcp():
+        return True
+    if daemon_tcp_port() > 0:
+        return True
+    env_port = (os.environ.get("ARTEMIS_DAEMON_PORT") or "").strip()
+    return env_port.isdigit() and int(env_port) > 0
+
+
 def daemon_alive(timeout: float = 0.25) -> bool:
-    if uses_tcp():
-        port = daemon_tcp_port()
-        env_port = (os.environ.get("ARTEMIS_DAEMON_PORT") or "").strip()
-        if port <= 0 and not (env_port.isdigit() and int(env_port) > 0):
-            return False
+    """True when the Artemis daemon endpoint looks live.
+
+    * Outside an asyncio loop (bootstrap / CLI): perform a full NDJSON ``hello``
+      handshake so a random listener on the port/sock cannot spoof readiness.
+    * Inside a running loop: connect-only. A full handshake would deadlock
+      (the accept loop cannot run while this thread blocks on ``recv``).
+    """
+    if not _tcp_endpoint_configured():
+        return False
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _daemon_alive_handshake(timeout)
+    return _daemon_alive_connect(timeout)
+
+
+async def daemon_alive_async(timeout: float = 0.25) -> bool:
+    """Async-safe full protocol probe (runs handshake in a worker thread)."""
+    if not _tcp_endpoint_configured():
+        return False
+    return await asyncio.to_thread(_daemon_alive_handshake, timeout)
+
+
+def _daemon_alive_connect(timeout: float) -> bool:
     try:
         s = sync_connect(timeout=timeout)
         s.close()
         return True
     except OSError:
         return False
+
+
+def _daemon_alive_handshake(timeout: float) -> bool:
+    import json
+
+    from backend.daemon import protocol
+
+    try:
+        s = sync_connect(timeout=timeout)
+    except OSError:
+        return False
+    try:
+        s.settimeout(max(float(timeout), 0.15))
+        hello = protocol.make_message(
+            type="hello",
+            id="alive",
+            role=protocol.ROLE_USAGE,
+        )
+        s.sendall(protocol.encode(hello))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                return False
+            buf += chunk
+            if len(buf) > 65536:
+                return False
+        line = buf.split(b"\n", 1)[0]
+        msg = json.loads(line.decode("utf-8", errors="replace"))
+        if msg.get("type") == "error":
+            return False
+        return msg.get("type") == "hello" and msg.get("ok", True) is not False
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def daemon_configured_in_env() -> bool:

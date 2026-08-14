@@ -261,36 +261,38 @@ async def _stop(payload: dict) -> str:
 
 
 def _pid_command(pid: int) -> str:
-    import subprocess
+    from backend.process_hygiene import pid_command
 
-    try:
-        out = subprocess.check_output(
-            ["ps", "-p", str(pid), "-o", "command="],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-        return out.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return ""
+    return pid_command(pid)
+
+
+def _windows_executable_looks_like_python(pid: int) -> bool:
+    from backend.process_hygiene import windows_image_looks_like_python
+
+    return windows_image_looks_like_python(pid)
 
 
 def _is_artemis_race_pid(pid: int) -> bool:
     """True if pid exists and looks like our swarm (not an unrelated recycled pid)."""
+    import sys
+
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError, OSError):
         return False
-    cmd = _pid_command(pid).lower()
+    from backend.process_hygiene import is_artemis_swarm_command
+
+    cmd = _pid_command(pid)
     if not cmd:
-        return True  # exists but can't read cmdline — treat as live
-    return (
-        "artemis race" in cmd
-        or "artemis swarm" in cmd
-        or "backend.shell.bridge race" in cmd
-        or "backend.shell.bridge swarm" in cmd
-        or "shell.bridge race" in cmd
-        or "shell.bridge swarm" in cmd
-    )
+        # Windows: CommandLine is often empty — fall back to image name so
+        # pidfiles for live python/uv swarms are not discarded (orphan risk).
+        # Non-python recycled PIDs stay False (do not kill strangers).
+        if sys.platform == "win32":
+            return _windows_executable_looks_like_python(pid)
+        # Unix: process exists but cmdline unreadable (permissions) — keep prior
+        # conservative "treat as live" behaviour for adopt/stop.
+        return True
+    return is_artemis_swarm_command(cmd)
 
 def _kill_pid_tree(pid: int) -> None:
     """Best-effort kill process and children (Unix + Windows)."""
@@ -581,33 +583,34 @@ async def _swarm_direct(payload: dict) -> str:
     repo = os.environ.get("ARTEMIS_REPO_ROOT") or str(
         Path(__file__).resolve().parents[2]
     )
-    cmd = [
-        "uv",
-        "run",
-        "--directory",
-        repo,
-        "artemis",
-        "swarm",
+    swarm_args = [
         "--challenge",
         challenge,
         "--flags-required",
         str(flags),
     ]
     for m in models:
-        cmd.extend(["--models", m])
+        swarm_args.extend(["--models", m])
     if payload.get("auto_confirm"):
-        cmd.append("--auto-confirm-flags")
+        swarm_args.append("--auto-confirm-flags")
 
     # TUI owns the keyboard — solvers ask via FLAG_CONFIRM file handshake + dialog.
     from backend.shell.sandbox_session import swarm_log_path_for_session
-    from backend.subprocess_platform import detached_subprocess_kwargs
+    from backend.subprocess_platform import (
+        sanitize_child_env,
+        swarm_command,
+        swarm_subprocess_kwargs,
+    )
 
-    env = {
-        **os.environ,
-        "ARTEMIS_FLAG_CONFIRM": "1",
-        "ARTEMIS_SESSION_ID": sid,
-        "ARTEMIS_SWARM_LOG": str(swarm_log_path_for_session(challenge, sid)),
-    }
+    cmd = swarm_command(repo, swarm_args)
+    env = sanitize_child_env()
+    env.update(
+        {
+            "ARTEMIS_FLAG_CONFIRM": "1",
+            "ARTEMIS_SESSION_ID": sid,
+            "ARTEMIS_SWARM_LOG": str(swarm_log_path_for_session(challenge, sid)),
+        }
+    )
     sys.stdout.write(
         f"[artemis] boot Starting swarm · {Path(challenge).name} · flags={flags}\n"
         f"[artemis] boot models={', '.join(models)}\n"
@@ -615,10 +618,9 @@ async def _swarm_direct(payload: dict) -> str:
     sys.stdout.flush()
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        cwd=repo,
         env=env,
-        **detached_subprocess_kwargs(),
+        **swarm_subprocess_kwargs(),
     )
     chunks: list[str] = []
     try:

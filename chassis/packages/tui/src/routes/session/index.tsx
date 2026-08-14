@@ -2451,6 +2451,17 @@ function ArtemisSwarm(props: ToolProps) {
     const id = setInterval(() => setNow(Date.now()), 1000)
     onCleanup(() => clearInterval(id))
   })
+  // Windows / reconnect: footer shows Solving but Solve card missed daemon pushes.
+  createEffect(() => {
+    if (!processAlive()) return
+    if (bootLines().length > 0 || agentStarted()) return
+    const t = setTimeout(() => {
+      if (!processAlive()) return
+      if (bootLines().length > 0 || agentStarted()) return
+      daemon.scheduleSwarmReplayIfEmpty()
+    }, 1200)
+    onCleanup(() => clearTimeout(t))
+  })
   const elapsedLabel = createMemo(() => {
     const started = daemon.swarmStartedAt[0]()
     if (started == null) return null

@@ -32,7 +32,33 @@ Headless / coordinator multi-challenge mode remains available for batch runs (`u
 
 ## Quick Start
 
-**One-shot install (all OS):**
+**Give a friend one installer file (empty machine):**
+
+```bash
+# You (once): build single-file installers + run structure self-test
+bash scripts/pack-installer.sh --test
+# → dist/Artemis-Install.sh   (~10 MB, macOS/Linux/WSL)
+# → dist/Artemis-Install.ps1  (~16 MB, Windows native)
+# → dist/INSTALL.txt          (all platforms / options)
+
+# Friend — pick ONE file for their OS (see dist/INSTALL.txt):
+bash Artemis-Install.sh                              # macOS / Linux / WSL2
+# Windows: double-click Install Artemis.bat (needs Artemis-Install.ps1 in same folder)
+
+# After install: open a NEW terminal, then run:  artemis
+```
+
+After install: open a **new** terminal → `artemis` → `/connect` → paste challenge.
+
+**Verify / full install test:**
+
+```bash
+bash scripts/verify-install.sh
+bash scripts/test-install.sh          # Mac fresh install + Windows remote smoke
+powershell -File scripts\verify-install.ps1
+```
+
+**One-shot install (already have the repo):**
 
 ```bash
 # macOS / Linux / WSL
@@ -185,9 +211,8 @@ Flags are accepted locally via `submit_flag` (no external scoreboard URL/token r
 
 | OS | Command |
 |---|---|
-| macOS / Linux | `uv run artemis` or `./chassis/bin/artemis` |
-| Windows (native) | `chassis\bin\artemis.cmd` or `powershell -File chassis\bin\artemis.ps1` |
-| WSL2 | same as Linux inside WSL |
+| macOS / Linux / WSL | `artemis` (after install) or `./chassis/bin/artemis` |
+| Windows | `artemis` (after install; open a new terminal first) |
 
 The control-plane daemon uses a Unix socket on macOS/Linux and **TCP localhost**
 on Windows (port written to `~/.cache/artemis/daemon.port`).

@@ -27,10 +27,6 @@ def log_agent(tag: str) -> Iterator[None]:
         _current_agent.reset(token)
 
 
-def current_log_agent() -> str:
-    return _current_agent.get()
-
-
 class AgentTagFilter(logging.Filter):
     """Prefix untagged records with the owning runner.
 

@@ -18,9 +18,15 @@ from typing import Any
 
 from backend.daemon.session_id import DEFAULT_SESSION_ID, normalize_session_id
 from backend.daemon.state import DaemonState
-from backend.subprocess_platform import detached_subprocess_kwargs
+from backend.subprocess_platform import swarm_command, swarm_subprocess_kwargs
 
 logger = logging.getLogger(__name__)
+
+_FATAL_STDIO_MARKERS = (
+    "Fatal Python error: init_sys_streams",
+    "can't initialize sys standard streams",
+    "OSError: [Errno 9] Bad file descriptor",
+)
 
 #: How many tail lines to replay on subscribe / adopt.
 REPLAY_TAIL_LINES = 5000
@@ -64,13 +70,13 @@ def _roster_path(session_id: str | None = None) -> Path:
 
 
 def _legacy_global_pid_path() -> Path:
-    from backend.daemon.socket_path import cache_dir
+    from backend.cache import cache_dir
 
     return cache_dir() / "swarm.pid"
 
 
 def _legacy_race_pid_path() -> Path:
-    from backend.daemon.socket_path import cache_dir
+    from backend.cache import cache_dir
 
     return cache_dir() / "race.pid"
 
@@ -158,16 +164,6 @@ class SwarmSupervisor:
         slot = self._any_live_slot() or self._slots.get(DEFAULT_SESSION_ID)
         return slot.challenge_dir if slot else None
 
-    @property
-    def _last_roster(self) -> list[str]:
-        slot = self._any_live_slot() or self._slots.get(DEFAULT_SESSION_ID)
-        return list(slot.last_roster) if slot else []
-
-    @property
-    def _last_models(self) -> list[str]:
-        slot = self._any_live_slot() or self._slots.get(DEFAULT_SESSION_ID)
-        return list(slot.last_models) if slot else []
-
     def _any_live_slot(self) -> SwarmSlot | None:
         for slot in self._slots.values():
             if self._slot_is_running(slot):
@@ -224,28 +220,6 @@ class SwarmSupervisor:
                 _read_running_pid(DEFAULT_SESSION_ID) is not None
             )
         return self._slot_is_running(self._get_slot(session_id))
-
-    def running_count(self) -> int:
-        sids = set(self._slots)
-        sids.add(DEFAULT_SESSION_ID)
-        # Also count disk pidfiles for sessions not yet in memory.
-        try:
-            from backend.cache import cache_dir
-
-            root = cache_dir() / "sessions"
-            if root.is_dir():
-                for child in root.iterdir():
-                    if child.is_dir():
-                        sids.add(child.name)
-        except Exception:
-            pass
-        n = 0
-        for sid in sids:
-            if _read_running_pid(sid) is not None or (
-                sid in self._slots and self._slot_is_running(self._slots[sid])
-            ):
-                n += 1
-        return n
 
     def started_at_ms(self, session_id: str | None = None) -> int | None:
         try:
@@ -330,32 +304,29 @@ class SwarmSupervisor:
         repo = os.environ.get("ARTEMIS_REPO_ROOT") or str(
             Path(__file__).resolve().parents[2]
         )
-        cmd = [
-            "uv",
-            "run",
-            "--directory",
-            repo,
-            "artemis",
-            "swarm",
-            "--challenge",
-            challenge,
-        ]
+        swarm_args = ["--challenge", challenge]
         if flags_required is not None:
-            cmd.extend(["--flags-required", str(flags_required)])
+            swarm_args.extend(["--flags-required", str(flags_required)])
         for m in models:
-            cmd.extend(["--models", m])
+            swarm_args.extend(["--models", m])
         if auto_confirm:
-            cmd.append("--auto-confirm-flags")
+            swarm_args.append("--auto-confirm-flags")
+        cmd = swarm_command(repo, swarm_args)
 
         from backend.daemon.transport import child_daemon_env
+        from backend.subprocess_platform import sanitize_child_env
 
-        env = {
-            **os.environ,
-            **child_daemon_env(),
-            "ARTEMIS_FLAG_CONFIRM": "1",
-            "ARTEMIS_SWARM_LOG": str(log_path),
-            "ARTEMIS_SESSION_ID": sid,
-        }
+        env = sanitize_child_env()
+        env.update(
+            {
+                **child_daemon_env(),
+                "ARTEMIS_FLAG_CONFIRM": "1",
+                "ARTEMIS_SWARM_LOG": str(log_path),
+                "ARTEMIS_SESSION_ID": sid,
+            }
+        )
+        # Children must use the project tree as CWD so relative imports / uv fallbacks work.
+        cwd = repo
 
         flags_label = flags_required if flags_required is not None else "?"
         self._broadcast(
@@ -377,13 +348,23 @@ class SwarmSupervisor:
         slot.last_models = list(models)
         self._persist_roster(slot)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-            **detached_subprocess_kwargs(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                env=env,
+                **swarm_subprocess_kwargs(),
+            )
+        except OSError as e:
+            self._broadcast(
+                sid,
+                {
+                    "type": "boot",
+                    "text": f"Failed to start solvers: {e}. Check ~/.cache/artemis/logs/daemon.log",
+                },
+                gen=gen,
+            )
+            raise
         slot.proc = proc
         slot.challenge_dir = challenge
         slot.adopted = False
@@ -405,6 +386,7 @@ class SwarmSupervisor:
         slot = self._get_slot(session_id)
         assert proc.stdout is not None
         lines = 0
+        saw_fatal_stdio = False
         try:
             while True:
                 if gen != slot.generation:
@@ -414,6 +396,8 @@ class SwarmSupervisor:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
                 lines += 1
+                if any(m in text for m in _FATAL_STDIO_MARKERS):
+                    saw_fatal_stdio = True
                 self._broadcast(session_id, {"type": "swarm_log", "text": text}, gen=gen)
         except asyncio.CancelledError:
             raise
@@ -426,6 +410,22 @@ class SwarmSupervisor:
                 except Exception:
                     pass
                 code = proc.returncode
+                if saw_fatal_stdio or (code not in (0, None) and lines <= 8):
+                    hint = (
+                        "Solver process crashed during Python startup (bad stdio / stale daemon). "
+                        "Quit Artemis, run: pkill -f 'backend.daemon.server' ; "
+                        "then relaunch. Logs: ~/.cache/artemis/logs/"
+                    )
+                    if saw_fatal_stdio:
+                        hint = (
+                            "Solver hit Fatal Python init_sys_streams / EBADF — usually a "
+                            "detached daemon with broken stdin/stdout or orphan Cursor bridges. "
+                            "Quit Artemis and relaunch (bootstrap clears stale daemon + bridges). "
+                            "See ~/.cache/artemis/logs/daemon.log"
+                        )
+                    self._broadcast(
+                        session_id, {"type": "boot", "text": hint}, gen=gen
+                    )
                 try:
                     from backend.shell.sandbox_session import load_session_state
 
@@ -439,6 +439,12 @@ class SwarmSupervisor:
                 )
                 self._clear_persisted_roster(slot)
                 self.state.set_swarm_meta(session_id, swarm_running=False)
+                try:
+                    from backend.process_hygiene import cleanup_orphan_cursor_bridges
+
+                    await asyncio.to_thread(cleanup_orphan_cursor_bridges)
+                except Exception:
+                    logger.debug("orphan bridge cleanup after swarm exit failed", exc_info=True)
                 try:
                     _pid_path(session_id).unlink(missing_ok=True)
                 except OSError:
@@ -608,6 +614,12 @@ class SwarmSupervisor:
             )
         except Exception:
             logger.debug("cleanup_orphan_containers after stop failed", exc_info=True)
+        try:
+            from backend.process_hygiene import cleanup_orphan_cursor_bridges
+
+            await asyncio.to_thread(cleanup_orphan_cursor_bridges)
+        except Exception:
+            logger.debug("orphan bridge cleanup after stop failed", exc_info=True)
 
     async def _stop_unlocked(self, session_id: str, *, emit_exit: bool = True) -> str:
         sid = normalize_session_id(session_id)

@@ -33,14 +33,6 @@ run_python() {
   fi
 }
 
-cursor_stub_healthy() {
-  curl -sf --max-time 0.5 "http://127.0.0.1:18765/v1/models" >/dev/null 2>&1
-}
-
-daemon_ready() {
-  run_python -c "from backend.daemon.transport import daemon_alive; import sys; sys.exit(0 if daemon_alive() else 1)" 2>/dev/null
-}
-
 BUN_BIN="$(resolve_bun)" || {
   echo "Artemis TUI requires Bun." >&2
   echo "  Install:  curl -fsSL https://bun.sh/install | bash" >&2
@@ -66,86 +58,27 @@ if [[ -f "$REPO/.env" ]]; then
 fi
 unset CURSOR_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY 2>/dev/null || true
 
-# Inject Cursor / Claude / Codex keys saved via TUI /connect (auth.json).
+# Inject keys + start daemon/stub in background (no blocking waits).
+# Credentials on stdout (eval); bootstrap warnings go to bootstrap.log and
+# optionally the terminal if ARTEMIS_BOOTSTRAP_VERBOSE=1.
+_BOOT_ERR="${ARTEMIS_CACHE:-$HOME/.cache/artemis}/logs/bootstrap.err"
+mkdir -p "$(dirname "$_BOOT_ERR")" 2>/dev/null || true
 eval "$(
-  run_python -c '
-from backend.shell.credentials import read_tui_api_keys
-import shlex
-for k, v in read_tui_api_keys().items():
-    print(f"export {k}={shlex.quote(v)}")
-' 2>/dev/null || true
+  run_python "$REPO/scripts/tui_bootstrap.py" --emit export 2>"$_BOOT_ERR" || true
 )"
-
-# Cursor TUI proxy (OpenAI-compatible) — catalog + single CTF flow tool_calls.
-# Reuse a healthy stub; restart only when port is down or stale.
-if command -v curl >/dev/null 2>&1 && cursor_stub_healthy; then
-  : # stub already listening
-else
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -tiTCP:18765 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+if [[ -s "$_BOOT_ERR" ]]; then
+  if [[ "${ARTEMIS_BOOTSTRAP_VERBOSE:-}" == "1" ]]; then
+    cat "$_BOOT_ERR" >&2 || true
+  else
+    echo "artemis: bootstrap warnings (see $_BOOT_ERR or ~/.cache/artemis/logs/)" >&2 || true
   fi
-  run_python -m backend.shell.cursor_llm_stub \
-    >/tmp/artemis-cursor-llm-stub.log 2>&1 &
-  disown 2>/dev/null || true
 fi
-
-# Artemis control-plane daemon (NDJSON over Unix socket or TCP on Windows).
-# Long-lived supervisor: owns session/usage state + swarm subprocess lifecycle.
-# Unlike the stub above we never kill a live daemon: its shutdown stops the
-# swarm, so restarting it here would abort a solve started from another TUI.
-# This spawn is a no-op when one is already bound (it exits on a live socket)
-# and rebinds when the socket is stale, so `git pull` needs a daemon restart.
-# Exiting the TUI (or SIGTERM on the daemon) stops the swarm and reclaims
-# sandbox containers — they must not keep burning CPU/disk after the operator leaves.
-if ! daemon_ready; then
-  run_python -m backend.daemon.server \
-    >/tmp/artemis-daemon.log 2>&1 &
-  disown 2>/dev/null || true
-  for _ in $(seq 1 100); do
-    daemon_ready && break
-    sleep 0.02
-  done
-fi
+unset _BOOT_ERR
 
 cd "$ROOT"
 set +e
-"$BUN_BIN" run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+"$BUN_BIN" --cwd packages/opencode --conditions=browser src/index.ts "$@"
 code=$?
 set -e
-
-# Belt-and-suspenders: if the TUI died before its shutdown hook ran, stop via daemon.
-if daemon_ready; then
-  run_python -c '
-import asyncio, json, uuid
-from backend.daemon.transport import sync_connect
-
-async def _cleanup_orphans() -> None:
-    try:
-        from backend.sandbox import cleanup_orphan_containers
-        await cleanup_orphan_containers()
-    except Exception:
-        pass
-
-try:
-    s = sync_connect(timeout=3.0)
-except OSError:
-    s = None
-if s is not None:
-    try:
-        rid = uuid.uuid4().hex[:12]
-        s.sendall((json.dumps({"v": 1, "id": "h", "type": "hello", "role": "tui"}) + "\n").encode())
-        s.recv(8192)
-        s.sendall((json.dumps({"v": 1, "id": rid, "type": "swarm_stop"}) + "\n").encode())
-        s.recv(8192)
-    except OSError:
-        pass
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
-asyncio.run(_cleanup_orphans())
-' 2>/dev/null || true
-fi
 
 exit "$code"

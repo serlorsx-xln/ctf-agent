@@ -43,3 +43,16 @@ async def test_dispatch_ok_false_preserved(tmp_path, monkeypatch: pytest.MonkeyP
     assert resp is not None
     assert resp.get("ok") is False
     assert "challenge" in str(resp.get("error", "")).lower() or resp.get("error")
+
+
+@pytest.mark.asyncio
+async def test_swarm_replay_when_not_running(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ARTEMIS_CACHE", str(tmp_path))
+    state = DaemonState()
+    supervisor = SwarmSupervisor(state)
+    handlers = Handlers(state, supervisor)
+
+    resp = await handlers.dispatch({"v": 1, "id": "3", "type": "swarm_replay", "session": "s1"})
+    assert resp is not None
+    assert resp.get("ok") is True
+    assert resp.get("running") is False

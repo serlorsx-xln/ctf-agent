@@ -1,42 +1,39 @@
 @echo off
-setlocal
-REM Artemis TUI launcher for Windows (Docker Desktop + Bun + uv).
+setlocal EnableExtensions
+REM Artemis TUI launcher for Windows — no blocking waits before UI.
 set "ROOT=%~dp0.."
 set "REPO=%~dp0..\.."
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
+for %%I in ("%REPO%") do set "REPO=%%~fI"
 set "ARTEMIS=1"
 set "ARTEMIS_CHASSIS_ROOT=%ROOT%"
 set "ARTEMIS_REPO_ROOT=%REPO%"
 if not defined OPENCODE_CONFIG set "OPENCODE_CONFIG=%ROOT%\opencode.json"
-if not defined DOCKER_HOST set "DOCKER_HOST=npipe:////./pipe/docker_engine"
+set "PYTHONIOENCODING=utf-8"
 
 where bun >nul 2>&1 || (
   echo Artemis TUI requires Bun. Install: https://bun.sh
   exit /b 1
 )
-where uv >nul 2>&1 || (
-  echo Artemis requires uv. Install: https://docs.astral.sh/uv/
+
+if exist "%REPO%\.venv\Scripts\python.exe" (
+  set "PYEXE=%REPO%\.venv\Scripts\python.exe"
+) else (
+  echo Run scripts/install.ps1 first.
   exit /b 1
 )
 
-if exist "%REPO%\.venv\Scripts\python.exe" (
-  set "PY=%REPO%\.venv\Scripts\python.exe"
-) else (
-  set "PY=uv run --directory %REPO% python"
+set "CREDS_FILE=%TEMP%\artemis-creds-%RANDOM%.env"
+set "BOOT_ERR=%USERPROFILE%\.cache\artemis\logs\bootstrap.err"
+if not exist "%USERPROFILE%\.cache\artemis\logs" mkdir "%USERPROFILE%\.cache\artemis\logs" >nul 2>&1
+"%PYEXE%" "%REPO%\scripts\tui_bootstrap.py" --emit cmd > "%CREDS_FILE%" 2> "%BOOT_ERR%"
+if exist "%CREDS_FILE%" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%CREDS_FILE%") do set "%%A=%%B"
+  del "%CREDS_FILE%" 2>nul
 )
-
-for /f "delims=" %%K in ('%PY% -c "from backend.shell.credentials import read_tui_api_keys; [print('%s=%%s' %% (k,v)) for k,v in read_tui_api_keys().items()]" 2^>nul') do set "%%K"
-
-%PY% -c "from backend.daemon.transport import daemon_alive; import sys; sys.exit(0 if daemon_alive() else 1)" >nul 2>&1
-if errorlevel 1 (
-  start /b "" %PY% -m backend.daemon.server > "%TEMP%\artemis-daemon.log" 2>&1
-)
-
-curl -sf --max-time 1 http://127.0.0.1:18765/v1/models >nul 2>&1
-if errorlevel 1 (
-  start /b "" %PY% -m backend.shell.cursor_llm_stub > "%TEMP%\artemis-cursor-llm-stub.log" 2>&1
-)
+for %%A in ("%BOOT_ERR%") do if %%~zA GTR 0 echo artemis: bootstrap warnings (see %BOOT_ERR%)
 
 cd /d "%ROOT%"
-bun run --cwd packages/opencode --conditions=browser src/index.ts %*
+bun --cwd packages/opencode --conditions=browser src/index.ts %*
 set "EC=%ERRORLEVEL%"
 exit /b %EC%

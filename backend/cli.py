@@ -221,6 +221,13 @@ def swarm_cmd(
     )
     model_specs = _expand_models(models)
 
+    from backend.models import missing_credentials_error, missing_swarm_credentials
+
+    missing = missing_swarm_credentials(model_specs, settings)
+    if missing:
+        console.print(f"[red]{missing_credentials_error(missing)}[/red]")
+        sys.exit(1)
+
     console.print("[bold]Artemis Swarm[/bold]")
     console.print(f"  Models: {', '.join(model_specs)}")
     if image:
@@ -310,6 +317,10 @@ def _harden_supervised_swarm() -> None:
     ``live_log._emit`` swallow pipe errors so the swarm keeps running detached
     and keeps teeing to the disk log for adopt-on-restart.
     """
+    from backend.stdio_platform import ensure_standard_streams
+
+    ensure_standard_streams()
+
     from backend.daemon.transport import daemon_configured_in_env
 
     if not daemon_configured_in_env():

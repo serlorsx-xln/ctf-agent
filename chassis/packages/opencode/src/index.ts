@@ -1,23 +1,36 @@
-import yargs from "yargs"
+import yargs, { type Argv } from "yargs"
 import { hideBin } from "yargs/helpers"
-import { RunCommand } from "./cli/cmd/run"
-import { ProvidersCommand } from "./cli/cmd/providers"
-import { AgentCommand } from "./cli/cmd/agent"
-import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { FormatError } from "./cli/error"
-import { ServeCommand } from "./cli/cmd/serve"
-import { DebugCommand } from "./cli/cmd/debug"
-import { AttachCommand } from "./cli/cmd/attach"
-import { TuiThreadCommand } from "./cli/cmd/tui"
 import { EOL } from "os"
-import { SessionCommand } from "./cli/cmd/session"
 import { errorMessage } from "./util/error"
 import { Heap } from "./cli/heap"
-import { RaceCommand, SwarmCommand } from "./cli/cmd/race"
 
 const args = hideBin(process.argv)
+
+const SUBCOMMANDS = new Set([
+  "attach",
+  "run",
+  "debug",
+  "providers",
+  "auth",
+  "agent",
+  "serve",
+  "models",
+  "session",
+  "swarm",
+  "race",
+  "completion",
+])
+
+function loadAllCommands(argv: string[]): boolean {
+  if (argv.includes("-h") || argv.includes("--help") || argv.includes("-v") || argv.includes("--version")) {
+    return true
+  }
+  const first = argv[0]
+  return Boolean(first && !first.startsWith("-") && SUBCOMMANDS.has(first))
+}
 
 function show(out: string) {
   const text = out.trimStart()
@@ -29,7 +42,7 @@ function show(out: string) {
   process.stderr.write(out)
 }
 
-const cli = yargs(args)
+let cli: Argv = yargs(args)
   .parserConfiguration({ "populate--": true })
   .scriptName("artemis")
   .wrap(100)
@@ -66,18 +79,36 @@ const cli = yargs(args)
   })
   .usage("Artemis — CTF agent CLI")
   .completion("completion", "generate shell completion script")
-  // Product surface: TUI chat + auth/models + swarm. Non-CTF upstream commands removed.
-  .command(TuiThreadCommand)
-  .command(AttachCommand)
-  .command(RunCommand)
-  .command(DebugCommand)
-  .command(ProvidersCommand)
-  .command(AgentCommand)
-  .command(ServeCommand)
-  .command(ModelsCommand)
-  .command(SessionCommand)
-  .command(SwarmCommand)
-  .command(RaceCommand)
+
+const { TuiThreadCommand } = await import("./cli/cmd/tui")
+cli = cli.command(TuiThreadCommand)
+
+if (loadAllCommands(args)) {
+  const [attach, run, debug, providers, agent, serve, models, session, race] = await Promise.all([
+    import("./cli/cmd/attach"),
+    import("./cli/cmd/run"),
+    import("./cli/cmd/debug"),
+    import("./cli/cmd/providers"),
+    import("./cli/cmd/agent"),
+    import("./cli/cmd/serve"),
+    import("./cli/cmd/models"),
+    import("./cli/cmd/session"),
+    import("./cli/cmd/race"),
+  ])
+  cli = cli
+    .command(attach.AttachCommand)
+    .command(run.RunCommand)
+    .command(debug.DebugCommand)
+    .command(providers.ProvidersCommand)
+    .command(agent.AgentCommand)
+    .command(serve.ServeCommand)
+    .command(models.ModelsCommand)
+    .command(session.SessionCommand)
+    .command(race.SwarmCommand)
+    .command(race.RaceCommand)
+}
+
+cli = cli
   .fail((msg, err) => {
     if (
       msg?.startsWith("Unknown argument") ||

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import shutil
+import sys
+import tarfile
+from pathlib import Path, PurePosixPath
 
 import aiodocker
 
@@ -34,7 +39,8 @@ def _docker_client() -> aiodocker.Docker:
     if host:
         return aiodocker.Docker(url=host)
     if sys.platform == "win32":
-        return aiodocker.Docker(url="npipe:////./pipe/docker_engine")
+        # Docker Desktop 4.x Linux engine (desktop-linux context).
+        return aiodocker.Docker(url="npipe:////./pipe/dockerDesktopLinuxEngine")
     return aiodocker.Docker()
 
 
@@ -241,6 +247,7 @@ async def _docker_cli(*args: str, timeout_s: float = 600) -> tuple[int, str, str
     proc = await asyncio.create_subprocess_exec(
         "docker",
         *args,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=os.environ.copy(),
@@ -258,3 +265,112 @@ async def _docker_cli(*args: str, timeout_s: float = 600) -> tuple[int, str, str
         out_b.decode("utf-8", errors="replace"),
         err_b.decode("utf-8", errors="replace"),
     )
+
+
+_WIN_INVALID_PATH_CHARS = str.maketrans(
+    {ord(c): ord("_") for c in '<>:"|?*'}
+    | {ord(c): ord("_") for c in "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09"}
+)
+
+
+def _sanitize_windows_path(name: str) -> str:
+    """Make a POSIX tar member path safe for extraction onto NTFS."""
+    parts: list[str] = []
+    for part in PurePosixPath(name).parts:
+        if part in (".", "..", "/"):
+            continue
+        parts.append(part.translate(_WIN_INVALID_PATH_CHARS))
+    return "/".join(parts)
+
+
+def _extract_tar_to_dest(data: bytes, extract_root: Path) -> None:
+    """Extract a tar stream under ``extract_root``, sanitizing names on Windows."""
+    extract_root.mkdir(parents=True, exist_ok=True)
+    deferred_links: list[tuple[Path, str]] = []
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tf:
+        for member in tf.getmembers():
+            safe = _sanitize_windows_path(member.name)
+            if not safe:
+                continue
+            target = extract_root / PurePosixPath(safe)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if member.isreg():
+                payload = tf.extractfile(member)
+                if payload is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload.read())
+                continue
+            if member.issym() or member.islnk():
+                deferred_links.append((target, member.linkname))
+                continue
+
+    for link_path, linkname in deferred_links:
+        rel_parent = PurePosixPath(*link_path.relative_to(extract_root).parts[:-1])
+        link_target = PurePosixPath(linkname)
+        if link_target.is_absolute():
+            source = extract_root / PurePosixPath(str(link_target).lstrip("/"))
+        else:
+            source = extract_root / rel_parent / link_target
+        if not source.is_file():
+            continue
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, link_path)
+
+
+async def docker_cp_from_container(
+    container: str,
+    src: str,
+    dest: Path,
+    *,
+    timeout_s: float = 600,
+) -> None:
+    """Copy ``src`` from ``container:`` to host ``dest`` (file or directory tree).
+
+    On Windows, ``docker cp`` cannot represent POSIX names like ``App::Cpan.3``;
+    stream tar from the container and extract with sanitized paths instead.
+    """
+    if sys.platform != "win32":
+        rc, _, err = await _docker_cli("cp", f"{container}:{src}", str(dest), timeout_s=timeout_s)
+        if rc != 0:
+            raise RuntimeError(err.strip() or f"docker cp {src} failed")
+        return
+
+    src_path = src.lstrip("/")
+    parts = PurePosixPath(src_path).parts
+    extract_root = dest.parents[len(parts) - 1] if parts else dest.parent
+
+    rc, _, err = await _docker_cli("start", container, timeout_s=120)
+    if rc != 0:
+        raise RuntimeError(err.strip() or f"docker start {container} failed")
+
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "exec",
+        container,
+        "tar",
+        "-C",
+        "/",
+        "-cf",
+        "-",
+        src_path,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    try:
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError(f"docker exec tar {src} timed out after {timeout_s}s") from None
+    if proc.returncode != 0:
+        msg = err_b.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(msg or f"docker exec tar {src} failed")
+
+    _extract_tar_to_dest(out_b, extract_root)

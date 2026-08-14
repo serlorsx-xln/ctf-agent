@@ -193,7 +193,7 @@ async def run_cursor_coordinator(
     if "/" in resolved_model:
         resolved_model = resolved_model.split("/", 1)[1]
 
-    client = await acquire_client(workspace=".")
+    client = await acquire_client()
     agent: AsyncAgent | None = None
     try:
         agent = await AsyncAgent.create(

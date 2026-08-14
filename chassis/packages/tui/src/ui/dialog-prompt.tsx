@@ -5,6 +5,7 @@ import { Show, createEffect, createSignal, onMount, type JSX } from "solid-js"
 import { Spinner } from "../component/spinner"
 import { useTuiConfig } from "../config"
 import { useBindings, useCommandShortcut } from "../keymap"
+import { useClipboard } from "../context/clipboard"
 
 export type DialogPromptProps = {
   title: string
@@ -22,12 +23,25 @@ export function DialogPrompt(props: DialogPromptProps) {
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
   const submitShortcut = useCommandShortcut("dialog.prompt.submit")
+  const pasteShortcut = useCommandShortcut("dialog.prompt.paste")
+  const clipboard = useClipboard()
   const [textareaTarget, setTextareaTarget] = createSignal<TextareaRenderable>()
   let textarea: TextareaRenderable
 
   function confirm() {
     if (props.busy) return
     props.onConfirm?.(textarea.plainText)
+  }
+
+  async function pasteFromClipboard() {
+    if (props.busy || !textarea || textarea.isDestroyed) return
+    const content = await clipboard.read?.()
+    if (content?.mime !== "text/plain") return
+    const normalized = content.data.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim()
+    if (!normalized) return
+    textarea.setText(normalized)
+    textarea.focus()
+    textarea.gotoLineEnd()
   }
 
   useBindings(() => ({
@@ -42,8 +56,17 @@ export function DialogPrompt(props: DialogPromptProps) {
         category: "Dialog",
         run: confirm,
       },
+      {
+        name: "dialog.prompt.paste",
+        title: "Paste into dialog prompt",
+        category: "Dialog",
+        hidden: true,
+        run: () => {
+          void pasteFromClipboard()
+        },
+      },
     ],
-    bindings: tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit"]),
+    bindings: tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit", "dialog.prompt.paste"]),
   }))
 
   onMount(() => {
@@ -103,11 +126,18 @@ export function DialogPrompt(props: DialogPromptProps) {
       </box>
       <box paddingBottom={1} gap={1} flexDirection="row">
         <Show when={!props.busy} fallback={<text fg={theme.textMuted}>processing...</text>}>
-          <Show when={submitShortcut()}>
-            <text fg={theme.text}>
-              {submitShortcut()} <span style={{ fg: theme.textMuted }}>submit</span>
-            </text>
-          </Show>
+          <box flexDirection="row" gap={2}>
+            <Show when={submitShortcut()}>
+              <text fg={theme.text}>
+                {submitShortcut()} <span style={{ fg: theme.textMuted }}>submit</span>
+              </text>
+            </Show>
+            <Show when={pasteShortcut()}>
+              <text fg={theme.text}>
+                {pasteShortcut()} <span style={{ fg: theme.textMuted }}>paste</span>
+              </text>
+            </Show>
+          </box>
         </Show>
       </box>
     </box>

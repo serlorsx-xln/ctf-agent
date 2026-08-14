@@ -606,6 +606,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    from backend.stdio_platform import ensure_standard_streams
+
+    ensure_standard_streams()
     logging.basicConfig(level=logging.INFO)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"artemis cursor proxy on http://{HOST}:{PORT}", flush=True)

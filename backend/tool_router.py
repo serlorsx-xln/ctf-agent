@@ -22,7 +22,7 @@ import shutil
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
 
@@ -1498,7 +1498,7 @@ def bootstrap_script(pack_id: str) -> str:
             f">> /etc/profile.d/ctf-extra-path.sh || true"
         )
     marker = pack_marker_path(pack_id)
-    lines.append(f"mkdir -p {shlex.quote(str(Path(marker).parent))}")
+    lines.append(f"mkdir -p {shlex.quote(str(PurePosixPath(marker).parent))}")
     lines.append(f"touch {shlex.quote(marker)}")
     lines.append('echo "tools ready"')
     return "\n".join(lines) + "\n"
