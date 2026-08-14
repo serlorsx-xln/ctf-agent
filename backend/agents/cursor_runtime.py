@@ -236,6 +236,8 @@ def is_infra_error_message(message: str | None) -> bool:
         "server disconnected",
         "remoteprotocolerror",
         "connecterror",
+        "client has been closed",
+        "cannot send a request",
     )
     return any(n in err for n in needles)
 

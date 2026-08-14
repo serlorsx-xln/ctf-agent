@@ -335,23 +335,17 @@ class CursorSolver:
                 pass
             self._agent = None
 
-        try:
-            # Prefer the live shared view (sibling may have force-recreated).
-            live = await current_client()
-            if live is not None:
-                self._client = live
-            elif self._client is None:
-                self._client = await acquire_client()
-            self._agent = await self._create_agent()
-        except Exception as e:
-            logger.warning(
-                "[%s] Agent recreate failed (%s) — force-relaunching bridge",
-                self.agent_name,
-                e,
-            )
-            # Keep our ref count; replace the underlying shared bridge process.
+        # Shared bridge may already be closed (sibling recover / last-ref close).
+        # create_on_live_bridge serializes relaunch so #2 and #3 do not aclose
+        # each other's new client.
+        if await current_client() is None:
             self._client = await force_recreate_client()
-            self._agent = await self._create_agent()
+
+        async def _factory(client):
+            self._client = client
+            return await self._create_agent()
+
+        self._agent = await create_on_live_bridge(_factory)
 
         self._infra_recovery = True
         self.loop_detector.reset()

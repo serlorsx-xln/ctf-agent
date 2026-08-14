@@ -63,3 +63,26 @@ async def test_create_on_live_bridge_does_not_relaunch_other_errors(monkeypatch)
 
     with pytest.raises(RuntimeError, match="quota"):
         await runtime.create_on_live_bridge(factory)
+
+
+@pytest.mark.asyncio
+async def test_create_on_live_bridge_relaunches_after_closed_client(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    monkeypatch.setattr(runtime, "_agent_client", object())
+
+    async def recreate():
+        fresh = object()
+        runtime._agent_client = fresh
+        return fresh
+
+    monkeypatch.setattr(runtime, "force_recreate_client", recreate)
+
+    async def factory(_client):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        return "recovered"
+
+    assert await runtime.create_on_live_bridge(factory) == "recovered"
+    assert calls["n"] == 2

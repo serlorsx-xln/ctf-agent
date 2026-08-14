@@ -643,12 +643,9 @@ class ClaudeSolver:
 
         if self._client is None:
             return ""
-        interrupt = getattr(self._client, "interrupt", None)
-        if callable(interrupt):
-            try:
-                await interrupt()
-            except Exception:
-                logger.debug("[%s] writeup interrupt skipped", self.agent_name, exc_info=True)
+        # Do not interrupt() here. run() already left receive_response; interrupt
+        # tears down the Claude/GLM session so the writeup query returns nothing
+        # and How: becomes "(no writeup recorded)".
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
         try:

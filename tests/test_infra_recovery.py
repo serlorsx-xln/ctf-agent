@@ -20,6 +20,9 @@ def test_is_infra_error_opaque_cursor_status():
     assert is_infra_error_message("run error (no detail from Cursor SDK)")
     assert is_infra_error_message("  FAILED  ")
     assert is_infra_error_message("unknown error")
+    assert is_infra_error_message(
+        "Cannot send a request, as the client has been closed."
+    )
 
 
 def test_is_infra_error_rejects_normal():

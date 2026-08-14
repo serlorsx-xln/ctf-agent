@@ -2681,7 +2681,11 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
                       s.length >= 80
                     )
                   })
-                  const hidePending = /Writing recap/i.test(t) && hasRecapBody
+                  const howSettled = recapLines.some((raw) => {
+                    const s = raw.trim()
+                    return /^How\b/i.test(s) || /no writeup recorded/i.test(s)
+                  })
+                  const hidePending = /Writing recap/i.test(t) && (hasRecapBody || howSettled)
                   // Title already says "How the flag was found" — drop leftover How: labels
                   // (interim + final both used to print one).
                   const hideHowLabel =

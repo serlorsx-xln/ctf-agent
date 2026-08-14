@@ -677,12 +677,19 @@ class ChallengeSwarm:
                     try:
                         await cast(_RecoverSession, recover)(insights)
                     except Exception as e:
+                        infra = False
+                        try:
+                            from backend.agents.cursor_runtime import is_infra_error_message
+
+                            infra = is_infra_error_message(str(e))
+                        except Exception:
+                            pass
                         logger.error(
                             "[%s/%s] Session recover failed: %s",
                             self.meta.name,
                             runner_id,
                             e,
-                            exc_info=True,
+                            exc_info=not infra,
                         )
                         break
                 else:
