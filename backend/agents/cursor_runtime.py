@@ -95,7 +95,13 @@ def shared_bridge_workspace() -> str:
     global _bridge_workspace
     if _bridge_workspace and Path(_bridge_workspace).is_dir():
         return _bridge_workspace
-    root = Path(tempfile.mkdtemp(prefix="ctf-cursor-bridge-"))
+    from backend.process_hygiene import cursor_bridge_session_prefix
+
+    root = Path(
+        tempfile.mkdtemp(
+            prefix=cursor_bridge_session_prefix(os.environ.get("ARTEMIS_SESSION_ID"))
+        )
+    )
     (root / "AGENTS.md").write_text(
         "# CTF Solver Workspace\n\n"
         "Use only the custom sandbox tools. Do not use host Shell/Read/Write.\n",

@@ -8,8 +8,11 @@ from pathlib import Path
 import pytest
 
 from backend.process_hygiene import (
+    bridge_belongs_to_session,
+    cursor_bridge_session_prefix,
     is_artemis_cursor_bridge_command,
     is_artemis_swarm_command,
+    should_kill_cursor_bridge,
 )
 from backend.stdio_platform import fd_is_valid
 from backend.subprocess_platform import (
@@ -106,6 +109,10 @@ def test_resolve_venv_python_none_without_venv(tmp_path: Path) -> None:
     [
         (
             "node .../cursor-sdk-bridge.js --workspace /tmp/ctf-cursor-abc123 --tool-callback-url http://127.0.0.1:1/",
+            True,
+        ),
+        (
+            "node .../cursor-sdk-bridge.js --workspace /tmp/ctf-cursor-bridge-ses_abc-xyz --tool-callback-url http://127.0.0.1:1/",
             True,
         ),
         (
@@ -299,7 +306,7 @@ def test_supervisor_stop_runs_bridge_cleanup(
 
     monkeypatch.setenv("ARTEMIS_CACHE", str(tmp_path / "cache"))
     monkeypatch.setenv("ARTEMIS_REPO_ROOT", str(Path(__file__).resolve().parents[1]))
-    seen: list[str] = []
+    seen: list[object] = []
 
     async def _noop_containers(session_id=None):
         return None
@@ -310,7 +317,7 @@ def test_supervisor_stop_runs_bridge_cleanup(
     )
     monkeypatch.setattr(
         "backend.process_hygiene.cleanup_orphan_cursor_bridges",
-        lambda: seen.append("bridges") or [],
+        lambda *a, **k: seen.append(a[0] if a else k.get("session_id")) or [],
     )
 
     state = DaemonState()
@@ -320,7 +327,7 @@ def test_supervisor_stop_runs_bridge_cleanup(
         await sup.stop(session_id="s1")
 
     asyncio.run(run())
-    assert "bridges" in seen
+    assert "s1" in seen
 
 
 def test_child_python_starts_after_stdio_repair(tmp_path: Path) -> None:
@@ -359,3 +366,74 @@ asyncio.run(main())
     body = marker.read_text(encoding="utf-8")
     assert body.startswith("0:")
     assert "child-ok" in body
+
+
+_BRIDGE_A = (
+    "node cursor-sdk-bridge.js --workspace /tmp/ctf-cursor-bridge-ses_a-xyz "
+    "--tool-callback-url http://127.0.0.1:1/"
+)
+_BRIDGE_B = (
+    "node cursor-sdk-bridge.js --workspace /tmp/ctf-cursor-bridge-ses_b-xyz "
+    "--tool-callback-url http://127.0.0.1:1/"
+)
+_BRIDGE_LEGACY = (
+    "node cursor-sdk-bridge.js --workspace /tmp/ctf-cursor-bridge-abc123 "
+    "--tool-callback-url http://127.0.0.1:1/"
+)
+
+
+def test_session_bridge_prefix_is_stable() -> None:
+    assert cursor_bridge_session_prefix("ses_a") == "ctf-cursor-bridge-ses_a-"
+    assert cursor_bridge_session_prefix(None) == "ctf-cursor-bridge-_default-"
+    assert bridge_belongs_to_session(_BRIDGE_A, "ses_a")
+    assert not bridge_belongs_to_session(_BRIDGE_A, "ses_b")
+    assert not bridge_belongs_to_session(_BRIDGE_LEGACY, "ses_a")
+
+
+def test_finished_session_does_not_kill_other_window_bridge() -> None:
+    """Window A finishing must not reap window B's still-running Cursor bridge."""
+    assert not should_kill_cursor_bridge(
+        200,
+        _BRIDGE_B,
+        session_id="ses_a",
+        live_swarm_pids={50},
+        ppid_of={200: 50},
+        me=1,
+    )
+    assert should_kill_cursor_bridge(
+        100,
+        _BRIDGE_A,
+        session_id="ses_a",
+        live_swarm_pids={50},
+        ppid_of={100: 1},
+        me=1,
+    )
+
+
+def test_live_swarm_child_bridge_is_kept_even_on_global_sweep() -> None:
+    assert not should_kill_cursor_bridge(
+        200,
+        _BRIDGE_B,
+        session_id=None,
+        live_swarm_pids={50},
+        ppid_of={200: 50},
+        me=1,
+    )
+    # Detached/unknown owner while another swarm is live — do not guess.
+    assert not should_kill_cursor_bridge(
+        300,
+        _BRIDGE_LEGACY,
+        session_id=None,
+        live_swarm_pids={50},
+        ppid_of={300: 1},
+        me=1,
+    )
+    # Last swarm gone: leftover bridges can be reaped.
+    assert should_kill_cursor_bridge(
+        300,
+        _BRIDGE_LEGACY,
+        session_id=None,
+        live_swarm_pids=set(),
+        ppid_of={300: 1},
+        me=1,
+    )

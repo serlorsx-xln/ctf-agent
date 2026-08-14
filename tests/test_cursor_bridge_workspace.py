@@ -11,12 +11,21 @@ import backend.agents.cursor_runtime as runtime
 
 def test_shared_bridge_workspace_is_stable(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime, "_bridge_workspace", None)
-    monkeypatch.setattr(runtime.tempfile, "mkdtemp", lambda prefix="": str(tmp_path / "bridge"))
-    (tmp_path / "bridge").mkdir()
+    monkeypatch.setenv("ARTEMIS_SESSION_ID", "ses_otherwindow")
+    seen: list[str] = []
+
+    def _mkdtemp(prefix=""):
+        seen.append(prefix)
+        path = tmp_path / "bridge"
+        path.mkdir(exist_ok=True)
+        return str(path)
+
+    monkeypatch.setattr(runtime.tempfile, "mkdtemp", _mkdtemp)
     a = runtime.shared_bridge_workspace()
     b = runtime.shared_bridge_workspace()
     assert a == b
     assert Path(a, "AGENTS.md").is_file()
+    assert seen == ["ctf-cursor-bridge-ses_otherwindow-"]
 
 
 @pytest.mark.asyncio

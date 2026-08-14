@@ -102,6 +102,9 @@ class ClaudeSolver:
         self._cost_usd = 0.0
         self._cost_reported = False
         self._bump_insights: str | None = None
+        # False while receive_response is still waiting for ResultMessage.
+        # Breaking early left the next query (writeup) hung on the leftover turn.
+        self._receive_idle = True
 
     @staticmethod
     def _bash_timeout_s(tool_input: dict) -> int:
@@ -518,10 +521,14 @@ class ClaudeSolver:
                 prompt = "Solve this CTF challenge."
 
             _live(self.agent_name, "── turn start ──")
+            self._receive_idle = False
             await self._client.query(prompt)
 
             async for message in self._client.receive_response():
-                if self.cancel_event.is_set() or self._confirmed:
+                # CORRECT must not break this iterator. receive_response only
+                # ends on ResultMessage; leaving early makes produce_writeup hang
+                # on the leftover turn ("Writing recap…" forever).
+                if self.cancel_event.is_set() and not self._confirmed:
                     break
 
                 if isinstance(message, AssistantMessage):
@@ -546,32 +553,7 @@ class ClaudeSolver:
                         )
 
                 elif isinstance(message, ResultMessage):
-                    self._session_id = message.session_id
-                    parsed = usage_from_provider(message)
-                    turn_cost = getattr(message, "total_cost_usd", None)
-                    if turn_cost is None:
-                        turn_cost = parsed["cost_usd"]
-                    if turn_cost is not None:
-                        self._cost_usd += float(turn_cost)
-                        self._cost_reported = True
-                    self.cost_tracker.record_tokens(
-                        self.agent_name,
-                        self.model_id,
-                        input_tokens=parsed["input"],
-                        output_tokens=parsed["output"],
-                        cache_read_tokens=parsed["cache_read"],
-                        duration_seconds=time.monotonic() - t0,
-                        reported_cost_usd=float(turn_cost) if turn_cost is not None else None,
-                    )
-
-                    output = getattr(message, "structured_output", None)
-                    if output and output.get("type") == "flag_found":
-                        self._flag = output.get("flag")
-                        self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
-                        # JSON alone does not confirm — only submit_flag does.
-
-                if self._confirmed:
-                    break
+                    self._apply_result_message(message, t0=t0)
 
                 # tool_progress / other SDK noise — ignore silently
 
@@ -606,6 +588,48 @@ class ClaudeSolver:
                     "provider/auth error — check API key or billing (details suppressed)",
                 )
             return self._result(status)
+
+    def _apply_result_message(self, message: ResultMessage, *, t0: float | None = None) -> None:
+        """Mark the streaming turn idle and optionally commit usage."""
+        self._session_id = message.session_id
+        self._receive_idle = True
+        if t0 is None:
+            return
+        parsed = usage_from_provider(message)
+        turn_cost = getattr(message, "total_cost_usd", None)
+        if turn_cost is None:
+            turn_cost = parsed["cost_usd"]
+        if turn_cost is not None:
+            self._cost_usd += float(turn_cost)
+            self._cost_reported = True
+        self.cost_tracker.record_tokens(
+            self.agent_name,
+            self.model_id,
+            input_tokens=parsed["input"],
+            output_tokens=parsed["output"],
+            cache_read_tokens=parsed["cache_read"],
+            duration_seconds=time.monotonic() - t0,
+            reported_cost_usd=float(turn_cost) if turn_cost is not None else None,
+        )
+        output = getattr(message, "structured_output", None)
+        if output and output.get("type") == "flag_found":
+            self._flag = output.get("flag")
+            self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
+
+    async def _await_idle_receive(self, *, timeout: float = 20.0) -> None:
+        """Finish a leftover receive_response so the next query can start."""
+        if self._client is None or self._receive_idle:
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                async for message in self._client.receive_response():
+                    if isinstance(message, ResultMessage):
+                        self._apply_result_message(message)
+                        return
+        except TimeoutError:
+            logger.warning("[%s] Claude turn did not emit ResultMessage", self.agent_name)
+        except Exception:
+            logger.debug("[%s] drain receive failed", self.agent_name, exc_info=True)
 
     def bump(self, insights: str) -> None:
         from backend.agents.solver_control import stash_bump
@@ -643,11 +667,13 @@ class ClaudeSolver:
 
         if self._client is None:
             return ""
-        # Do not interrupt() here. run() already left receive_response; interrupt
-        # tears down the Claude/GLM session so the writeup query returns nothing
-        # and How: becomes "(no writeup recorded)".
+        # Do not interrupt() — that tears down the Claude/GLM session. Drain any
+        # leftover solve-turn ResultMessage first so this query is not hung
+        # behind the previous receive_response.
+        await self._await_idle_receive()
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
+        self._receive_idle = False
         try:
             await self._client.query(prompt or WRITEUP_PROMPT)
             async for message in self._client.receive_response():
@@ -655,7 +681,8 @@ class ClaudeSolver:
                     for block in message.content:
                         if isinstance(block, TextBlock) and str(block.text or "").strip():
                             parts.append(block.text.strip())
-                            # No per-token live stream — see cursor_solver.produce_writeup.
+                elif isinstance(message, ResultMessage):
+                    self._apply_result_message(message)
         except Exception:
             logger.warning("[%s] writeup turn failed", self.agent_name, exc_info=True)
             return ""

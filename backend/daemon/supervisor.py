@@ -442,7 +442,9 @@ class SwarmSupervisor:
                 try:
                     from backend.process_hygiene import cleanup_orphan_cursor_bridges
 
-                    await asyncio.to_thread(cleanup_orphan_cursor_bridges)
+                    await asyncio.to_thread(
+                        cleanup_orphan_cursor_bridges, session_id
+                    )
                 except Exception:
                     logger.debug("orphan bridge cleanup after swarm exit failed", exc_info=True)
                 try:
@@ -617,7 +619,7 @@ class SwarmSupervisor:
         try:
             from backend.process_hygiene import cleanup_orphan_cursor_bridges
 
-            await asyncio.to_thread(cleanup_orphan_cursor_bridges)
+            await asyncio.to_thread(cleanup_orphan_cursor_bridges, session_id)
         except Exception:
             logger.debug("orphan bridge cleanup after stop failed", exc_info=True)
 
