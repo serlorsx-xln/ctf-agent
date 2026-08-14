@@ -19,6 +19,13 @@ describe("parseArtemisEvents", () => {
     expect(events).toEqual([{ kind: "think", agent: "default", text: "Found a pcapng file." }])
   })
 
+  test("keeps slashy Claude model ids as the agent key", () => {
+    const events = parseArtemisEvents("[ch05_7.83hz/aliyuncs/glm-5.2 think] counting letters")
+    expect(events).toEqual([
+      { kind: "think", agent: "aliyuncs/glm-5.2", text: "counting letters" },
+    ])
+  })
+
   test("formats bash tool args as shell", () => {
     const events = parseArtemisEvents(
       '[chal/default tool#1 → bash] {"command": "capinfos /challenge/distfiles/capture.pcapng"}',

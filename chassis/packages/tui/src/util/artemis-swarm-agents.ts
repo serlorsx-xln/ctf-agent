@@ -3,18 +3,28 @@ import {
   type ArtemisEvent,
 } from "./artemis-live-log"
 
-/** Display key aligned with live-log ``shortAgent`` / solver ``model_id``.
+const EFFORT_SUFFIXES = new Set(["low", "medium", "high", "xhigh", "max"])
 
- * Unique specs: second path segment only (strips effort) — ``claude-sdk/opus/max`` → ``opus``.
- * Duplicate runners: keep ``#N`` suffix from ``assign_runner_ids`` — ``cursor/grok#2`` → ``grok#2``.
+/** Display key aligned with backend ``model_id_from_spec`` / live-log ``shortAgent``.
+
+ * Everything after the provider, minus effort. Slashy Claude ids stay intact
+ * (``claude-sdk/aliyuncs/glm-5.2`` → ``aliyuncs/glm-5.2``). Taking only the
+ * first segment left boxes named ``aliyuncs`` while logs tagged ``glm-5.2``.
+ * Duplicate runners keep ``#N`` from ``assign_runner_ids``.
  */
 export function agentKeyFromSpec(spec: string): string {
   const s = spec.trim()
   if (!s) return "agent"
-  const after = s.includes("/") ? s.slice(s.indexOf("/") + 1) : s
-  if (after.includes("#")) return after
-  const parts = s.split("/")
-  return parts.length >= 2 ? parts[1]! : after
+  const hash = s.match(/#(\d+)$/)
+  const base = hash ? s.slice(0, s.lastIndexOf("#")) : s
+  const parts = base.split("/").filter(Boolean)
+  if (parts.length < 2) return hash ? `${base}#${hash[1]}` : s
+  let rest = parts.slice(1)
+  if (rest.length && EFFORT_SUFFIXES.has(rest[rest.length - 1]!)) {
+    rest = rest.slice(0, -1)
+  }
+  const id = rest.join("/") || parts[1]!
+  return hash ? `${id}#${hash[1]}` : id
 }
 
 /**

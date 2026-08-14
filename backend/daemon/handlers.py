@@ -122,12 +122,6 @@ class Handlers:
         self.state.clear_session(session)
         return {"session_state": self.state.get_session(session)}
 
-    async def _h_session_refresh(self, _payload: dict, *, session: str) -> dict:
-        from backend.shell.sandbox_session import load_session_state
-
-        self.state.set_session(load_session_state(session) or {}, session_id=session)
-        return {"session_state": self.state.get_session(session)}
-
     def _broadcast_solve_flow(
         self,
         session: str,

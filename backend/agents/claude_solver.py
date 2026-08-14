@@ -44,7 +44,6 @@ from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
-from backend.output_types import solver_output_json_schema
 from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, FLAG_FOUND, GAVE_UP, SolverResult
@@ -286,6 +285,20 @@ class ClaudeSolver:
 
                 warn_msg = LOOP_WARNING_MESSAGE
 
+            # Last flag is in — stop the solve turn so writeup can start.
+            # output_format/json_schema made GLM call StructuredOutput in a loop
+            # after CORRECT; How: then sat on "Writing recap…" forever.
+            if self._confirmed:
+                reason = "Challenge complete — do not call more tools."
+                _live(f"{self.agent_name} tool#{self._step_count} ✗ {tool_name}", reason)
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                }
+
             # MCP harness tools execute in-process — allow through.
             if tool_name in (mcp_submit, mcp_notify):
                 return {"systemMessage": warn_msg} if warn_msg else {}
@@ -455,7 +468,6 @@ class ClaudeSolver:
                 mcp_notify,
             ],
             permission_mode="bypassPermissions",
-            output_format={"type": "json_schema", "schema": solver_output_json_schema()},
             hooks={
                 "PreToolUse": [
                     HookMatcher(hooks=[sandbox_redirect]),
@@ -509,7 +521,7 @@ class ClaudeSolver:
             await self._client.query(prompt)
 
             async for message in self._client.receive_response():
-                if self.cancel_event.is_set():
+                if self.cancel_event.is_set() or self._confirmed:
                     break
 
                 if isinstance(message, AssistantMessage):
@@ -548,7 +560,6 @@ class ClaudeSolver:
                         input_tokens=parsed["input"],
                         output_tokens=parsed["output"],
                         cache_read_tokens=parsed["cache_read"],
-                        provider_spec="claude-sdk",
                         duration_seconds=time.monotonic() - t0,
                         reported_cost_usd=float(turn_cost) if turn_cost is not None else None,
                     )
@@ -558,6 +569,9 @@ class ClaudeSolver:
                         self._flag = output.get("flag")
                         self._findings = f"Flag found via {output.get('method', '?')}: {self._flag}"
                         # JSON alone does not confirm — only submit_flag does.
+
+                if self._confirmed:
+                    break
 
                 # tool_progress / other SDK noise — ignore silently
 
@@ -629,15 +643,25 @@ class ClaudeSolver:
 
         if self._client is None:
             return ""
+        interrupt = getattr(self._client, "interrupt", None)
+        if callable(interrupt):
+            try:
+                await interrupt()
+            except Exception:
+                logger.debug("[%s] writeup interrupt skipped", self.agent_name, exc_info=True)
         parts: list[str] = []
         _live(self.agent_name, "── writeup ──")
-        await self._client.query(prompt or WRITEUP_PROMPT)
-        async for message in self._client.receive_response():
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock) and str(block.text or "").strip():
-                        parts.append(block.text.strip())
-                        # No per-token live stream — see cursor_solver.produce_writeup.
+        try:
+            await self._client.query(prompt or WRITEUP_PROMPT)
+            async for message in self._client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and str(block.text or "").strip():
+                            parts.append(block.text.strip())
+                            # No per-token live stream — see cursor_solver.produce_writeup.
+        except Exception:
+            logger.warning("[%s] writeup turn failed", self.agent_name, exc_info=True)
+            return ""
         from backend.writeup import join_streamed_text_parts
 
         return join_streamed_text_parts(parts)

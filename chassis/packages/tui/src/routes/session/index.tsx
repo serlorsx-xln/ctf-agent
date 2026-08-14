@@ -2670,6 +2670,18 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
               <For each={(group as { lines: string[] }).lines}>
                 {(line) => {
                   const t = line.trim()
+                  const recapLines = (group as { lines: string[] }).lines
+                  const hasRecapBody = recapLines.some((raw) => {
+                    const s = raw.trim()
+                    if (!s || /no writeup recorded|Writing recap/i.test(s)) return false
+                    if (/^(How|Solved by|Solved ·|Flag)\b/i.test(s)) return false
+                    return (
+                      /^\d+\.\s/.test(s) ||
+                      (/^(Challenge|Key insight|Solution summary|What I tried|Why it worked|Dead ends)\b/i.test(s)) ||
+                      s.length >= 80
+                    )
+                  })
+                  const hidePending = /Writing recap/i.test(t) && hasRecapBody
                   const isSolvedBy = /^Solved by /i.test(t)
                   const isHeader =
                     /^(How|Challenge|Key insight|Flag|Solution summary|Steps|What I tried|Why it worked|Dead ends)\b/i.test(t) ||
@@ -2682,9 +2694,11 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
                       : theme.text
                   const attrs = isSolvedBy || isHeader ? TextAttributes.BOLD : undefined
                   return (
-                    <text fg={fg} attributes={attrs} wrapMode="word">
-                      {line}
-                    </text>
+                    <Show when={!hidePending}>
+                      <text fg={fg} attributes={attrs} wrapMode="word">
+                        {line}
+                      </text>
+                    </Show>
                   )
                 }}
               </For>

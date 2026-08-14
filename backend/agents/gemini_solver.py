@@ -314,7 +314,6 @@ class GeminiSolver:
                     input_tokens=parsed["input"],
                     output_tokens=parsed["output"],
                     cache_read_tokens=parsed["cache_read"],
-                    provider_spec="gemini-sdk",
                     duration_seconds=time.monotonic() - t0,
                     reported_cost_usd=None,  # Gemini does not report USD.
                 )

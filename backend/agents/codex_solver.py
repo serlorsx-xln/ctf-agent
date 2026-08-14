@@ -435,7 +435,6 @@ class CodexSolver:
                     input_tokens=last_usage["input"],
                     output_tokens=last_usage["output"],
                     cache_read_tokens=last_usage["cache_read"],
-                    provider_spec="codex",
                 )
                 # Codex reports tokens only — no USD billing field.
                 self.tracer.usage(
@@ -528,6 +527,8 @@ class CodexSolver:
         )
 
     async def _exec_tool(self, name: str, args: dict) -> str | tuple[bytes, str]:
+        if self._confirmed and name != "submit_flag":
+            return "Challenge complete — do not call more tools."
         if name == "bash":
             return await do_bash(
                 self.sandbox, args.get("command", ""), args.get("timeout_seconds", 60)
@@ -575,6 +576,7 @@ class CodexSolver:
             if is_confirmed:
                 self._confirmed = True
                 self._flag = " | ".join(self._accepted_flags) if self._accepted_flags else flag
+                self._turn_done.set()
             return display
         elif name == "web_fetch":
             return await do_web_fetch(

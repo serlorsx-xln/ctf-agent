@@ -16,6 +16,22 @@ describe("artemis-swarm-agents", () => {
     expect(agentKeyFromSpec("claude-sdk/claude-opus-4-6")).toBe("claude-opus-4-6")
     expect(agentKeyFromSpec("claude-sdk/claude-opus-4-6/max")).toBe("claude-opus-4-6")
     expect(agentKeyFromSpec("cursor/grok-4.5#2")).toBe("grok-4.5#2")
+    expect(agentKeyFromSpec("claude-sdk/aliyuncs/glm-5.2")).toBe("aliyuncs/glm-5.2")
+    expect(agentKeyFromSpec("claude-sdk/bigmodel/glm-5.2/max")).toBe("bigmodel/glm-5.2")
+    expect(agentKeyFromSpec("claude-sdk/PSU-araya/glm-5.2")).toBe("PSU-araya/glm-5.2")
+  })
+
+  test("slashy Claude ids match live-log agent keys", () => {
+    const spec = "claude-sdk/aliyuncs/glm-5.2"
+    const key = agentKeyFromSpec(spec)
+    expect(key).toBe("aliyuncs/glm-5.2")
+    const events: ArtemisEvent[] = [{ kind: "think", agent: key, text: "hi" }]
+    expect(rosterFromSpecs([spec])).toEqual([key])
+    expect(partitionEventsByAgent(events, key)).toHaveLength(1)
+    expect(agentPreviews(events, [key], true)[0]).toMatchObject({
+      eventCount: 1,
+      active: true,
+    })
   })
 
   test("rosterFromSpecs matches assign_runner_ids labels", () => {

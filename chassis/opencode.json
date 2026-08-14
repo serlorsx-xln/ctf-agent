@@ -36,11 +36,6 @@
     "todowrite": "deny",
     "skill": "deny",
     "lsp": "deny",
-    "artemis_bash": "deny",
-    "artemis_read_file": "deny",
-    "artemis_write_file": "deny",
-    "artemis_list_files": "deny",
-    "artemis_submit_flag": "deny",
     "question": "allow"
   },
   "instructions": ["./AGENTS.md"],

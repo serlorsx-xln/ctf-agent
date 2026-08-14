@@ -255,6 +255,29 @@ def test_interim_how_prints_pending_without_notes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_writeup_replaces_pending_how(monkeypatch):
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+
+    async def produce_writeup() -> str:
+        return ""
+
+    swarm = _swarm(["claude-sdk/bigmodel/glm-5.2"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.confirmed_flag = "CTF{aaaaaaaaaaaa}"
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "claude-sdk/bigmodel/glm-5.2"}
+    swarm.winner_runner_id = "claude-sdk/bigmodel/glm-5.2"
+    swarm._emit_how_recap(interim=True)
+    assert swarm._how_emitted is False
+    solver = SimpleNamespace(produce_writeup=produce_writeup, _findings="")
+    await swarm._capture_and_emit_writeup(solver, "claude-sdk/bigmodel/glm-5.2")
+    joined = "\n".join(lines)
+    assert "Writing recap from the winning solver" in joined
+    assert "(no writeup recorded)" in joined
+    assert swarm._how_emitted is True
+
+
+@pytest.mark.asyncio
 async def test_writeup_still_emits_when_flag_found_path_is_skipped(monkeypatch):
     lines: list[str] = []
     monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)

@@ -799,7 +799,7 @@ class CursorSolver:
             run = await self._agent.send(prompt)
             status_detail = ""
             async for message in run.stream():
-                if self.cancel_event.is_set():
+                if self.cancel_event.is_set() or self._confirmed:
                     if run.supports("cancel"):
                         await run.cancel()
                     break
@@ -908,7 +908,6 @@ class CursorSolver:
                     input_tokens=parsed["input"],
                     output_tokens=parsed["output"],
                     cache_read_tokens=parsed["cache_read"],
-                    provider_spec="cursor",
                     duration_seconds=duration,
                 )
                 self.tracer.usage(parsed["input"], parsed["output"], parsed["cache_read"])

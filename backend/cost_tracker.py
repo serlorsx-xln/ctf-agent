@@ -308,7 +308,6 @@ def _cache_rate(usage: RunUsage) -> str:
 class AgentUsage:
     usage: RunUsage = field(default_factory=RunUsage)
     model_name: str = ""
-    provider_spec: str = ""
     duration_seconds: float = 0.0
     # Sum of provider-reported USD only. None until a provider reports a value.
     reported_cost_usd: float | None = None
@@ -334,7 +333,6 @@ class CostTracker:
         input_tokens: int = 0,
         output_tokens: int = 0,
         cache_read_tokens: int = 0,
-        provider_spec: str = "",
         duration_seconds: float = 0.0,
         reported_cost_usd: float | None = None,
     ) -> None:
@@ -348,7 +346,6 @@ class CostTracker:
             agent_name,
             usage,
             model_name,
-            provider_spec=provider_spec,
             duration_seconds=duration_seconds,
             reported_cost_usd=reported_cost_usd,
         )
@@ -358,14 +355,11 @@ class CostTracker:
         agent_name: str,
         usage: RunUsage,
         model_name: str,
-        provider_spec: str = "",
         duration_seconds: float = 0.0,
         reported_cost_usd: float | None = None,
     ) -> None:
         if agent_name not in self.by_agent:
-            self.by_agent[agent_name] = AgentUsage(
-                model_name=model_name, provider_spec=provider_spec
-            )
+            self.by_agent[agent_name] = AgentUsage(model_name=model_name)
 
         agent = self.by_agent[agent_name]
         agent.usage += usage

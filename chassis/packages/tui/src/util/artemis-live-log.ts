@@ -456,11 +456,26 @@ function cleanResult(body: string): string {
   return first || s
 }
 
+const AGENT_PROVIDERS = new Set([
+  "cursor",
+  "claude-sdk",
+  "codex",
+  "gemini-sdk",
+  "anthropic",
+  "openai",
+  "google",
+])
+const AGENT_EFFORT = new Set(["low", "medium", "high", "xhigh", "max"])
+
 function shortAgent(tag: string): string {
-  const parts = tag.split(/[/\s]+/).filter(Boolean)
-  const last = parts.at(-1) || tag
-  if (last === "think" || last === "ai" || last === "tool") return parts.at(-2) || last
-  return last.length > 24 ? last.slice(0, 21) + "…" : last
+  let t = tag.trim().replace(/\s+(think|ai|tool)$/i, "")
+  const parts = t.split("/").filter(Boolean)
+  if (parts.length < 2) return parts[0] || tag
+  // live() tags ``{challenge}/{model_id}``; logging tags ``{challenge}/{spec}``.
+  let rest = parts.slice(1)
+  if (rest.length >= 2 && AGENT_PROVIDERS.has(rest[0]!)) rest = rest.slice(1)
+  if (rest.length && AGENT_EFFORT.has(rest[rest.length - 1]!)) rest = rest.slice(0, -1)
+  return rest.join("/") || parts.at(-1) || tag
 }
 
 /** Bracket tags that are log/metadata, never swarm agent keys. */
