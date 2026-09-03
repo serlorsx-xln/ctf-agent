@@ -268,7 +268,19 @@ class _QuietDuringConfirmFilter(logging.Filter):
 
 
 def confirm_in_progress() -> bool:
-    """True while the operator is being asked to confirm a flag."""
+    """True while the operator is being asked to confirm a flag.
+
+    Under ``ARTEMIS_FLAG_CONFIRM`` the TUI owns the dialog bar — do not mute
+    sibling agent live-logs (soft races keep streaming while one agent waits).
+    Stdin / CLI confirms still mute so the y/n banner stays readable.
+    """
+    if os.environ.get("ARTEMIS_FLAG_CONFIRM", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+    ):
+        return False
     return _confirm_active
 
 

@@ -19,6 +19,37 @@ def test_join_stream_concatenates_without_spaces():
     assert _join_stream("hello ", "world") == "hello world"
 
 
+def test_quiet_live_suppresses_tool_dumps(capsys):
+    from backend.agents.live_log import quiet_live
+
+    flush_stream()
+    with quiet_live():
+        live("default tool#1 → bash", "cat huge.bin")
+        live("default think", "should stay quiet too")
+    flush_stream()
+    out = capsys.readouterr().out
+    assert "huge.bin" not in out
+    assert "should stay quiet" not in out
+    live("default ai", "after quiet")
+    flush_stream()
+    assert "after quiet" in capsys.readouterr().out
+
+
+def test_quiet_live_drops_buffered_stream(capsys):
+    """Timers/buffers scheduled before quiet must not flush after CORRECT."""
+    import time
+
+    from backend.agents.live_log import quiet_live
+
+    flush_stream()
+    live("default think", "pre-quiet buffer")
+    with quiet_live():
+        time.sleep(0.2)
+        flush_stream()
+    out = capsys.readouterr().out
+    assert "pre-quiet buffer" not in out
+
+
 def test_live_think_buffer_keeps_flag_intact(capsys):
     flush_stream()
     live("chal/default think", "fl")

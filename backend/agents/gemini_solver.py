@@ -20,7 +20,6 @@ import time
 from typing import Any
 
 from backend.agents.live_log import live as _live
-from backend.agents.live_log import live_json as _live_json
 from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
@@ -129,6 +128,10 @@ class GeminiSolver:
         self._contents: list[Any] = []
         self._distfile_names: list[str] = []
         self._container_arch: str = "unknown"
+        self._force_followup: asyncio.Event = asyncio.Event()
+        self._pending_soft_notes: list[str] = []
+        self._gen_task: asyncio.Task | None = None
+        self._gen_epoch: int = 0
 
     async def start(self) -> None:
         from google import genai
@@ -194,9 +197,9 @@ class GeminiSolver:
                     out = "ERROR: empty flag"
                 elif self.submit_fn:
                     # submit_fn = swarm.try_submit_flag → (display, challenge_complete)
-                    out, _done = await self.submit_fn(flag_val)
+                    out, done = await self.submit_fn(flag_val)
                 else:
-                    display, _done = await do_submit_flag(
+                    display, done = await do_submit_flag(
                         self.meta.name,
                         flag_val,
                         already_accepted=list(self._accepted_flags),
@@ -207,7 +210,7 @@ class GeminiSolver:
                         auto_confirm=bool(getattr(self.settings, "auto_confirm_flags", False)),
                     )
                     out = display
-                # Gate acceptance on the confirmation result — mirror Claude.
+                # Track ACCEPTED flags; only challenge_complete (CORRECT) sets _confirmed.
                 if (
                     out.startswith(("ACCEPTED", "CORRECT", "Already accepted"))
                     and flag_val
@@ -225,6 +228,7 @@ class GeminiSolver:
                         )
                     except Exception:
                         pass
+                if done:
                     self._confirmed = True
                     self._flag = (
                         " | ".join(self._accepted_flags)
@@ -236,8 +240,14 @@ class GeminiSolver:
                 out = f"unknown tool: {name}"
         except Exception as e:
             out = f"ERROR: {e}"
-        _live(f"{self.agent_name} tool# {name}", str(args))
-        _live(f"{self.agent_name} result ← {name}", out[:4000])
+        self._step_count += 1
+        step = self._step_count
+        err = out.startswith("ERROR:") or out.startswith("unknown tool:")
+        _live(f"{self.agent_name} tool#{step} → {name}", str(args), limit=1500)
+        if err:
+            _live(f"{self.agent_name} tool#{step} ✗ {name}", out[:2000], limit=2000)
+        else:
+            _live(f"{self.agent_name} tool#{step} ← {name}", out[:4000], limit=2000)
         return out
 
     async def run_until_done_or_gave_up(self) -> SolverResult:
@@ -266,8 +276,28 @@ class GeminiSolver:
 
         for _turn in range(max_turns):
             if self.cancel_event.is_set():
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
+                if self._confirmed:
+                    return self._result(FLAG_FOUND, run_steps=self._step_count)
                 return self._result(CANCELLED, run_steps=self._step_count)
 
+            _live(self.agent_name, "── turn start ──")
+            if self.message_bus:
+                from backend.tools.core import soft_idle_operator_notes
+
+                idle_notes = await soft_idle_operator_notes(
+                    self.message_bus,
+                    self.model_spec,
+                    runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                    cancel_event=self.cancel_event,
+                    confirmed=self._confirmed,
+                )
+                if idle_notes:
+                    self._contents.append(idle_notes)
+
+            self._force_followup.clear()
             try:
                 client = self._client
                 assert client is not None
@@ -298,10 +328,47 @@ class GeminiSolver:
                         config=cfg,
                     )
 
-                response = await asyncio.to_thread(_generate)
+                self._gen_epoch += 1
+                epoch = self._gen_epoch
+                self._gen_task = asyncio.create_task(asyncio.to_thread(_generate))
+                watcher = asyncio.create_task(self._watch_soft_steer())
+                try:
+                    response = await self._gen_task
+                    superseded = epoch != self._gen_epoch or (
+                        self._force_followup.is_set() and not self.cancel_event.is_set()
+                    )
+                    if superseded and self._apply_soft_interrupt_notes():
+                        _live(self.agent_name, "── turn end status=interrupted ──")
+                        continue
+                except asyncio.CancelledError:
+                    if self._force_followup.is_set() and not self.cancel_event.is_set():
+                        _live(self.agent_name, "── turn end status=interrupted ──")
+                        self._apply_soft_interrupt_notes()
+                        continue
+                    from backend.agents.soft_steer import restore_pending_soft_notes
+
+                    restore_pending_soft_notes(self)
+                    if self._confirmed:
+                        return self._result(FLAG_FOUND, run_steps=self._step_count)
+                    if self.cancel_event.is_set():
+                        return self._result(CANCELLED, run_steps=self._step_count)
+                    raise
+                finally:
+                    self._gen_task = None
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except asyncio.CancelledError:
+                        pass
             except Exception as e:
                 logger.warning(f"[{self.agent_name}] generate_content error: {e}")
                 _live(f"{self.agent_name} status", f" Gemini error: {e}")
+                _live(self.agent_name, "── turn end ──")
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
+                if self._confirmed:
+                    return self._result(FLAG_FOUND, run_steps=self._step_count)
                 return self._result(GAVE_UP, run_steps=self._step_count)
 
             # Commit provider-reported tokens only. Do not preview the same
@@ -321,6 +388,10 @@ class GeminiSolver:
             candidate = response.candidates[0] if response.candidates else None
             if candidate is None:
                 _live(f"{self.agent_name} status", "Gemini returned no candidates")
+                _live(self.agent_name, "── turn end ──")
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
                 return self._result(GAVE_UP, run_steps=self._step_count)
 
             # Handle finish_reason: stop on safety/recursion/max-tokens stops.
@@ -331,6 +402,10 @@ class GeminiSolver:
                     f"{self.agent_name} status",
                     f"Gemini stopped: {fr_name}",
                 )
+                _live(self.agent_name, "── turn end ──")
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
                 if self._confirmed:
                     return self._result(FLAG_FOUND, run_steps=self._step_count)
                 return self._result(GAVE_UP, run_steps=self._step_count)
@@ -347,37 +422,128 @@ class GeminiSolver:
 
             if not function_calls:
                 # No tool call → model is done talking. Check confirmed flag.
+                _live(self.agent_name, "── turn end ──")
                 if self._confirmed:
+                    from backend.agents.soft_steer import restore_pending_soft_notes
+
+                    restore_pending_soft_notes(self)
                     return self._result(FLAG_FOUND, run_steps=self._step_count)
                 # Ask the model to continue / act.
                 self._contents.append(response)
                 self._contents.append(
                     build_continue_prompt(
                         accepted_flags=self._accepted_flags,
+                        session_sync=bool(self.submit_fn),
                         flags_required=getattr(self.meta, "flags_required", 1),
                     )
                 )
                 continue
 
             self._contents.append(response)
-            self._step_count += 1
+            # Claim Send-now during tool batches (watcher only covered generate).
+            await self._claim_soft_steer()
             for fc_part in function_calls:
+                if self._force_followup.is_set() or self.cancel_event.is_set():
+                    break
                 fc = fc_part.function_call
                 name = fc.name
                 args = dict(fc.args or {})
-                _live_json(f"{self.agent_name} tool → {name}", args)
-                result_text = await self._exec_tool(name, args)
-                # Append the function response for the next turn.
-                from google.genai.types import Part
+                tool_watcher = asyncio.create_task(self._watch_soft_steer())
+                try:
+                    result_text = await self._exec_tool(name, args)
+                    if self.message_bus:
+                        from backend.tools.core import do_check_findings
 
-                self._contents.append(
-                    Part.from_function_response(name=name, response={"result": result_text})
-                )
+                        findings = await do_check_findings(
+                            self.message_bus,
+                            self.model_spec,
+                            runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                        )
+                        if findings and "No new findings" not in findings:
+                            result_text = f"{result_text}\n\n---\n{findings}"
+                    # Append the function response for the next turn.
+                    from google.genai.types import Part
 
+                    self._contents.append(
+                        Part.from_function_response(name=name, response={"result": result_text})
+                    )
+                finally:
+                    tool_watcher.cancel()
+                    try:
+                        await tool_watcher
+                    except asyncio.CancelledError:
+                        pass
+
+            _live(self.agent_name, "── turn end ──")
             if self._confirmed:
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
                 return self._result(FLAG_FOUND, run_steps=self._step_count)
 
+            if (
+                self._force_followup.is_set()
+                and not self.cancel_event.is_set()
+                and self._apply_soft_interrupt_notes()
+            ):
+                continue
+
+        from backend.agents.soft_steer import restore_pending_soft_notes
+
+        restore_pending_soft_notes(self)
         return self._result(GAVE_UP, run_steps=self._step_count)
+
+    def _apply_soft_interrupt_notes(self) -> bool:
+        """Append pending Send-now notes into contents. Returns True when notes applied."""
+        notes = [n for n in self._pending_soft_notes if str(n or "").strip()]
+        self._pending_soft_notes.clear()
+        self._force_followup.clear()
+        if not notes:
+            return False
+        from backend.agents.soft_steer import operator_interrupt_prompt
+
+        cont = build_continue_prompt(
+            accepted_flags=self._accepted_flags,
+            session_sync=bool(self.submit_fn),
+            flags_required=getattr(self.meta, "flags_required", 1),
+        )
+        self._contents.append(operator_interrupt_prompt(notes, cont))
+        return True
+
+    async def _claim_soft_steer(self) -> list[str]:
+        from backend.agents.live_log import emit_line
+        from backend.agents.soft_steer import claim_soft_steer_notes
+
+        notes = await claim_soft_steer_notes(self)
+        if notes:
+            self._pending_soft_notes.extend(notes)
+            self._force_followup.set()
+            preview = notes[0][:120]
+            emit_line(
+                "[artemis] followup — interrupting current turn"
+                + (f" · {preview}" if preview else "")
+            )
+            task = self._gen_task
+            if task is not None and not task.done():
+                self._gen_epoch += 1
+                task.cancel()
+        return notes
+
+    async def _watch_soft_steer(self) -> None:
+        try:
+            while not self.cancel_event.is_set() and not self._confirmed:
+                if self._force_followup.is_set():
+                    return
+                await self._claim_soft_steer()
+                if self._force_followup.is_set():
+                    return
+                try:
+                    await asyncio.wait_for(self._force_followup.wait(), timeout=0.6)
+                    return
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            return
 
     def _result(self, status: str, run_steps: int | None = None) -> SolverResult:
         return SolverResult(
@@ -398,35 +564,59 @@ class GeminiSolver:
 
     async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more generate_content call without tools for the operator recap."""
-        from backend.writeup import WRITEUP_PROMPT
+        from backend.agents.live_log import quiet_live
+        from backend.writeup import WRITEUP_PROMPT, WRITEUP_TIMEOUT_S
 
         if self._client is None:
             return ""
-        _live(self.agent_name, "── writeup ──")
-        contents = list(self._contents) + [prompt or WRITEUP_PROMPT]
-        try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self.model_id,
-                contents=contents,
-                config={},
-            )
-        except Exception as e:
-            logger.warning(f"[{self.agent_name}] writeup generate_content error: {e}")
-            return ""
-        candidate = response.candidates[0] if response.candidates else None
-        if candidate is None:
-            return ""
-        parts = getattr(candidate.content, "parts", []) or []
-        texts = [
-            str(getattr(p, "text", "") or "").strip()
-            for p in parts
-            if getattr(p, "text", None)
-        ]
-        from backend.writeup import join_streamed_text_parts
+        with quiet_live():
+            _live(self.agent_name, "── writeup ──")
+            contents = list(self._contents) + [prompt or WRITEUP_PROMPT]
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._client.models.generate_content,
+                        model=self.model_id,
+                        contents=contents,
+                        config={},
+                    ),
+                    timeout=WRITEUP_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[%s] writeup/qa generate_content timed out after %.0fs",
+                    self.agent_name,
+                    WRITEUP_TIMEOUT_S,
+                )
+                return ""
+            except Exception as e:
+                logger.warning(f"[{self.agent_name}] writeup generate_content error: {e}")
+                return ""
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate is None:
+                return ""
+            parts = getattr(candidate.content, "parts", []) or []
+            texts = [
+                str(getattr(p, "text", "") or "").strip()
+                for p in parts
+                if getattr(p, "text", None)
+            ]
+            from backend.writeup import join_streamed_text_parts
 
-        # Recap reaches the TUI via ``[artemis] summary`` — skip live writeup spam.
-        return join_streamed_text_parts(texts)
+            # Recap reaches the TUI via ``[artemis] summary`` — skip live writeup spam.
+            return join_streamed_text_parts(texts)
+
+    async def qa_turn(self, question: str) -> str:
+        """Post-solve follow-up with prior Gemini contents."""
+        q = (question or "").strip()
+        if not q:
+            return ""
+        prompt = (
+            "The challenge is already solved. Answer the operator's follow-up "
+            "using what you learned in this session. Be concise.\n\n"
+            f"Operator: {q}"
+        )
+        return await self.produce_writeup(prompt)
 
     async def stop(self) -> None:
         try:

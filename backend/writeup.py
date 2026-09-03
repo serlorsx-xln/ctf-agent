@@ -134,6 +134,34 @@ def is_fragmented_prose(text: str) -> bool:
     return short >= max(4, int(bodyish * 0.55))
 
 
+_CJK_THAI_RE = re.compile(r"[\u0E00-\u0E7F\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]")
+
+
+def _join_tiny_stream_chunks(chunks: list[str]) -> str:
+    """Space-join Latin word tokens; concatenate Thai/CJK and identifier pieces."""
+    out = ""
+    for chunk in chunks:
+        if not out:
+            out = chunk
+            continue
+        left = out[-1]
+        right = chunk[0]
+        if left.isspace() or right.isspace():
+            out += chunk
+            continue
+        if _CJK_THAI_RE.search(left) or _CJK_THAI_RE.search(right):
+            out += chunk
+            continue
+        if left == "_" or right == "_":
+            out += chunk
+            continue
+        if left in "([{/" or right in ".,!?;:)]}'\"%":
+            out += chunk
+            continue
+        out += " " + chunk
+    return out
+
+
 def collapse_prose_fragments(text: str) -> str:
     """Merge word-per-line streamed prose into normal paragraphs."""
     raw = (text or "").strip()
@@ -149,7 +177,7 @@ def collapse_prose_fragments(text: str) -> str:
 
     def flush() -> None:
         if buf:
-            out.append(" ".join(buf))
+            out.append(_join_tiny_stream_chunks(buf))
             buf.clear()
 
     for raw_line in lines:
@@ -198,20 +226,31 @@ def coalesce_writeup_output(parts: list[str], result: Any = None) -> str:
 
 
 def join_streamed_text_parts(parts: list[str]) -> str:
-    """Join Cursor/Gemini writeup deltas without word-per-line paragraphs."""
+    """Join Cursor/Gemini writeup deltas without word-per-line paragraphs.
+
+    Never invent spaces between Thai/CJK graphemes or around ``_`` (that turned
+    ``รับทราบ`` / ``submit_flag`` into ``รับ ท ราบ`` / ``submit _ flag``).
+    Latin word-per-delta streams still get spaces so English writeups stay readable.
+    """
     chunks = [p.strip() for p in parts if (p or "").strip()]
     if not chunks:
         return ""
     if len(chunks) >= 3:
         tiny = sum(1 for c in chunks if len(c.split()) <= 4 and "\n" not in c)
         if tiny >= len(chunks) * 0.6:
-            return collapse_prose_fragments(" ".join(chunks))
+            return collapse_prose_fragments(_join_tiny_stream_chunks(chunks))
     return collapse_prose_fragments("\n\n".join(chunks))
 
 
 def expand_summary_line(line: str) -> list[str]:
-    """Split jammed numbered lists / section labels; strip markdown bold."""
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", (line or "").strip())
+    """Split jammed numbered lists / section labels; strip markdown bold.
+
+    Leading whitespace on a non-split line is preserved (matches TUI
+    ``expandSummaryLine``) so indented How bodies stay aligned.
+    """
+    raw = line or ""
+    lead = re.match(r"^(\s*)", raw).group(1)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", raw.strip())
     if not text:
         return []
     # ``…} ## Solution Summary 1. …`` → section on its own line (no bare '#').
@@ -243,6 +282,8 @@ def expand_summary_line(line: str) -> list[str]:
                 part = part.strip()
                 if part:
                     out.append(part)
+    if len(out) == 1 and out[0] == text and lead:
+        return [lead + text]
     return out
 
 
@@ -250,8 +291,12 @@ def _is_flag_only_line(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    t = re.sub(r"(?i)^(?:FLAG|Flag)\s*:?\s*", "", t).strip()
-    return bool(_FLAG_TOKEN_RE.fullmatch(t))
+    # Match bare tokens first — do not strip ``flag`` off ``flag{…}``.
+    if _FLAG_TOKEN_RE.fullmatch(t):
+        return True
+    # Label form requires a colon so ``FLAG{…}`` is not eaten as ``FLAG`` + ``{…}``.
+    labeled = re.sub(r"(?i)^(?:FLAG|Flag)\s*:\s*", "", t).strip()
+    return labeled != t and bool(_FLAG_TOKEN_RE.fullmatch(labeled))
 
 
 def _is_accept_noise_line(text: str) -> bool:
@@ -400,9 +445,7 @@ def is_detailed_writeup(text: str) -> bool:
         return True
     if section_hits >= 1 and n_steps >= 3 and blob_len >= 160:
         return True
-    if n_steps >= 6 and blob_len >= 280:
-        return True
-    return False
+    return n_steps >= 6 and blob_len >= 280
 
 
 async def _call_produce_writeup(fn: Any, prompt: str | None = None) -> Any:
@@ -462,18 +505,23 @@ async def capture_solver_writeup(solver: Any) -> str:
 
     If the first turn is only a teaser paragraph, retry once with a stricter
     prompt. Returns the best text we got (detailed preferred).
+    Does **not** retry after a timeout — that doubles stuck "Stopping" waits.
     """
     fn = getattr(solver, "produce_writeup", None)
     if not callable(fn):
         return ""
 
+    timed_out = False
+
     async def _once(prompt: str | None = None) -> str:
+        nonlocal timed_out
         try:
             raw = await asyncio.wait_for(
                 _call_produce_writeup(fn, prompt),
                 timeout=WRITEUP_TIMEOUT_S,
             )
         except TimeoutError:
+            timed_out = True
             logger.warning("writeup capture timed out after %.0fs", WRITEUP_TIMEOUT_S)
             return ""
         except asyncio.CancelledError:
@@ -485,6 +533,8 @@ async def capture_solver_writeup(solver: Any) -> str:
 
     text = await _once()
     if is_detailed_writeup(text):
+        return text
+    if timed_out:
         return text
     retry = await _once(WRITEUP_RETRY_PROMPT)
     if is_detailed_writeup(retry):

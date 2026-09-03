@@ -1,0 +1,32 @@
+[
+  {
+    "id": "solution-summary-jam",
+    "input": "flag{x} ## Solution Summary 1. Unzip APK 2. Patch config",
+    "expect_contains": ["Solution Summary", "1. Unzip APK", "2. Patch config"]
+  },
+  {
+    "id": "cipher-part-not-split",
+    "input": "Use CIPHER_PART_1/2. then continue",
+    "expect_exact": ["Use CIPHER_PART_1/2. then continue"]
+  },
+  {
+    "id": "bold-strip",
+    "input": "**FLAG**: flag{abc}",
+    "expect_exact": ["FLAG: flag{abc}"]
+  },
+  {
+    "id": "what-i-tried",
+    "input": "What I tried: strings. Why it worked: XOR.",
+    "expect_contains": ["What I tried:", "Why it worked:"]
+  },
+  {
+    "id": "decryption-break",
+    "input": "Found key. Decryption: xor then base64",
+    "expect_contains": ["Found key.", "Decryption:"]
+  },
+  {
+    "id": "leading-indent-preserved",
+    "input": "  xor'd the blob with the APK signature",
+    "expect_exact": ["  xor'd the blob with the APK signature"]
+  }
+]

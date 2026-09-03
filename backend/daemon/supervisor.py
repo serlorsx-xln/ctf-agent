@@ -124,6 +124,18 @@ def _read_running_pid(session_id: str | None = None) -> int | None:
         return None
     if pid and _is_artemis_race_pid(pid):
         return pid
+    # Alive but cmdline unreadable / not matched — keep pidfile so stop-incomplete
+    # and spawn refuse still see a live process (do not open a dual-swarm hole).
+    if pid:
+        try:
+            import os
+
+            os.kill(pid, 0)
+            return pid
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            return pid
     try:
         pid_path.unlink(missing_ok=True)
     except OSError:
@@ -275,8 +287,24 @@ class SwarmSupervisor:
         slot = self._get_slot(sid)
 
         # Replace only this session's swarm (leave other slots alone).
-        if self._slot_is_running(slot):
-            await self._stop_unlocked(sid, emit_exit=False)
+        # Also invalidate a stream task that is still winding down after the
+        # process already exited — otherwise its finally can emit swarm_exit
+        # into the new generation's timeline.
+        if self._slot_is_running(slot) or (
+            slot.stream_task is not None and not slot.stream_task.done()
+        ):
+            stop_msg = await self._stop_unlocked(sid, emit_exit=False)
+            if self._slot_is_running(slot) or _read_running_pid(sid):
+                raise RuntimeError(
+                    f"Cannot spawn — previous swarm still alive ({stop_msg})"
+                )
+
+        try:
+            from backend.operator_inbox import clear_operator_inbox
+
+            clear_operator_inbox(session_id=sid)
+        except Exception:
+            logger.debug("clear operator inbox failed", exc_info=True)
 
         slot.generation += 1
         gen = slot.generation
@@ -404,11 +432,12 @@ class SwarmSupervisor:
         except Exception:
             logger.debug("swarm stdout stream ended", exc_info=True)
         finally:
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            # Respawn may have advanced generation while we drained stdout / waited.
             if gen == slot.generation:
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
                 code = proc.returncode
                 if saw_fatal_stdio or (code not in (0, None) and lines <= 8):
                     hint = (
@@ -434,23 +463,29 @@ class SwarmSupervisor:
                     )
                 except Exception:
                     logger.debug("rehydrate session before swarm_exit failed", exc_info=True)
-                self._broadcast(
-                    session_id, {"type": "swarm_exit", "code": code, "lines": lines}, gen=gen
-                )
-                self._clear_persisted_roster(slot)
-                self.state.set_swarm_meta(session_id, swarm_running=False)
-                try:
-                    from backend.process_hygiene import cleanup_orphan_cursor_bridges
-
-                    await asyncio.to_thread(
-                        cleanup_orphan_cursor_bridges, session_id
+                if gen == slot.generation:
+                    self._broadcast(
+                        session_id,
+                        {"type": "swarm_exit", "code": code, "lines": lines},
+                        gen=gen,
                     )
-                except Exception:
-                    logger.debug("orphan bridge cleanup after swarm exit failed", exc_info=True)
-                try:
-                    _pid_path(session_id).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    self._clear_persisted_roster(slot)
+                    self.state.set_swarm_meta(session_id, swarm_running=False)
+                    try:
+                        from backend.process_hygiene import cleanup_orphan_cursor_bridges
+
+                        await asyncio.to_thread(
+                            cleanup_orphan_cursor_bridges, session_id
+                        )
+                    except Exception:
+                        logger.debug(
+                            "orphan bridge cleanup after swarm exit failed",
+                            exc_info=True,
+                        )
+                    try:
+                        _pid_path(session_id).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     # ---- adopt (restart reattach) ---------------------------------------
     async def adopt_if_running(self) -> bool:
@@ -524,13 +559,28 @@ class SwarmSupervisor:
                     return
                 lines += 1
                 self._broadcast(session_id, {"type": "swarm_log", "text": text}, gen=gen)
-            with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh = log_path.open("r", encoding="utf-8", errors="replace")
+            try:
                 fh.seek(end_offset)
                 while True:
                     if gen != slot.generation:
                         return
-                    if not _pid_alive(pid):
+                    if not _adopt_pid_still_ours(session_id, pid):
                         break
+                    # Disk tee truncates at 10MB — reopen when the open handle
+                    # sits past the new EOF so live feed does not freeze.
+                    try:
+                        size = log_path.stat().st_size
+                    except OSError:
+                        size = 0
+                    pos = fh.tell()
+                    if size < pos:
+                        try:
+                            fh.close()
+                        except OSError:
+                            pass
+                        fh = log_path.open("r", encoding="utf-8", errors="replace")
+                        fh.seek(size)
                     line = fh.readline()
                     if line:
                         lines += 1
@@ -541,10 +591,26 @@ class SwarmSupervisor:
                         )
                     else:
                         await asyncio.sleep(0.25)
+            finally:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
         except asyncio.CancelledError:
             raise
         except FileNotFoundError:
-            pass
+            # Log vanished mid-adopt — if the swarm PID is still alive, do NOT
+            # broadcast swarm_exit / unlink the pidfile (would orphan the process
+            # while unlocking the TUI).
+            if _adopt_pid_still_ours(session_id, pid) and gen == slot.generation:
+                logger.warning(
+                    "adopt tail: log missing but pid %s still alive — keeping slot",
+                    pid,
+                )
+                while gen == slot.generation and _adopt_pid_still_ours(session_id, pid):
+                    await asyncio.sleep(0.5)
+                if gen != slot.generation:
+                    return
         except Exception:
             logger.debug("adopt tail ended", exc_info=True)
         finally:
@@ -632,14 +698,35 @@ class SwarmSupervisor:
         slot.generation += 1
         gen = slot.generation
         killed: list[str] = []
+        from backend.shell.bridge import _wait_pid_gone
+
         pid = _read_running_pid(sid)
+        gone = True
         if pid:
             _kill_pid_tree(pid)
+            # Avoid overlapping spawn while the old swarm is still shutting down.
+            gone = await asyncio.to_thread(lambda: _wait_pid_gone(pid, timeout_s=3.0))
+            if not gone:
+                # Escalate once more before giving up.
+                _kill_pid_tree(pid)
+                gone = await asyncio.to_thread(lambda: _wait_pid_gone(pid, timeout_s=5.0))
             killed.append(str(pid))
-        try:
-            _pid_path(sid).unlink(missing_ok=True)
-        except OSError:
-            pass
+            if gone:
+                try:
+                    _pid_path(sid).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            else:
+                logger.warning(
+                    "swarm pid %s still alive after stop (session=%s) — keeping pidfile",
+                    pid,
+                    sid,
+                )
+        else:
+            try:
+                _pid_path(sid).unlink(missing_ok=True)
+            except OSError:
+                pass
         # Session-scoped dialog cancel (not global).
         self._cancel_pending_dialogs(sid)
         task = slot.stream_task
@@ -651,13 +738,21 @@ class SwarmSupervisor:
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
         slot.proc = None
-        self.state.set_swarm_meta(sid, swarm_running=False)
-        # Emit exit before orphan cleanup so the TUI unlocks immediately.
-        if gen == slot.generation:
+        # Only unlock the TUI when the old process is actually gone — otherwise
+        # a following spawn can overwrite the pidfile while the old swarm lives.
+        if gen == slot.generation and gone:
+            self.state.set_swarm_meta(sid, swarm_running=False)
             self._clear_persisted_roster(slot)
             if was_live and emit_exit:
                 self._broadcast(sid, {"type": "swarm_exit", "code": None, "lines": 0}, gen=gen)
+        elif gen == slot.generation and not gone:
+            # Keep swarm_running true so load/spawn stay gated.
+            self.state.set_swarm_meta(sid, swarm_running=True)
         if killed:
+            if not gone:
+                return (
+                    f"Stop incomplete — process(es) still alive: {', '.join(killed)}"
+                )
             return f"Stopped swarm process(es): {', '.join(killed)}"
         return "No active swarm to stop"
 
@@ -685,12 +780,16 @@ class SwarmSupervisor:
             cancel(broadcast=self.state.broadcast, session=session_id)
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
+def _adopt_pid_still_ours(session_id: str, pid: int) -> bool:
+    """True while the adopted swarm process is still the Artemis race we attached to.
+
+    Bare ``os.kill(pid, 0)`` is not enough — after exit the OS can reuse the PID.
+    Match ``_read_running_pid``: require Artemis race cmdline identity.
+    """
+    if not _is_artemis_race_pid(pid):
         return False
+    current = _read_running_pid(session_id)
+    return current is None or current == pid
 
 
 def _read_tail(path: Path, n: int, *, end_offset: int | None = None) -> list[str]:

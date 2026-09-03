@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -73,6 +74,9 @@ class ChallengeSwarm:
     coordinator_inbox: asyncio.Queue | None = None
 
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # After CORRECT: winner stays alive for operator Q&A until release / stop.
+    release_event: asyncio.Event = field(default_factory=asyncio.Event)
+    hold_active: bool = False
     solvers: dict[str, SolverProtocol] = field(default_factory=dict)
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
@@ -86,8 +90,13 @@ class ChallengeSwarm:
     _steps_by_runner: dict[str, int] = field(default_factory=dict)
     # True after How: was streamed — print_swarm_outcome must not dump it again.
     _how_emitted: bool = False
+    # True after interim emitted the "Writing recap…" placeholder (not a real How).
+    _how_placeholder: bool = False
     _writeup_attempted: bool = False
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # One human y/n at a time — TUI has a single flagConfirm slot.
+    _confirm_dialog_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _flag_inflight: set[str] = field(default_factory=set)  # flags awaiting human confirm
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
     _last_submit_time: dict[str, float] = field(
@@ -177,6 +186,10 @@ class ChallengeSwarm:
 
         if provider == "cursor":
             from backend.agents.cursor_solver import CursorSolver
+
+            # Soft check_findings must not steal the file inbox when Cursor
+            # force-followup / idle-queue owns delivery.
+            os.environ["ARTEMIS_CURSOR_OWNS_INBOX"] = "1"
 
             all_cursor = all(
                 provider_from_spec(s) == "cursor" for s in self.model_specs
@@ -305,18 +318,24 @@ class ChallengeSwarm:
     SUBMISSION_COOLDOWNS = [0, 30, 120, 300, 600]  # 0s, 30s, 2min, 5min, 10min
 
     async def try_submit_flag(self, flag: str, runner_id: str) -> tuple[str, bool]:
-        """Cooldown-gated, deduplicated flag submission. Returns (display, challenge_complete)."""
+        """Cooldown-gated, deduplicated flag submission. Returns (display, challenge_complete).
+
+        The human confirm dialog must not hold ``_flag_lock`` — otherwise sibling
+        agents block their entire ``submit_flag`` tool call until y/n returns.
+        """
         from backend.flags import normalize_flags_required
 
         required = normalize_flags_required(getattr(self.meta, "flags_required", 1))
+        normalized = flag.strip()
         async with self._flag_lock:
             if self.confirmed_flag:
+                # Challenge already won by someone else — do NOT return
+                # challenge_complete=True or the sibling sets ``_confirmed`` and
+                # steals Hold via FLAG_FOUND.
                 return (
                     f"ALREADY SOLVED — all flag(s) already confirmed: {self.confirmed_flag}",
-                    True,
+                    False,
                 )
-
-            normalized = flag.strip()
 
             if normalized in self.confirmed_flags:
                 n = len(self.confirmed_flags)
@@ -329,6 +348,13 @@ class ChallengeSwarm:
             # Dedup exact flags across all models (rejected or accepted)
             if normalized in self._submitted_flags:
                 return "INCORRECT — already tried this exact flag.", False
+
+            if normalized in self._flag_inflight:
+                return (
+                    "PENDING — another agent already has this flag awaiting confirmation. "
+                    "Keep solving other angles; do not resubmit the same candidate.",
+                    False,
+                )
 
             from backend.flags import is_rewrap_of_tried
 
@@ -357,66 +383,132 @@ class ChallengeSwarm:
                         False,
                     )
 
+            self._flag_inflight.add(normalized)
+            auto = bool(getattr(self.settings, "auto_confirm_flags", False))
+
+        try:
             from backend.tools.core import do_submit_flag
 
-            auto = bool(getattr(self.settings, "auto_confirm_flags", False))
-            display, is_complete = await do_submit_flag(
-                self.meta.name,
-                flag,
-                already_accepted=list(self.confirmed_flags),
-                required=required,
-                challenge_dir=self.challenge_dir,
-                auto_confirm=auto,
-                by=runner_id,
-            )
-            # Hard rejects (decoy/artifact/rewrap-style) still dedupe so agents
-            # do not re-prompt the operator with the same junk.
-            self._submitted_flags.add(normalized)
-
-            if display.startswith(("ACCEPTED", "CORRECT")):
-                self.confirmed_flags.append(normalized)
-                self.flag_credits[normalized] = runner_id
-                # Snapshot usable prose only — command trails never go in recap.
-                from backend.action_log import notes_from_prose
-
-                solver = self.solvers.get(runner_id)
-                prose = str(getattr(solver, "_findings", "") or "").strip()
-                notes = notes_from_prose(prose)
-                if notes:
-                    self.flag_notes[runner_id] = notes
-                logger.info(
-                    "[%s] Flag progress %s/%s via %s",
-                    self.meta.name,
-                    len(self.confirmed_flags),
-                    required,
-                    runner_id,
-                )
-                # Persist so TUI sidebar / flowCompleted / restart-confirm work.
-                try:
-                    from backend.shell.sandbox_session import sync_accepted_flags
-
-                    sync_accepted_flags(
-                        list(self.confirmed_flags),
-                        flags_required=required,
+            # Serialize the TUI confirm dialog (single bar) without holding
+            # ``_flag_lock`` during the y/n wait so siblings can keep working /
+            # fail fast on dupes. Bookkeeping stays under the dialog lock so a
+            # sibling cannot open another confirm before CORRECT/ACCEPTED lands.
+            async with self._confirm_dialog_lock:
+                # Fresh snapshot under the dialog lock — a sibling may have
+                # finished another flag (or the whole challenge) while we waited.
+                early: tuple[str, bool] | None = None
+                already_accepted: list[str] = []
+                async with self._flag_lock:
+                    if self.confirmed_flag:
+                        early = (
+                            f"ALREADY SOLVED — all flag(s) already confirmed: {self.confirmed_flag}",
+                            False,
+                        )
+                    elif len(self.confirmed_flags) >= required:
+                        self.confirmed_flag = " | ".join(self.confirmed_flags)
+                        early = (
+                            f"ALREADY SOLVED — all flag(s) already confirmed: {self.confirmed_flag}",
+                            False,
+                        )
+                    elif normalized in self.confirmed_flags:
+                        n = len(self.confirmed_flags)
+                        early = (
+                            f"Already accepted this flag ({n}/{required}). "
+                            "Continue and submit the remaining distinct flag(s).",
+                            False,
+                        )
+                    else:
+                        already_accepted = list(self.confirmed_flags)
+                if early is not None:
+                    display, is_complete = early
+                else:
+                    display, is_complete = await do_submit_flag(
+                        self.meta.name,
+                        flag,
+                        already_accepted=already_accepted,
+                        required=required,
+                        challenge_dir=self.challenge_dir,
+                        auto_confirm=auto,
+                        by=runner_id,
                     )
-                except Exception:
-                    logger.debug("sync_accepted_flags failed", exc_info=True)
-                if is_complete:
-                    self.confirmed_flag = " | ".join(self.confirmed_flags)
-                    self.winner_runner_id = runner_id
-                    # Sticky main-page recap NOW — do not wait for writeup / teardown.
-                    # Writeup can hang for minutes; without these lines the TUI goes
-                    # empty while sidebar already shows n/n flags.
-                    self._emit_correct_recap(runner_id)
-                    self._emit_how_recap(interim=True)
-                return display, is_complete
 
-            # Rejected / not counted — escalate cooldown only for attempts that
-            # reached the operator (or incorrect), not pure parse empties.
-            if not display.startswith("Empty flag"):
-                self._submit_count[runner_id] = wrong_count + 1
-                self._last_submit_time[runner_id] = time.monotonic()
-            return display, False
+                async with self._flag_lock:
+                    self._flag_inflight.discard(normalized)
+                    if self.confirmed_flag:
+                        return (
+                            f"ALREADY SOLVED — all flag(s) already confirmed: {self.confirmed_flag}",
+                            False,
+                        )
+                    if display.startswith("ALREADY SOLVED") or display.startswith(
+                        "Already accepted"
+                    ):
+                        return display, False
+                    # Hard rejects still dedupe so agents do not re-prompt junk.
+                    self._submitted_flags.add(normalized)
+
+                    if display.startswith(("ACCEPTED", "CORRECT")):
+                        if normalized not in self.confirmed_flags:
+                            self.confirmed_flags.append(normalized)
+                        self.flag_credits[normalized] = runner_id
+                        from backend.action_log import notes_from_prose
+
+                        solver = self.solvers.get(runner_id)
+                        prose = str(getattr(solver, "_findings", "") or "").strip()
+                        notes = notes_from_prose(prose)
+                        if notes:
+                            self.flag_notes[runner_id] = notes
+                        logger.info(
+                            "[%s] Flag progress %s/%s via %s",
+                            self.meta.name,
+                            len(self.confirmed_flags),
+                            required,
+                            runner_id,
+                        )
+                        try:
+                            from backend.shell.sandbox_session import sync_accepted_flags
+
+                            sync_accepted_flags(
+                                list(self.confirmed_flags),
+                                flags_required=required,
+                            )
+                        except Exception:
+                            logger.debug("sync_accepted_flags failed", exc_info=True)
+                        # Prefer live count over do_submit_flag's is_complete —
+                        # concurrent multi-flag confirms can each see a stale
+                        # already_accepted=[] and both return is_complete=False
+                        # even when N/N is now satisfied.
+                        if is_complete or len(self.confirmed_flags) >= required:
+                            self.confirmed_flag = " | ".join(self.confirmed_flags)
+                            self.winner_runner_id = runner_id
+                            self.hold_active = True
+                            self.cancel_event.set()
+                            # Live-count upgrade: accept_flag only emitted ACCEPTED.
+                            if not display.startswith("CORRECT"):
+                                from backend.agents.live_log import emit_line
+                                from backend.models import agent_display_key
+
+                                via = agent_display_key(runner_id, runner_id)
+                                emit_line(
+                                    f"[artemis] outcome CORRECT — all {required} "
+                                    f"flag(s) confirmed via {via}: {self.confirmed_flag}. "
+                                    "Challenge complete for this run."
+                                )
+                            self._emit_correct_recap(runner_id)
+                            self._emit_how_recap(interim=True)
+                            return (
+                                f"CORRECT — all {required} flag(s) confirmed: "
+                                f"{self.confirmed_flag}",
+                                True,
+                            )
+                        return display, False
+
+                    if not display.startswith("Empty flag"):
+                        self._submit_count[runner_id] = wrong_count + 1
+                        self._last_submit_time[runner_id] = time.monotonic()
+                    return display, False
+        finally:
+            async with self._flag_lock:
+                self._flag_inflight.discard(normalized)
 
     async def _run_solver(self, runner_id: str, model_spec: str) -> SolverResult | None:
         # Each solver runs in its own asyncio task, so the bound tag stays local
@@ -515,6 +607,8 @@ class ChallengeSwarm:
                 self._last_flag = result.flag
                 return result, solver
 
+            # Operator notes: Cursor force-followup handles steer (interrupt) and
+            # queue (after idle) inside the solver — do not soft-drain onto the bus.
             result = await solver.run_until_done_or_gave_up()
             self._last_status = result.status
             self._last_steps = result.step_count
@@ -538,8 +632,19 @@ class ChallengeSwarm:
                     await self.message_bus.post(runner_id, note[:500])
 
             if result.status == FLAG_FOUND and self.confirmed_flag:
-                await self._capture_and_emit_writeup(solver, runner_id)
-                self.cancel_event.set()
+                # Stop siblings BEFORE writeup (can take minutes) so they do not
+                # keep racing/spending after CORRECT is already sticky on the TUI.
+                # hold_active + winner_runner_id keep this winner alive for recap/Q&A.
+                # Late FLAG_FOUND from a sibling (stale _confirmed / race) must not
+                # overwrite the real winner or start a second Hold.
+                if self.winner_runner_id and self.winner_runner_id != runner_id:
+                    logger.info(
+                        "[%s] Ignoring late FLAG_FOUND from %s (winner=%s)",
+                        self.meta.name,
+                        runner_id,
+                        self.winner_runner_id,
+                    )
+                    return result, solver
                 if result.flag != self.confirmed_flag:
                     result = SolverResult(
                         flag=self.confirmed_flag,
@@ -551,7 +656,11 @@ class ChallengeSwarm:
                     )
                 self.winner = result
                 self.winner_runner_id = runner_id
+                self.hold_active = True
+                self.cancel_event.set()
                 logger.info(f"[{self.meta.name}] Flag(s) found by {runner_id}: {result.flag}")
+                await self._capture_and_emit_writeup(solver, runner_id)
+                await self._winner_qa_hold(solver, runner_id)
                 return result, solver
 
             if result.status == FLAG_FOUND and not self.confirmed_flag:
@@ -578,6 +687,39 @@ class ChallengeSwarm:
                     log_path=result.log_path,
                 )
 
+            # Winner finished after CORRECT (cancel or provider error) — still Hold.
+            # Only CANCELLED was promoted before; ERROR/QUOTA/GAVE_UP/INFRA after
+            # CORRECT skipped writeup Hold entirely.
+            if (
+                result.status
+                in (CANCELLED, ERROR, QUOTA_ERROR, GAVE_UP, INFRA_ERROR)
+                and self.confirmed_flag
+                and runner_id == self.winner_runner_id
+                and getattr(solver, "_confirmed", False)
+            ):
+                prior_status = result.status
+                result = SolverResult(
+                    flag=self.confirmed_flag,
+                    status=FLAG_FOUND,
+                    findings_summary=result.findings_summary,
+                    step_count=result.step_count,
+                    cost_usd=result.cost_usd,
+                    log_path=result.log_path,
+                )
+                self.winner = result
+                self.hold_active = True
+                self.cancel_event.set()
+                logger.info(
+                    "[%s] Flag(s) found by %s (promoted from %s): %s",
+                    self.meta.name,
+                    runner_id,
+                    prior_status,
+                    result.flag,
+                )
+                await self._capture_and_emit_writeup(solver, runner_id)
+                await self._winner_qa_hold(solver, runner_id)
+                return result, solver
+
             if result.status == CANCELLED:
                 break
 
@@ -602,7 +744,6 @@ class ChallengeSwarm:
                     from backend.agents.quota_dedupe import claim_quota_outcome_print
 
                     if claim_quota_outcome_print(self.cancel_event):
-                        self._quota_outcome_printed = True
                         from backend.agents.live_log import emit_line
 
                         emit_line(f"[artemis] outcome ERROR — {short}")
@@ -757,9 +898,37 @@ class ChallengeSwarm:
                         await tasks_waiter
                     except (asyncio.CancelledError, Exception):
                         pass
-                    for p in tasks:
+                    # CORRECT: cancel siblings only — winner may be in QA hold.
+                    winner_name = (
+                        f"solver-{self.winner_runner_id}"
+                        if self.confirmed_flag and self.winner_runner_id
+                        else ""
+                    )
+                    to_cancel = [
+                        p
+                        for p in tasks
+                        if not (winner_name and p.get_name() == winner_name)
+                    ]
+                    for p in to_cancel:
                         p.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if to_cancel:
+                        await asyncio.gather(*to_cancel, return_exceptions=True)
+                    remaining = [
+                        p
+                        for p in tasks
+                        if winner_name and p.get_name() == winner_name and not p.done()
+                    ]
+                    if remaining:
+                        done_hold = await asyncio.gather(
+                            *remaining, return_exceptions=True
+                        )
+                        for item in done_hold:
+                            if isinstance(item, SolverResult) and item.status == FLAG_FOUND:
+                                self._write_eval_artifact(item)
+                                return item
+                        if self.winner:
+                            self._write_eval_artifact(self.winner)
+                            return self.winner
                     break
 
                 cancel_waiter.cancel()
@@ -774,17 +943,70 @@ class ChallengeSwarm:
                         result = task.result()
                     except Exception:
                         continue
-                    # Soft race: only kill siblings on full completion.
+                    # Soft race: only kill siblings on full completion — keep the
+                    # hold winner alive (same as the cancel_event waiter path).
                     if result and result.status == FLAG_FOUND and self.confirmed_flag:
                         self.cancel_event.set()
-                        for p in pending:
+                        winner_name = (
+                            f"solver-{self.winner_runner_id}"
+                            if self.winner_runner_id
+                            else ""
+                        )
+                        to_cancel = [
+                            p
+                            for p in pending
+                            if not (winner_name and p.get_name() == winner_name)
+                        ]
+                        for p in to_cancel:
                             p.cancel()
-                        await asyncio.gather(*pending, return_exceptions=True)
+                        if to_cancel:
+                            await asyncio.gather(*to_cancel, return_exceptions=True)
+                        remaining = [
+                            p
+                            for p in pending
+                            if winner_name and p.get_name() == winner_name and not p.done()
+                        ]
+                        if remaining:
+                            done_hold = await asyncio.gather(
+                                *remaining, return_exceptions=True
+                            )
+                            for item in done_hold:
+                                if (
+                                    isinstance(item, SolverResult)
+                                    and item.status == FLAG_FOUND
+                                ):
+                                    self._write_eval_artifact(item)
+                                    return item
+                            if self.winner:
+                                self._write_eval_artifact(self.winner)
+                                return self.winner
                         self._write_eval_artifact(result)
                         return result
 
                 # Quota/stop may have been set while a task was completing.
                 if self.cancel_event.is_set() and pending:
+                    winner_name = (
+                        f"solver-{self.winner_runner_id}"
+                        if self.confirmed_flag and self.winner_runner_id
+                        else ""
+                    )
+                    if winner_name and self.hold_active:
+                        to_cancel = [
+                            p for p in pending if p.get_name() != winner_name
+                        ]
+                        for p in to_cancel:
+                            p.cancel()
+                        if to_cancel:
+                            await asyncio.gather(*to_cancel, return_exceptions=True)
+                        hold_tasks = [
+                            p for p in pending if p.get_name() == winner_name
+                        ]
+                        if hold_tasks:
+                            await asyncio.gather(*hold_tasks, return_exceptions=True)
+                        if self.winner:
+                            self._write_eval_artifact(self.winner)
+                            return self.winner
+                        break
                     for p in pending:
                         p.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
@@ -804,6 +1026,8 @@ class ChallengeSwarm:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._write_eval_artifact(None)
             return None
+        finally:
+            os.environ.pop("ARTEMIS_CURSOR_OWNS_INBOX", None)
 
     def _write_eval_artifact(self, result: SolverResult | None) -> None:
         out = (getattr(self.settings, "eval_out", "") or "").strip()
@@ -925,12 +1149,164 @@ class ChallengeSwarm:
             # No How: header here — the final emit owns that label. Printing it
             # now left the TUI with How: / How: once the recap arrived.
             emit_line("[artemis] summary   Writing recap from the winning solver…")
+            self._how_placeholder = True
             return
         if not how_lines:
             return
         for line in how_lines:
             emit_line(f"[artemis] summary {line}")
         self._how_emitted = True
+        self._how_placeholder = False
+
+    async def _winner_qa_hold(self, solver: Any, runner_id: str) -> None:
+        """Keep the winning solver session alive for operator follow-ups.
+
+        Mid-solve inbox notes keep working (steer + queue). Esc / ``/stop`` /
+        ``kill()`` sets ``release_event`` and ends the hold. Disable with
+        ``ARTEMIS_SKIP_SOLVER_HOLD=1`` (tests / CI).
+        """
+        import os
+
+        if (os.environ.get("ARTEMIS_SKIP_SOLVER_HOLD") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            self.hold_active = False
+            return
+        from backend.agents.live_log import emit_line
+        from backend.models import agent_display_key
+        from backend.operator_inbox import drain_operator_notes_to_bus
+
+        # hold_active may already be True (set before cancel_event).
+        self.hold_active = True
+        # /stop during writeup sets release_event — honor it; do not clear.
+        if self.release_event.is_set():
+            self.hold_active = False
+            return
+        emit_line(
+            "[artemis] hold — ask follow-ups on this agent "
+            "(Enter sends · Esc or /stop releases)"
+        )
+        winner_key = None
+        try:
+            rid = getattr(solver, "runner_id", None) or runner_id
+            spec = getattr(solver, "model_spec", None) or rid
+            if rid and spec:
+                winner_key = agent_display_key(str(rid), str(spec))
+        except Exception:
+            winner_key = None
+        if not winner_key and runner_id:
+            try:
+                winner_key = agent_display_key(str(runner_id), str(runner_id))
+            except Exception:
+                winner_key = str(runner_id).rsplit("/", 1)[-1] or None
+        try:
+            while not self.release_event.is_set():
+                try:
+                    # Never claim with claimer=None on a multi-agent hold — that
+                    # would vacuum sibling-scoped queue leftovers.
+                    if winner_key is None and len(self.model_specs) > 1:
+                        notes = []
+                    else:
+                        notes = await drain_operator_notes_to_bus(
+                            self.message_bus,
+                            delivery=None,
+                            broadcast=False,
+                            claimer=winner_key,
+                        )
+                except Exception:
+                    notes = []
+                for i, text in enumerate(notes):
+                    reply = ""
+                    preview = text[:120].replace("\n", " ")
+                    emit_line(
+                        "[artemis] qa-wait"
+                        + (f" · {preview}" if preview else "")
+                    )
+                    if self.release_event.is_set():
+                        # Re-queue unanswered drained notes (incl. current).
+                        self._requeue_hold_notes(notes[i:], winner_key)
+                        break
+                    qa = getattr(solver, "qa_turn", None)
+                    if callable(qa):
+                        from backend.writeup import WRITEUP_TIMEOUT_S
+
+                        qa_task = asyncio.create_task(qa(text))
+                        release_task = asyncio.create_task(self.release_event.wait())
+                        try:
+                            done, pending = await asyncio.wait(
+                                {qa_task, release_task},
+                                timeout=WRITEUP_TIMEOUT_S,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for t in pending:
+                                t.cancel()
+                                try:
+                                    await t
+                                except asyncio.CancelledError:
+                                    pass
+                            if qa_task in done:
+                                try:
+                                    reply = (qa_task.result() or "").strip()
+                                except Exception as e:
+                                    reply = f"(qa failed: {e})"
+                            elif self.release_event.is_set():
+                                # Prefer a finished answer over Esc when both
+                                # complete in the same wait — otherwise we throw
+                                # away a landed reply and re-ask the same note.
+                                reply = "(hold released)"
+                            else:
+                                reply = "(qa timed out)"
+                        except Exception as e:
+                            reply = f"(qa failed: {e})"
+                    else:
+                        reply = "(this solver cannot answer follow-ups)"
+                    # Tag replies with roster key so the TUI can show the same
+                    # agent/model footer style as normal assistant messages.
+                    prefix = f"→{winner_key}: " if winner_key else ""
+                    if reply:
+                        for line in reply.splitlines()[:80]:
+                            emit_line(f"[artemis] qa {prefix}{line}")
+                    else:
+                        emit_line(f"[artemis] qa {prefix}(no reply)")
+                    # End the answering turn so the footer spinner clears.
+                    emit_line("[artemis] qa-done")
+                    if self.release_event.is_set():
+                        # Abort mid-answer → requeue current; successful answer
+                        # then Esc → only requeue remaining unanswered notes.
+                        abort = (
+                            reply in ("(hold released)", "(qa timed out)")
+                            or reply.startswith("(qa failed:")
+                        )
+                        remaining = notes[i:] if abort else notes[i + 1 :]
+                        self._requeue_hold_notes(remaining, winner_key)
+                        break
+                try:
+                    await asyncio.wait_for(self.release_event.wait(), timeout=0.75)
+                except TimeoutError:
+                    pass
+        finally:
+            self.hold_active = False
+            emit_line("[artemis] hold released")
+
+    def _requeue_hold_notes(self, texts: list[str], winner_key: str | None) -> None:
+        """Put unanswered Hold notes back so a later Hold / restart can claim them."""
+        from backend.agents.live_log import emit_line
+        from backend.operator_inbox import append_operator_note
+
+        for text in texts:
+            body = str(text or "").strip()
+            if not body:
+                continue
+            try:
+                # Queue (not steer): Hold is ending; sticky pending tracks queue crumbs.
+                append_operator_note(body, delivery="queue", target=winner_key)
+                scope = f"→{winner_key}" if winner_key else ""
+                emit_line(f"[artemis] you (queue{scope}): {body[:2000]}")
+            except Exception:
+                logger.debug("hold requeue failed", exc_info=True)
 
     async def _capture_and_emit_writeup(self, solver: Any, runner_id: str) -> None:
         """Ask the winning solver for a recap; always leave How: on the main page."""
@@ -957,9 +1333,16 @@ class ChallengeSwarm:
         writeup = await capture_solver_writeup(solver)
         # A one-paragraph teaser is usable prose but not the operator recap.
         if writeup and is_detailed_writeup(writeup):
+            prev = (self.flag_notes.get(runner_id) or "").strip()
             self.flag_notes[runner_id] = writeup
             self.findings[runner_id] = writeup[:800]
-            self._how_emitted = False
+            # Re-open emit for placeholder interim, or when the real writeup is
+            # clearly richer than the interim How already on the main page.
+            if self._how_placeholder or (
+                self._how_emitted and len(writeup) > len(prev) + 80
+            ):
+                self._how_emitted = False
+                self._how_placeholder = False
         if not self._how_emitted:
             self._emit_how_recap()
 
@@ -1002,13 +1385,14 @@ class ChallengeSwarm:
         return "\n\n".join(parts)
 
     def kill(self) -> None:
-        """Cancel all agents for this challenge."""
+        """Cancel all agents for this challenge (also ends post-solve QA hold)."""
         try:
             from backend.flags import cancel_flag_confirmation
 
             cancel_flag_confirmation()
         except Exception:
             pass
+        self.release_event.set()
         self.cancel_event.set()
 
     def get_status(self) -> dict:
@@ -1026,9 +1410,17 @@ class ChallengeSwarm:
                 rid: {
                     "model": spec,
                     "findings": self.findings.get(rid, ""),
-                    "status": "running"
-                    if rid in self.solvers and not self.cancel_event.is_set()
-                    else ("won" if self.winner and self.winner.flag else "finished"),
+                    "status": (
+                        "holding"
+                        if (
+                            self.hold_active
+                            and self.winner_runner_id
+                            and rid == self.winner_runner_id
+                        )
+                        else "running"
+                        if rid in self.solvers and not self.cancel_event.is_set()
+                        else ("won" if self.winner and self.winner.flag else "finished")
+                    ),
                 }
                 for rid, spec in assign_runner_ids(self.model_specs)
             },

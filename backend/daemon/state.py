@@ -170,6 +170,10 @@ class DaemonState:
         sid = normalize_session_id(session_id)
         return bool(self._subscribers.get(sid))
 
+    def subscribed_sessions(self) -> list[str]:
+        """Session ids that currently have at least one TUI subscriber."""
+        return [sid for sid, qs in self._subscribers.items() if qs]
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Fan-out to subscribers of ``event['session']`` (default ``_default``)."""
         sid = normalize_session_id(event.get("session"))
@@ -200,6 +204,10 @@ _PRIORITY_TYPES = frozenset(
         "replay_done",
         "outcome",
         "flag_confirm_dismiss",
+        "flags_ask_dismiss",
+        # First-run Install must not be dropped when the push queue is full.
+        "setup_done",
+        "setup_log",
     }
 )
 

@@ -55,3 +55,20 @@ def test_infra_recovery_with_partial_flags_still_credits_progress():
     assert "transport/bridge timeout" in text
     assert "1/2" in text
     assert "unproven" not in text
+
+
+def test_session_sync_merges_accepted_flags_from_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "backend.shell.sandbox_session.session_state_path",
+        lambda session_id=None: tmp_path / "session.json",
+    )
+    from backend.shell.sandbox_session import save_session_state
+
+    save_session_state(None, accepted_flags=["CTF{sibling}"], flags_required=2)
+    text = build_continue_prompt(
+        accepted_flags=[],
+        flags_required=2,
+        session_sync=True,
+    )
+    assert "1/2" in text
+    assert "CTF{sibling}" in text

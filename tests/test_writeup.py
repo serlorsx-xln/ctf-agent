@@ -34,7 +34,11 @@ async def test_capture_swallows_errors():
 
 @pytest.mark.asyncio
 async def test_capture_times_out():
-    async def produce_writeup() -> str:
+    calls = 0
+
+    async def produce_writeup(prompt: str | None = None) -> str:
+        nonlocal calls
+        calls += 1
         await asyncio.sleep(60)
         return "late"
 
@@ -44,6 +48,8 @@ async def test_capture_times_out():
     writeup_mod.WRITEUP_TIMEOUT_S = 0.05
     try:
         assert await capture_solver_writeup(SimpleNamespace(produce_writeup=produce_writeup)) == ""
+        # Timeout must not burn a second full wait (retry).
+        assert calls == 1
     finally:
         writeup_mod.WRITEUP_TIMEOUT_S = old
 
@@ -101,6 +107,17 @@ ARCHA{test}
     assert "Why it worked" in out
     assert "ARCHA{test}" not in out
     assert "```" not in out
+
+
+def test_is_flag_only_line_keeps_bare_flag_brace_tokens():
+    from backend.writeup import _is_flag_only_line, normalize_writeup_text
+
+    assert _is_flag_only_line("flag{abc123xxxx}") is True
+    assert _is_flag_only_line("FLAG{abc123xxxx}") is True
+    assert _is_flag_only_line("CTF{abc123xxxx}") is True
+    assert _is_flag_only_line("FLAG: flag{abc123xxxx}") is True
+    assert _is_flag_only_line("How we found it") is False
+    assert "flag{abc123xxxx}" not in normalize_writeup_text("flag{abc123xxxx}\n\nHow\n1. x")
 
 
 def test_expand_splits_hash_solution_summary_and_cipher_part_slash():
@@ -313,9 +330,40 @@ def test_collapse_streamed_word_per_line_writeup():
     assert not is_fragmented_prose(joined)
 
 
+def test_join_streamed_parts_keeps_thai_and_identifiers_intact():
+    from backend.writeup import join_streamed_text_parts
+
+    thai = join_streamed_text_parts(["รับ", "ทราบ", " — ", "ทดสอบ", "ผ่าน", "แล้ว"])
+    assert "รับทราบ" in thai
+    assert "รับ ท ราบ" not in thai
+    assert "ทดสอบผ่านแล้ว" in thai or "ทดสอบ ผ่าน แล้ว" in thai
+
+    ident = join_streamed_text_parts(["submit", "_", "flag", " ", "รับ", "ครบ"])
+    assert "submit_flag" in ident
+    assert "submit _ flag" not in ident
+    assert "รับครบ" in ident
+
+
 def test_fragmented_accept_spam_still_rejected():
     from backend.writeup import is_usable_narrative
 
     spam = "\n".join(["The", "flag", "was", "accepted", "as", "CORRECT"])
     assert not is_usable_narrative(spam)
+
+
+def test_expand_summary_line_shared_fixtures():
+    """Parity with TUI ``expandSummaryLine`` — same cases in fixtures/."""
+    import json
+    from pathlib import Path
+
+    from backend.writeup import expand_summary_line
+
+    path = Path(__file__).parent / "fixtures" / "summary_expand_cases.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))
+    for case in cases:
+        pieces = expand_summary_line(case["input"])
+        if "expect_exact" in case:
+            assert pieces == case["expect_exact"], case["id"]
+        for needle in case.get("expect_contains", []):
+            assert any(needle in p for p in pieces), (case["id"], needle, pieces)
 

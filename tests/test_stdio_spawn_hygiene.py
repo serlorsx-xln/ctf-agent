@@ -176,13 +176,14 @@ def test_windows_empty_cmdline_python_image_treated_live(
     assert bridge._is_artemis_race_pid(12345) is True
 
 
-def test_unix_empty_cmdline_still_treated_live(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unix_empty_cmdline_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unreadable cmdline on Unix must not adopt/kill strangers."""
     import backend.shell.bridge as bridge
 
     monkeypatch.setattr(bridge.sys, "platform", "darwin")
     monkeypatch.setattr(bridge, "_pid_command", lambda pid: "")
     monkeypatch.setattr(bridge.os, "kill", lambda *a, **k: None)
-    assert bridge._is_artemis_race_pid(12345) is True
+    assert bridge._is_artemis_race_pid(12345) is False
 
 
 def test_clear_stale_skipped_when_daemon_alive(

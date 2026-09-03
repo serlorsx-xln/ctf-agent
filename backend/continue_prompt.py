@@ -28,6 +28,7 @@ def build_continue_prompt(
     flags_required: int = 1,
     bump_insights: str | None = None,
     infra_recovery: bool = False,
+    session_sync: bool = False,
 ) -> str:
     """Prompt for the next solver turn after GAVE_UP / bump / resume.
 
@@ -40,6 +41,16 @@ def build_continue_prompt(
       that just burned a whole turn. Never invent technique playbooks.
     """
     accepted = [f for f in accepted_flags if f]
+    if session_sync:
+        try:
+            from backend.shell.sandbox_session import load_session_state
+
+            for f in load_session_state().get("accepted_flags") or []:
+                fs = str(f).strip()
+                if fs and fs not in accepted:
+                    accepted.append(fs)
+        except Exception:
+            pass
     required = normalize_flags_required(flags_required)
     n = len(accepted)
     insights = (bump_insights or "").strip()

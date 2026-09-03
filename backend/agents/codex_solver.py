@@ -198,6 +198,7 @@ class CodexSolver:
         self._confirmed = False
         self._accepted_flags: list[str] = []
         self._findings = ""
+        self._last_agent_text = ""
         self._bump_insights: str | None = None
         self._structured_output: dict | None = None
         self._turn_error: str | None = None
@@ -205,6 +206,9 @@ class CodexSolver:
         self._pending_responses: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._turn_done: asyncio.Event = asyncio.Event()
+        self._turn_id: str | None = None
+        self._force_followup: asyncio.Event = asyncio.Event()
+        self._pending_soft_notes: list[str] = []
 
     async def start(self) -> None:
         from backend.agents.solver_control import start_sandbox_basics
@@ -332,7 +336,16 @@ class CodexSolver:
 
             # Server request: dynamic tool call
             if method == "item/tool/call" and msg_id is not None:
+                tid = params.get("turnId")
+                if tid:
+                    self._turn_id = str(tid)
                 await self._handle_tool_call(msg_id, params)
+
+            elif method == "turn/started":
+                turn = params.get("turn", {}) or {}
+                tid = turn.get("id")
+                if tid:
+                    self._turn_id = str(tid)
 
             # Notification: item completed — assistant text / reasoning arrives here
             elif method == "item/completed":
@@ -342,6 +355,7 @@ class CodexSolver:
                     text = item.get("text", "")
                     phase = item.get("phase")  # "commentary" | "final_answer" | null
                     if text:
+                        self._last_agent_text = text
                         self._findings = text[:2000]
                         tag = "ai" if phase != "commentary" else "ai-commentary"
                         _live(f"{self.agent_name} {tag}", text)
@@ -373,6 +387,18 @@ class CodexSolver:
             # Notification: turn completed — signals the turn is done
             elif method == "turn/completed":
                 turn = params.get("turn", {})
+                completed_id = str(turn.get("id") or params.get("turnId") or "").strip()
+                # Ignore stale completions (e.g. late solve-turn end during writeup).
+                if self._turn_id is None:
+                    continue
+                if completed_id and completed_id != self._turn_id:
+                    logger.debug(
+                        "[%s] Ignoring stale turn/completed id=%s (want %s)",
+                        self.agent_name,
+                        completed_id,
+                        self._turn_id,
+                    )
+                    continue
                 status = turn.get("status", "")
                 if status == "failed":
                     error = turn.get("error", {})
@@ -394,9 +420,13 @@ class CodexSolver:
                     self._findings = f"Turn failed: {error_msg}"
                     self._structured_output = None
                     _live(self.agent_name, "── turn end status=failed ──")
+                elif status == "interrupted":
+                    self._turn_error = None
+                    _live(self.agent_name, "── turn end status=interrupted ──")
                 else:
                     self._turn_error = None
                     _live(self.agent_name, f"── turn end status={status or 'ok'} ──")
+                self._turn_id = None
                 self._turn_done.set()
 
             # Notification: token usage updated
@@ -507,11 +537,13 @@ class CodexSolver:
                 limit=2000,
             )
 
-            if self._step_count % 5 == 0 and self.message_bus:
+            if self.message_bus:
                 from backend.tools.core import do_check_findings
 
                 findings = await do_check_findings(
-                    self.message_bus, getattr(self, "runner_id", None) or self.model_spec
+                    self.message_bus,
+                    self.model_spec,
+                    runner_id=getattr(self, "runner_id", None) or self.model_spec,
                 )
                 if findings and "No new findings" not in findings:
                     result_text = f"{result_text}\n\n---\n{findings}"
@@ -606,6 +638,7 @@ class CodexSolver:
         if self._bump_insights:
             prompt_text = build_continue_prompt(
                 accepted_flags=self._accepted_flags,
+                session_sync=bool(self.submit_fn),
                 flags_required=getattr(self.meta, "flags_required", 1),
                 bump_insights=self._bump_insights,
             )
@@ -615,58 +648,205 @@ class CodexSolver:
         else:
             prompt_text = build_continue_prompt(
                 accepted_flags=self._accepted_flags,
+                session_sync=bool(self.submit_fn),
                 flags_required=getattr(self.meta, "flags_required", 1),
             )
 
-        try:
-            self._turn_done.clear()
-            self._structured_output = None
-            self._turn_error = None
-            _live(self.agent_name, "── turn start ──")
-            await self._rpc(
-                "turn/start",
-                {
-                    "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": prompt_text}],
-                    "outputSchema": solver_output_json_schema(),
-                },
+        if self.message_bus and not self.cancel_event.is_set():
+            from backend.tools.core import soft_idle_operator_notes
+
+            idle_notes = await soft_idle_operator_notes(
+                self.message_bus,
+                self.model_spec,
+                runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                cancel_event=self.cancel_event,
+                confirmed=self._confirmed,
             )
+            if idle_notes:
+                prompt_text = f"{prompt_text}\n\n---\n{idle_notes}"
 
-            await self._turn_done.wait()
-
-            duration = time.monotonic() - t0
-            self.tracer.event("turn_complete", duration=round(duration, 1), steps=self._step_count)
-
-            if self._turn_error:
-                err = self._turn_error.lower()
-                # Context overflow is terminal — don't fallback, just error
-                if "context_length" in err or "context window" in err:
-                    return self._result(ERROR)
-                from backend.agents.solver_control import classify_turn_error
-
-                return self._result(classify_turn_error(self._turn_error))
-
-            if self._structured_output and self._structured_output.get("type") == "flag_found":
-                self._flag = self._structured_output.get("flag")
-                self._findings = (
-                    f"Flag found via {self._structured_output.get('method', '?')}: {self._flag}"
+        try:
+            prompt_queue: list[str] = [prompt_text]
+            while prompt_queue and not self.cancel_event.is_set():
+                next_prompt = prompt_queue.pop(0)
+                self._turn_done.clear()
+                self._structured_output = None
+                self._turn_error = None
+                self._force_followup.clear()
+                _live(self.agent_name, "── turn start ──")
+                start_resp = await self._rpc(
+                    "turn/start",
+                    {
+                        "threadId": self._thread_id,
+                        "input": [{"type": "text", "text": next_prompt}],
+                        "outputSchema": solver_output_json_schema(),
+                    },
                 )
-                # JSON alone does not confirm — only submit_flag does.
+                turn = (start_resp.get("result") or {}).get("turn") or {}
+                tid = turn.get("id")
+                if tid:
+                    self._turn_id = str(tid)
+
+                watcher = asyncio.create_task(self._watch_soft_steer())
+                try:
+                    await self._turn_done.wait()
+                finally:
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except asyncio.CancelledError:
+                        pass
+
+                duration = time.monotonic() - t0
+                self.tracer.event(
+                    "turn_complete", duration=round(duration, 1), steps=self._step_count
+                )
+
+                # Soft Send-now wins over a failed/interrupted turn surface so
+                # operator notes are not dropped when interrupt looks like an error.
+                if self._force_followup.is_set() and not self.cancel_event.is_set():
+                    notes = [n for n in self._pending_soft_notes if str(n or "").strip()]
+                    self._pending_soft_notes.clear()
+                    self._force_followup.clear()
+                    if notes:
+                        from backend.agents.soft_steer import operator_interrupt_prompt
+
+                        cont = build_continue_prompt(
+                            accepted_flags=self._accepted_flags,
+                            session_sync=bool(self.submit_fn),
+                            flags_required=getattr(self.meta, "flags_required", 1),
+                        )
+                        prompt_queue.append(operator_interrupt_prompt(notes, cont))
+                        continue
+
+                # CORRECT during the turn beats a concurrent provider error —
+                # otherwise we return ERROR and skip swarm Hold.
+                if self._confirmed and self._flag:
+                    from backend.agents.soft_steer import restore_pending_soft_notes
+
+                    restore_pending_soft_notes(self)
+                    return self._result(FLAG_FOUND)
+
+                if self._turn_error:
+                    err = self._turn_error.lower()
+                    # Context overflow is terminal — don't fallback, just error
+                    if "context_length" in err or "context window" in err:
+                        from backend.agents.soft_steer import restore_pending_soft_notes
+
+                        restore_pending_soft_notes(self)
+                        return self._result(ERROR)
+                    from backend.agents.soft_steer import restore_pending_soft_notes
+                    from backend.agents.solver_control import classify_turn_error
+
+                    restore_pending_soft_notes(self)
+                    return self._result(classify_turn_error(self._turn_error))
+
+                if self._structured_output and self._structured_output.get("type") == "flag_found":
+                    self._flag = self._structured_output.get("flag")
+                    self._findings = (
+                        f"Flag found via {self._structured_output.get('method', '?')}: "
+                        f"{self._flag}"
+                    )
+                    # JSON alone does not confirm — only submit_flag does.
+
+                # Soft Queue / late steer at the turn boundary (not after bump cooldown).
+                if self.message_bus and not self.cancel_event.is_set():
+                    from backend.tools.core import soft_idle_operator_notes
+
+                    idle_notes = await soft_idle_operator_notes(
+                        self.message_bus,
+                        self.model_spec,
+                        runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                        cancel_event=self.cancel_event,
+                        confirmed=self._confirmed,
+                    )
+                    if idle_notes:
+                        cont = build_continue_prompt(
+                            accepted_flags=self._accepted_flags,
+                            session_sync=bool(self.submit_fn),
+                            flags_required=getattr(self.meta, "flags_required", 1),
+                        )
+                        prompt_queue.append(f"{cont}\n\n---\n{idle_notes}")
+                        continue
+
+                # Undelivered Send-now (e.g. sibling CORRECT mid-interrupt) must
+                # re-queue for Hold — do not drop claimed notes on GAVE_UP.
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
+                return self._result(GAVE_UP)
 
             if self._confirmed and self._flag:
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
                 return self._result(FLAG_FOUND)
+            from backend.agents.soft_steer import restore_pending_soft_notes
+
+            restore_pending_soft_notes(self)
             return self._result(GAVE_UP)
 
         except asyncio.CancelledError:
+            from backend.agents.soft_steer import restore_pending_soft_notes
+
+            restore_pending_soft_notes(self)
+            if self._confirmed and self._flag:
+                return self._result(FLAG_FOUND)
             return self._result(CANCELLED)
         except Exception as e:
             error_str = str(e)
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
+            from backend.agents.soft_steer import restore_pending_soft_notes
             from backend.agents.solver_control import classify_turn_error
 
+            restore_pending_soft_notes(self)
+            if self._confirmed and self._flag:
+                return self._result(FLAG_FOUND)
             return self._result(classify_turn_error(error_str))
+
+    async def _claim_soft_steer(self) -> list[str]:
+        from backend.agents.live_log import emit_line
+        from backend.agents.soft_steer import claim_soft_steer_notes
+
+        notes = await claim_soft_steer_notes(self)
+        if notes:
+            self._pending_soft_notes.extend(notes)
+            self._force_followup.set()
+            preview = notes[0][:120]
+            emit_line(
+                "[artemis] followup — interrupting current turn"
+                + (f" · {preview}" if preview else "")
+            )
+            await self._interrupt_active_turn()
+        return notes
+
+    async def _interrupt_active_turn(self) -> None:
+        tid = (self._turn_id or "").strip()
+        thread = (self._thread_id or "").strip()
+        if not tid or not thread:
+            return
+        try:
+            await self._rpc("turn/interrupt", {"threadId": thread, "turnId": tid})
+        except Exception:
+            logger.debug("[%s] soft turn/interrupt failed", self.agent_name, exc_info=True)
+
+    async def _watch_soft_steer(self) -> None:
+        try:
+            while not self.cancel_event.is_set() and not self._confirmed:
+                if self._force_followup.is_set():
+                    return
+                await self._claim_soft_steer()
+                if self._force_followup.is_set():
+                    return
+                try:
+                    await asyncio.wait_for(self._force_followup.wait(), timeout=0.6)
+                    return
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            return
 
     def bump(self, insights: str) -> None:
         from backend.agents.solver_control import stash_bump
@@ -675,24 +855,42 @@ class CodexSolver:
 
     async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more turn: narrative writeup for the operator recap (no tools expected)."""
-        from backend.writeup import WRITEUP_PROMPT
+        from backend.writeup import WRITEUP_PROMPT, WRITEUP_TIMEOUT_S
 
         if not self._thread_id:
             return ""
+        # Drop identity so a late solve-turn ``turn/completed`` cannot wake us.
+        self._turn_id = None
         self._turn_done.clear()
         self._structured_output = None
         self._turn_error = None
-        before = self._findings
-        _live(self.agent_name, "── writeup ──")
-        await self._rpc(
-            "turn/start",
-            {
-                "threadId": self._thread_id,
-                "input": [{"type": "text", "text": prompt or WRITEUP_PROMPT}],
-            },
-        )
-        await self._turn_done.wait()
-        text = (self._findings or "").strip()
+        before = self._last_agent_text or self._findings
+        from backend.agents.live_log import quiet_live
+
+        with quiet_live():
+            _live(self.agent_name, "── writeup ──")
+            start_resp = await self._rpc(
+                "turn/start",
+                {
+                    "threadId": self._thread_id,
+                    "input": [{"type": "text", "text": prompt or WRITEUP_PROMPT}],
+                },
+            )
+            turn = (start_resp.get("result") or {}).get("turn") or {}
+            tid = turn.get("id")
+            if tid:
+                self._turn_id = str(tid)
+            try:
+                await asyncio.wait_for(self._turn_done.wait(), timeout=WRITEUP_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning(
+                    "[%s] writeup/qa turn timed out after %.0fs",
+                    self.agent_name,
+                    WRITEUP_TIMEOUT_S,
+                )
+                await self._interrupt_active_turn()
+                return ""
+        text = (self._last_agent_text or self._findings or "").strip()
         if text.startswith(("Error:", "Turn failed:", "Infra:")):
             return ""
         # Unchanged findings means the model never wrote a new message.
@@ -702,6 +900,18 @@ class CodexSolver:
         from backend.writeup import normalize_writeup_text
 
         return normalize_writeup_text(text)
+
+    async def qa_turn(self, question: str) -> str:
+        """Post-solve follow-up on the same Codex thread."""
+        q = (question or "").strip()
+        if not q:
+            return ""
+        prompt = (
+            "The challenge is already solved. Answer the operator's follow-up "
+            "using what you learned in this session. Be concise.\n\n"
+            f"Operator: {q}"
+        )
+        return await self.produce_writeup(prompt)
 
     def _result(self, status: str) -> SolverResult:
         self.tracer.event("finish", status=status, flag=self._flag, confirmed=self._confirmed)

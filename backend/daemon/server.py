@@ -199,6 +199,9 @@ class _PeerConn:
         # Serialize writes: the pump task (push events) and the read loop
         # (responses) share this writer and must not interleave mid-message.
         self._write_lock = asyncio.Lock()
+        # Swarm dialog waits run in the background so ``_read_loop`` can still
+        # see EOF and hit ``_run_swarm`` finally (cancel → dismiss sticky bar).
+        self._swarm_dialog_tasks: set[asyncio.Task[Any]] = set()
 
     async def run(self) -> None:
         # First line: hello.
@@ -299,6 +302,11 @@ class _PeerConn:
                         "started_at": self.daemon.supervisor.started_at_ms(sid),
                     }
                 )
+                # Re-show open flag/ask dialogs (futures survived the blip;
+                # the TUI bar only listens for the push event).
+                handlers_mod.rebroadcast_pending_dialogs(
+                    self.daemon.state.broadcast, session=sid
+                )
             elif sess.get("challenge_dir"):
                 await self._push({"type": "replay_done", "session": sid, "running": False})
             await self._read_loop()
@@ -329,10 +337,58 @@ class _PeerConn:
         try:
             await self._read_loop()
         finally:
-            # Swarm connection dropped: resolve this session's in-flight dialogs.
+            # Swarm connection dropped: resolve this session's in-flight dialogs
+            # so reply tasks unblock and the TUI gets flag_confirm_dismiss.
             handlers_mod.cancel_pending_dialogs(
                 broadcast=self.daemon.state.broadcast, session=self._sid()
             )
+            if self._swarm_dialog_tasks:
+                await asyncio.gather(*self._swarm_dialog_tasks, return_exceptions=True)
+            self._swarm_dialog_tasks.clear()
+
+    def _spawn_swarm_dialog_reply(
+        self,
+        *,
+        fut: asyncio.Future[Any],
+        rid: str,
+        sid: str,
+        req_id: Any,
+        mtype: str,
+        on_cancel: dict[str, Any],
+        response_fields: dict[str, Any],
+    ) -> None:
+        """Wait for a dialog future without blocking the swarm read loop."""
+
+        async def _finish() -> None:
+            try:
+                try:
+                    result = await fut
+                except asyncio.CancelledError:
+                    result = dict(on_cancel)
+                handlers_mod.pop_dialog(rid, session=sid)
+                fields = {
+                    k: result.get(k, default) for k, default in response_fields.items()
+                }
+                if mtype == "flag_confirm_request":
+                    fields["reason"] = str(result.get("reason") or "")
+                await self._send(
+                    protocol.make_response(
+                        req_id=req_id,
+                        type=mtype,
+                        ok=bool(result.get("ok")),
+                        session=sid,
+                        **fields,
+                    )
+                )
+            except asyncio.CancelledError:
+                handlers_mod.pop_dialog(rid, session=sid)
+                raise
+            except Exception:
+                logger.debug("swarm dialog reply failed", exc_info=True)
+
+        task = asyncio.create_task(_finish())
+        self._swarm_dialog_tasks.add(task)
+        task.add_done_callback(self._swarm_dialog_tasks.discard)
 
     async def _read_loop(self) -> None:
         while True:
@@ -353,6 +409,11 @@ class _PeerConn:
                     await self._handle_swarm_message(msg)
                 continue
             # TUI request.
+            if mtype == "hello":
+                # Mid-install chat switch: client re-hellos with a new session
+                # on the same socket — rebind subscribe so setup_log keeps flowing.
+                await self._rebind_tui_session(msg)
+                continue
             if mtype == "subscribe":
                 # Already subscribed on connect; replay already sent.
                 await self._send(
@@ -364,6 +425,36 @@ class _PeerConn:
             resp = await self.daemon.handlers.dispatch(msg)
             if resp is not None:
                 await self._send(resp)
+
+    async def _rebind_tui_session(self, msg: dict[str, Any]) -> None:
+        """Ack hello; if session changed, move this peer's subscription."""
+        new_sid = normalize_session_id(msg.get("session") or self.session)
+        old_sid = normalize_session_id(self.session)
+        if new_sid != old_sid:
+            pump = getattr(self, "_pump_task", None)
+            if pump is not None and not pump.done():
+                pump.cancel()
+                try:
+                    await pump
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if self.sub_queue is not None:
+                self.daemon.state.unsubscribe(self.sub_queue)
+                self.sub_queue = None
+            self.daemon.tui_detached(old_sid)
+            self.session = new_sid
+            self.sub_queue = self.daemon.state.subscribe(new_sid)
+            self.daemon.tui_attached(new_sid)
+            self._pump_task = asyncio.create_task(self._pump_sub_queue())
+            logger.info("TUI rebind session %s → %s", old_sid, new_sid)
+        await self._send(
+            protocol.make_response(
+                req_id=msg.get("id"),
+                type="hello",
+                role=self.role or protocol.ROLE_TUI,
+                session=new_sid,
+            )
+        )
 
     async def _handle_swarm_message(self, msg: dict[str, Any]) -> None:
         """Forward swarm-originated events to TUI; coordinate dialog answers."""
@@ -390,7 +481,13 @@ class _PeerConn:
         if mtype == "flag_confirm_request":
             rid = msg.get("request_id") or protocol.new_id()
             fut: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
-            handlers_mod.register_dialog(rid, fut, session=sid)
+            handlers_mod.register_dialog(
+                rid,
+                fut,
+                session=sid,
+                kind="flag_confirm",
+                meta={"flag": msg.get("flag")},
+            )
             self.daemon.state.broadcast(
                 {
                     "type": "flag_confirm_request",
@@ -399,26 +496,30 @@ class _PeerConn:
                     "session": sid,
                 }
             )
-            try:
-                result = await fut
-            except asyncio.CancelledError:
-                result = {"ok": False}
-            handlers_mod.pop_dialog(rid, session=sid)
-            await self._send(
-                protocol.make_response(
-                    req_id=msg.get("id"),
-                    type="flag_confirm_request",
-                    ok=bool(result.get("ok")),
-                    reason=str(result.get("reason") or ""),
-                    session=sid,
-                )
+            self._spawn_swarm_dialog_reply(
+                fut=fut,
+                rid=rid,
+                sid=sid,
+                req_id=msg.get("id"),
+                mtype="flag_confirm_request",
+                on_cancel={"ok": False},
+                response_fields={},
             )
             return
 
         if mtype == "flags_ask_request":
             rid = msg.get("request_id") or protocol.new_id()
             fut = asyncio.get_event_loop().create_future()
-            handlers_mod.register_dialog(rid, fut, session=sid)
+            handlers_mod.register_dialog(
+                rid,
+                fut,
+                session=sid,
+                kind="flags_ask",
+                meta={
+                    "default": msg.get("default"),
+                    "challenge": msg.get("challenge"),
+                },
+            )
             nsubs = 1 if self.daemon.state.has_subscribers(sid) else 0
             logger.info(
                 "flags_ask_request rid=%s session=%s subscribers=%d — broadcasting to TUI",
@@ -435,19 +536,14 @@ class _PeerConn:
                     "session": sid,
                 }
             )
-            try:
-                result = await fut
-            except asyncio.CancelledError:
-                result = {"n": msg.get("default", 1), "ok": False}
-            handlers_mod.pop_dialog(rid, session=sid)
-            await self._send(
-                protocol.make_response(
-                    req_id=msg.get("id"),
-                    type="flags_ask_request",
-                    ok=bool(result.get("ok")),
-                    n=result.get("n"),
-                    session=sid,
-                )
+            self._spawn_swarm_dialog_reply(
+                fut=fut,
+                rid=rid,
+                sid=sid,
+                req_id=msg.get("id"),
+                mtype="flags_ask_request",
+                on_cancel={"n": msg.get("default", 1), "ok": False},
+                response_fields={"n": msg.get("default", 1)},
             )
             return
 

@@ -59,3 +59,17 @@ def test_format_cursor_run_error_humanizes_quota() -> None:
     )
     assert "usage limit" in out.lower()
     assert "You've hit your usage limit Switch" not in out
+
+
+def test_is_benign_cancel_error() -> None:
+    from backend.agents.cursor_runtime import is_benign_cancel_error
+
+    assert is_benign_cancel_error(
+        "unsupported_run_operation: Run 'run-abc' is already in terminal status "
+        "'cancelled'; cancel is not applicable."
+    )
+    assert is_benign_cancel_error(
+        "Error: unsupported_run_operation: Run 'x' is already in terminal status 'cancelled'"
+    )
+    assert not is_benign_cancel_error("Bridge request timed out after 30s")
+    assert not is_benign_cancel_error(None)

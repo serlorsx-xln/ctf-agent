@@ -102,6 +102,8 @@ class ClaudeSolver:
         self._cost_usd = 0.0
         self._cost_reported = False
         self._bump_insights: str | None = None
+        self._force_followup: asyncio.Event = asyncio.Event()
+        self._pending_soft_notes: list[str] = []
 
     @staticmethod
     def _bash_timeout_s(tool_input: dict) -> int:
@@ -424,11 +426,13 @@ class ClaudeSolver:
                 limit=2000,
             )
 
-            if self._step_count % 5 == 0 and self.message_bus:
+            if self.message_bus:
                 from backend.tools.core import do_check_findings
 
                 findings = await do_check_findings(
-                    self.message_bus, getattr(self, "runner_id", None) or self.model_spec
+                    self.message_bus,
+                    self.model_spec,
+                    runner_id=getattr(self, "runner_id", None) or self.model_spec,
                 )
                 if findings and "No new findings" not in findings:
                     return {
@@ -506,6 +510,7 @@ class ClaudeSolver:
             if self._bump_insights:
                 prompt = build_continue_prompt(
                     accepted_flags=self._accepted_flags,
+                    session_sync=bool(self.submit_fn),
                     flags_required=getattr(self.meta, "flags_required", 1),
                     bump_insights=self._bump_insights,
                 )
@@ -513,71 +518,155 @@ class ClaudeSolver:
             elif self._session_id:
                 prompt = build_continue_prompt(
                     accepted_flags=self._accepted_flags,
+                    session_sync=bool(self.submit_fn),
                     flags_required=getattr(self.meta, "flags_required", 1),
                 )
             else:
                 prompt = "Solve this CTF challenge."
 
-            _live(self.agent_name, "── turn start ──")
-            await self._client.query(prompt)
+            if self.message_bus and not self.cancel_event.is_set():
+                from backend.tools.core import soft_idle_operator_notes
 
-            async for message in self._client.receive_response():
-                # Custom GLM gateways often never emit ResultMessage after
-                # CORRECT (denied-tool loop). Return FLAG_FOUND and write the
-                # recap on a fresh client — do not wait here.
-                if self.cancel_event.is_set() or self._confirmed:
-                    break
+                idle_notes = await soft_idle_operator_notes(
+                    self.message_bus,
+                    self.model_spec,
+                    runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                    cancel_event=self.cancel_event,
+                    confirmed=self._confirmed,
+                )
+                if idle_notes:
+                    prompt = f"{prompt}\n\n---\n{idle_notes}"
 
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, ThinkingBlock):
-                            think = (
-                                getattr(block, "thinking", None) or getattr(block, "text", "") or ""
-                            )
-                            if str(think).strip():
-                                _live(f"{self.agent_name} think", str(think))
-                        elif isinstance(block, TextBlock):
-                            self._findings = block.text[:2000]
-                            _live(f"{self.agent_name} ai", block.text)
-                    # Mid-turn usage preview (provider-reported only). Gateways
-                    # may send Anthropic or OpenAI-shaped fields; normalize both.
-                    parsed = usage_from_provider(message)
-                    if parsed["input"] or parsed["output"] or parsed["cache_read"]:
-                        self.cost_tracker.publish_with_pending(
-                            input_tokens=parsed["input"],
-                            output_tokens=parsed["output"],
-                            cache_read_tokens=parsed["cache_read"],
+            prompt_queue: list[str] = [prompt]
+            while prompt_queue and not self.cancel_event.is_set():
+                next_prompt = prompt_queue.pop(0)
+                self._force_followup.clear()
+                _live(self.agent_name, "── turn start ──")
+                await self._client.query(next_prompt)
+                watcher = asyncio.create_task(self._watch_soft_steer())
+                try:
+                    async for message in self._client.receive_response():
+                        if (
+                            self.cancel_event.is_set()
+                            or self._confirmed
+                            or self._force_followup.is_set()
+                        ):
+                            break
+
+                        if isinstance(message, AssistantMessage):
+                            for block in message.content:
+                                if isinstance(block, ThinkingBlock):
+                                    think = (
+                                        getattr(block, "thinking", None)
+                                        or getattr(block, "text", "")
+                                        or ""
+                                    )
+                                    if str(think).strip():
+                                        _live(f"{self.agent_name} think", str(think))
+                                elif isinstance(block, TextBlock):
+                                    self._findings = block.text[:2000]
+                                    _live(f"{self.agent_name} ai", block.text)
+                            parsed = usage_from_provider(message)
+                            if parsed["input"] or parsed["output"] or parsed["cache_read"]:
+                                self.cost_tracker.publish_with_pending(
+                                    input_tokens=parsed["input"],
+                                    output_tokens=parsed["output"],
+                                    cache_read_tokens=parsed["cache_read"],
+                                )
+
+                        elif isinstance(message, ResultMessage):
+                            self._apply_result_message(message, t0=t0)
+                finally:
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except asyncio.CancelledError:
+                        pass
+
+                _live(self.agent_name, "── turn end ──")
+                turn_event: dict = {"duration": round(time.monotonic() - t0, 1)}
+                if self._cost_reported:
+                    turn_event["cost_usd_reported"] = round(self._cost_usd, 4)
+                self.tracer.event("turn_complete", **turn_event)
+
+                if self._confirmed and self._flag:
+                    from backend.agents.soft_steer import restore_pending_soft_notes
+
+                    restore_pending_soft_notes(self)
+                    return self._result(FLAG_FOUND)
+
+                if self._force_followup.is_set() and not self.cancel_event.is_set():
+                    notes = [n for n in self._pending_soft_notes if str(n or "").strip()]
+                    self._pending_soft_notes.clear()
+                    self._force_followup.clear()
+                    if notes:
+                        from backend.agents.soft_steer import operator_interrupt_prompt
+
+                        cont = build_continue_prompt(
+                            accepted_flags=self._accepted_flags,
+                            session_sync=bool(self.submit_fn),
+                            flags_required=getattr(self.meta, "flags_required", 1),
                         )
+                        prompt_queue.append(operator_interrupt_prompt(notes, cont))
+                        continue
 
-                elif isinstance(message, ResultMessage):
-                    self._apply_result_message(message, t0=t0)
+                # Soft Queue / late steer at the turn boundary (not after bump cooldown).
+                if (
+                    self.message_bus
+                    and not self.cancel_event.is_set()
+                    and not self._confirmed
+                ):
+                    from backend.tools.core import soft_idle_operator_notes
 
-                # tool_progress / other SDK noise — ignore silently
+                    idle_notes = await soft_idle_operator_notes(
+                        self.message_bus,
+                        self.model_spec,
+                        runner_id=getattr(self, "runner_id", None) or self.model_spec,
+                        cancel_event=self.cancel_event,
+                        confirmed=self._confirmed,
+                    )
+                    if idle_notes:
+                        cont = build_continue_prompt(
+                            accepted_flags=self._accepted_flags,
+                            session_sync=bool(self.submit_fn),
+                            flags_required=getattr(self.meta, "flags_required", 1),
+                        )
+                        prompt_queue.append(f"{cont}\n\n---\n{idle_notes}")
+                        continue
+                break
 
-            _live(self.agent_name, "── turn end ──")
-            turn_event: dict = {"duration": round(time.monotonic() - t0, 1)}
-            if self._cost_reported:
-                turn_event["cost_usd_reported"] = round(self._cost_usd, 4)
-            self.tracer.event("turn_complete", **turn_event)
-
-            # Also check if flag was confirmed via submit_flag in bash
             if self._confirmed and self._flag:
+                from backend.agents.soft_steer import restore_pending_soft_notes
+
+                restore_pending_soft_notes(self)
                 return self._result(FLAG_FOUND)
-            # Report per-run metrics so broken-solver detection works
+
+            from backend.agents.soft_steer import restore_pending_soft_notes
+
+            restore_pending_soft_notes(self)
             run_steps = self._step_count - steps_before
             run_cost = self._cost_usd - cost_before
             return self._result(GAVE_UP, run_steps=run_steps, run_cost=run_cost)
 
         except asyncio.CancelledError:
+            from backend.agents.soft_steer import restore_pending_soft_notes
+
+            restore_pending_soft_notes(self)
+            if self._confirmed and self._flag:
+                return self._result(FLAG_FOUND)
             return self._result(CANCELLED)
         except Exception as e:
             error_str = str(e)
             logger.error(f"[{self.agent_name}] Error: {e}", exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
+            from backend.agents.soft_steer import restore_pending_soft_notes
             from backend.agents.solver_control import classify_turn_error
             from backend.solver_base import QUOTA_ERROR
 
+            restore_pending_soft_notes(self)
+            if self._confirmed and self._flag:
+                return self._result(FLAG_FOUND)
             status = classify_turn_error(error_str)
             if status == QUOTA_ERROR:
                 _live(
@@ -585,6 +674,42 @@ class ClaudeSolver:
                     "provider/auth error — check API key or billing (details suppressed)",
                 )
             return self._result(status)
+
+    async def _claim_soft_steer(self) -> list[str]:
+        from backend.agents.live_log import emit_line
+        from backend.agents.soft_steer import claim_soft_steer_notes
+
+        notes = await claim_soft_steer_notes(self)
+        if notes:
+            self._pending_soft_notes.extend(notes)
+            self._force_followup.set()
+            preview = notes[0][:120]
+            emit_line(
+                "[artemis] followup — interrupting current turn"
+                + (f" · {preview}" if preview else "")
+            )
+            if self._client is not None:
+                try:
+                    await self._client.interrupt()
+                except Exception:
+                    logger.debug("[%s] soft interrupt failed", self.agent_name, exc_info=True)
+        return notes
+
+    async def _watch_soft_steer(self) -> None:
+        try:
+            while not self.cancel_event.is_set() and not self._confirmed:
+                if self._force_followup.is_set():
+                    return
+                await self._claim_soft_steer()
+                if self._force_followup.is_set():
+                    return
+                try:
+                    await asyncio.wait_for(self._force_followup.wait(), timeout=0.6)
+                    return
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            return
 
     def _apply_result_message(self, message: ResultMessage, *, t0: float) -> None:
         """Commit usage from a ResultMessage."""
@@ -660,44 +785,58 @@ class ClaudeSolver:
         Custom Anthropic URLs (GLM) commonly never end receive_response after
         CORRECT. Reusing that client hangs How: on "Writing recap…".
         """
+        from backend.agents.live_log import quiet_live
         from backend.models import effort_from_spec
         from backend.writeup import WRITEUP_PROMPT, WRITEUP_TIMEOUT_S, join_streamed_text_parts
 
         body = self._writeup_user_prompt(prompt or WRITEUP_PROMPT)
-        _live(self.agent_name, "── writeup ──")
-        options = ClaudeAgentOptions(
-            model=self.model_id,
-            system_prompt=(
-                "You write CTF operator recaps from the session notes. "
-                "Do not call tools. Do not invent details that are not in the notes."
-            ),
-            effort=effort_from_spec(self.model_spec),
-            env=self._sdk_env(),
-            allowed_tools=[],
-            permission_mode="bypassPermissions",
-        )
-        client = ClaudeSDKClient(options=options)
-        parts: list[str] = []
-        try:
-            await client.__aenter__()
-            await client.query(body)
-            async with asyncio.timeout(WRITEUP_TIMEOUT_S):
-                async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock) and str(block.text or "").strip():
-                                parts.append(block.text.strip())
-        except TimeoutError:
-            logger.warning("[%s] writeup turn timed out", self.agent_name)
-        except Exception:
-            logger.warning("[%s] writeup turn failed", self.agent_name, exc_info=True)
-            return ""
-        finally:
+        with quiet_live():
+            _live(self.agent_name, "── writeup ──")
+            options = ClaudeAgentOptions(
+                model=self.model_id,
+                system_prompt=(
+                    "You write CTF operator recaps from the session notes. "
+                    "Do not call tools. Do not invent details that are not in the notes."
+                ),
+                effort=effort_from_spec(self.model_spec),
+                env=self._sdk_env(),
+                allowed_tools=[],
+                permission_mode="bypassPermissions",
+            )
+            client = ClaudeSDKClient(options=options)
+            parts: list[str] = []
             try:
-                await asyncio.wait_for(client.__aexit__(None, None, None), timeout=8.0)
+                await client.__aenter__()
+                await client.query(body)
+                async with asyncio.timeout(WRITEUP_TIMEOUT_S):
+                    async for message in client.receive_response():
+                        if isinstance(message, AssistantMessage):
+                            for block in message.content:
+                                if isinstance(block, TextBlock) and str(block.text or "").strip():
+                                    parts.append(block.text.strip())
+            except TimeoutError:
+                logger.warning("[%s] writeup turn timed out", self.agent_name)
             except Exception:
-                pass
-        return join_streamed_text_parts(parts)
+                logger.warning("[%s] writeup turn failed", self.agent_name, exc_info=True)
+                return ""
+            finally:
+                try:
+                    await asyncio.wait_for(client.__aexit__(None, None, None), timeout=8.0)
+                except Exception:
+                    pass
+            return join_streamed_text_parts(parts)
+
+    async def qa_turn(self, question: str) -> str:
+        """Post-solve follow-up (fresh Claude client + session notes)."""
+        q = (question or "").strip()
+        if not q:
+            return ""
+        prompt = (
+            "The challenge is already solved. Answer the operator's follow-up "
+            "using the session notes below. Be concise.\n\n"
+            f"Operator: {q}"
+        )
+        return await self.produce_writeup(prompt)
 
     async def stop(self) -> None:
         self.tracer.event("stop", step_count=self._step_count)

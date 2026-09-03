@@ -7,12 +7,14 @@ continuous block — not one Thinking card per word.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import sys
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 logger = logging.getLogger("backend.agents.live")
@@ -28,9 +30,13 @@ _lock = threading.Lock()
 _stream_tag: str | None = None
 _stream_body: str = ""
 _flush_timer: threading.Timer | None = None
-_FLUSH_IDLE_S = 0.4
+_FLUSH_IDLE_S = 0.15
+_FLUSH_FIRST_S = 0.02
 _FLUSH_MAX_CHARS = 600
 _GARBLED_SUPPRESSED = "provider returned unreadable output (suppressed)"
+_stream_first_chunk = False
+# Nestable mute for writeup / Hold Q&A — tool dumps must not flood the feed.
+_quiet_depth = 0
 
 
 def is_garbled_model_text(text: str) -> bool:
@@ -155,6 +161,10 @@ def _rotate_disk_log(path: str) -> None:
         with open(path, "rb") as raw:
             data = raw.read()
         keep = data[-_DISK_LOG_MAX_BYTES // 2 :]
+        # Align to a newline so we never keep a torn UTF-8 / mid-line fragment.
+        nl = keep.find(b"\n")
+        if 0 <= nl < len(keep) - 1:
+            keep = keep[nl + 1 :]
         with open(path, "wb") as raw:
             raw.write(keep)
         _disk_log_size = len(keep)
@@ -180,20 +190,23 @@ def flush_stream() -> None:
     global _stream_tag, _stream_body
     with _lock:
         _cancel_timer()
+        if _quiet_depth > 0:
+            _stream_tag, _stream_body = None, ""
+            return
         tag, body = _stream_tag, _stream_body
         _stream_tag, _stream_body = None, ""
     if tag:
         _emit(tag, body)
 
 
-def _schedule_flush() -> None:
+def _schedule_flush(*, delay: float | None = None) -> None:
     global _flush_timer
     _cancel_timer()
 
     def _fire() -> None:
         flush_stream()
 
-    t = threading.Timer(_FLUSH_IDLE_S, _fire)
+    t = threading.Timer(delay if delay is not None else _FLUSH_IDLE_S, _fire)
     t.daemon = True
     _flush_timer = t
     t.start()
@@ -213,16 +226,21 @@ def _join_stream(prev: str, chunk: str) -> str:
 
 
 def _append_stream(tag: str, text: str) -> None:
-    global _stream_tag, _stream_body
+    global _stream_tag, _stream_body, _stream_first_chunk
     chunk = text or ""
     if not chunk:
         return
 
     to_emit: list[tuple[str, str]] = []
+    first = False
     with _lock:
+        if _quiet_depth > 0:
+            return
         if _stream_tag and _stream_tag != tag and _stream_body.strip():
             to_emit.append((_stream_tag, _stream_body))
             _stream_body = ""
+            _stream_first_chunk = False
+        first = not _stream_body
         _stream_tag = tag
         _stream_body = _join_stream(_stream_body, chunk)
         body = _stream_body
@@ -232,15 +250,20 @@ def _append_stream(tag: str, text: str) -> None:
         if hard:
             to_emit.append((tag, body))
             _stream_tag, _stream_body = None, ""
+            _stream_first_chunk = False
             _cancel_timer()
             schedule = False
+            delay = None
         else:
             schedule = True
+            delay = _FLUSH_FIRST_S if first else _FLUSH_IDLE_S
+            if first:
+                _stream_first_chunk = True
 
     for t, b in to_emit:
         _emit(t, b)
     if schedule:
-        _schedule_flush()
+        _schedule_flush(delay=delay)
 
 
 def live(tag: str, text: str, *, limit: int = 1200) -> None:
@@ -249,6 +272,9 @@ def live(tag: str, text: str, *, limit: int = 1200) -> None:
 
     if confirm_in_progress():
         return
+    with _lock:
+        if _quiet_depth > 0:
+            return
 
     # Buffer streaming think / ai deltas into one continuous block
     if tag.endswith(" think") or tag.endswith(" ai"):
@@ -258,6 +284,25 @@ def live(tag: str, text: str, *, limit: int = 1200) -> None:
     flush_stream()
     body = text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more chars]"
     _emit(tag, body)
+
+
+@contextlib.contextmanager
+def quiet_live() -> Iterator[None]:
+    """Suppress ``live`` / tool dumps (writeup + Hold Q&A turns).
+
+    Drops any in-flight stream buffer so a timer scheduled before quiet cannot
+    leak think/ai into the feed after CORRECT.
+    """
+    global _quiet_depth, _stream_tag, _stream_body
+    with _lock:
+        _cancel_timer()
+        _stream_tag, _stream_body = None, ""
+        _quiet_depth += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _quiet_depth = max(0, _quiet_depth - 1)
 
 
 def live_json(tag: str, payload: Any, *, limit: int = 800) -> None:

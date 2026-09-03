@@ -172,6 +172,10 @@ async def do_submit_flag(
         human_confirmed=False,
     )
     if not preview.startswith("CANDIDATE"):
+        # ALREADY SOLVED must not propagate challenge_complete=True — solo
+        # solvers and bridge soft-submit would treat it as a fresh CORRECT.
+        if preview.startswith("ALREADY SOLVED"):
+            return preview, False
         return preview, done
 
     confirm = confirm_fn or (lambda f: prompt_flag_confirmation(f, auto_confirm=auto_confirm))
@@ -263,14 +267,117 @@ async def do_webhook_get_requests(uuid: str) -> str:
         return f"webhook_get_requests error: {e}"
 
 
-async def do_check_findings(message_bus, model_spec: str) -> str:
-    """Get unread findings from sibling solvers."""
+async def do_check_findings(
+    message_bus,
+    model_spec: str,
+    *,
+    runner_id: str | None = None,
+) -> str:
+    """Get unread findings from sibling solvers.
+
+    Send-now (**steer**) notes are claimed by provider interrupt watchers
+    (Cursor force-followup / ``backend.agents.soft_steer``), not here — so a
+    mid-tool tick cannot race and swallow an interrupt. **Queue** rows wait for
+    ``do_claim_soft_queue`` at turn idle.
+
+    ``runner_id`` must be the swarm-assigned id (may include ``#N``) so fan-out
+    inbox targets match ``agent_display_key`` / TUI roster labels.
+    """
     if not message_bus:
         return "No message bus available."
-    findings = await message_bus.check(model_spec)
-    if not findings:
-        return "No new findings from other agents."
-    return message_bus.format_unread(findings)
+    rid = (runner_id or model_spec or "").strip()
+    findings = await message_bus.check(rid)
+    if findings:
+        formatted = message_bus.format_unread(findings)
+        if formatted:
+            return formatted
+    return "No new findings from other agents."
+
+
+async def do_claim_soft_queue(
+    message_bus,
+    model_spec: str,
+    *,
+    runner_id: str | None = None,
+) -> list[str]:
+    """Drain **queue** operator notes at soft-solver turn idle (no bus broadcast)."""
+    if not message_bus:
+        return []
+    rid = (runner_id or model_spec or "").strip()
+    spec = (model_spec or rid).strip()
+    try:
+        import os
+
+        from backend.models import agent_display_key
+        from backend.operator_inbox import drain_operator_notes_to_bus
+
+        claimer = agent_display_key(rid, spec)
+        require_target = os.environ.get("ARTEMIS_CURSOR_OWNS_INBOX") == "1"
+        return await drain_operator_notes_to_bus(
+            message_bus,
+            delivery="queue",
+            claimer=claimer,
+            require_target=require_target,
+            broadcast=False,
+        )
+    except Exception:
+        return []
+
+
+async def soft_idle_operator_notes(
+    message_bus,
+    model_spec: str,
+    *,
+    runner_id: str | None = None,
+    cancel_event=None,
+    confirmed: bool = False,
+) -> str | None:
+    """Claim Queue (+ any pending steer) at soft-solver turn idle/start.
+
+    Returns text to append to the next prompt, or ``None`` when nothing new.
+    """
+    if not message_bus:
+        return None
+    # Dying siblings must not steal unscoped notes parked for Hold.
+    # Hold winner (confirmed + cancelled) may still claim.
+    if (
+        cancel_event is not None
+        and getattr(cancel_event, "is_set", lambda: False)()
+        and not confirmed
+    ):
+        return None
+    queue_notes = await do_claim_soft_queue(message_bus, model_spec, runner_id=runner_id)
+    # Pending Send-now that arrived between turns (watcher not running).
+    steer_notes: list[str] = []
+    try:
+        from types import SimpleNamespace
+
+        from backend.agents.soft_steer import claim_soft_steer_notes
+
+        steer_notes = await claim_soft_steer_notes(
+            SimpleNamespace(
+                message_bus=message_bus,
+                model_spec=model_spec,
+                runner_id=runner_id or model_spec,
+                cancel_event=cancel_event,
+                _confirmed=confirmed,
+            )
+        )
+    except Exception:
+        steer_notes = []
+    rest = await do_check_findings(message_bus, model_spec, runner_id=runner_id)
+    parts: list[str] = []
+    op_notes = [n for n in (queue_notes + steer_notes) if str(n or "").strip()]
+    if op_notes:
+        parts.append(
+            "**Operator notes:**\n\n"
+            + "\n\n".join(f"Operator note: {n}" for n in op_notes)
+        )
+    if rest and "No new findings from other agents." not in rest:
+        parts.append(rest)
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 # Image constants (shared with vision wrapper)

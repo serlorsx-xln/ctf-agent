@@ -53,6 +53,7 @@ def _swarm(specs: list[str]) -> ChallengeSwarm:
     swarm._last_status = ""
     swarm._last_flag = None
     swarm._how_emitted = False
+    swarm._how_placeholder = False
     swarm._writeup_attempted = False
     return swarm
 
@@ -307,6 +308,40 @@ async def test_teaser_writeup_is_not_the_operator_recap(monkeypatch):
     assert "(no writeup recorded)" in joined
     how_headers = [ln for ln in lines if ln.strip() == "[artemis] summary How:"]
     assert len(how_headers) == 1
+
+
+@pytest.mark.asyncio
+async def test_detailed_interim_how_not_duplicated_by_writeup(monkeypatch):
+    """Interim already streamed How — later produce_writeup must not emit a second How."""
+    lines: list[str] = []
+    monkeypatch.setattr("backend.agents.live_log.emit_line", lines.append)
+
+    detailed = (
+        "Challenge\nShop PIN in the Flutter binary.\n\n"
+        "Key insight\nClient-side check before the buy call.\n\n"
+        "How\n1. strings libapp.so\n2. call the buy endpoint\n\n"
+        "What I tried\njadx showed only glue.\n\n"
+        "Why it worked\nPIN gated the buy call."
+    )
+
+    async def produce_writeup() -> str:
+        return detailed + "\n\nExtra sentence from the writeup turn."
+
+    swarm = _swarm(["cursor/grok-4.5"])
+    swarm.confirmed_flags = ["CTF{aaaaaaaaaaaa}"]
+    swarm.confirmed_flag = "CTF{aaaaaaaaaaaa}"
+    swarm.flag_credits = {"CTF{aaaaaaaaaaaa}": "cursor/grok-4.5"}
+    swarm.winner_runner_id = "cursor/grok-4.5"
+    swarm.flag_notes = {"cursor/grok-4.5": detailed}
+    swarm._emit_how_recap(interim=True)
+    assert swarm._how_emitted is True
+    assert swarm._how_placeholder is False
+    solver = SimpleNamespace(produce_writeup=produce_writeup, _findings="")
+    await swarm._capture_and_emit_writeup(solver, "cursor/grok-4.5")
+    how_headers = [ln for ln in lines if "[artemis] summary How:" in ln]
+    assert len(how_headers) == 1
+    # Better writeup is stored, but not re-printed as a second How.
+    assert "Extra sentence" in (swarm.flag_notes.get("cursor/grok-4.5") or "")
 
 
 @pytest.mark.asyncio

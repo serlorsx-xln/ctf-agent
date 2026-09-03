@@ -42,9 +42,7 @@ def is_greeting(text: str) -> bool:
 def looks_like_challenge_paste(text: str) -> bool:
     """True for any non-empty, non-greeting paste."""
     t = (text or "").strip()
-    if not t or is_greeting(t):
-        return False
-    return True
+    return bool(t) and not is_greeting(t)
 
 
 def extract_challenge_paths(text: str) -> list[str]:

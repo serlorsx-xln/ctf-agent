@@ -13,8 +13,74 @@ from backend.daemon.supervisor import SwarmSupervisor
 
 logger = logging.getLogger(__name__)
 
-# Pending dialogs keyed by (session_id, request_id).
-_pending_dialogs: dict[tuple[str, str], asyncio.Future[Any]] = {}
+# Pending dialogs keyed by (session_id, request_id) → (future, kind, meta).
+_pending_dialogs: dict[tuple[str, str], tuple[asyncio.Future[Any], str, dict[str, Any]]] = {}
+
+
+def _operator_followup_crumb(
+    *,
+    delivery: str,
+    who: str,
+    no_fanout: bool,
+    models: list[str],
+    target: str | None,
+    roster: list[str],
+) -> str:
+    """Human crumb for Send now / Queue — interrupt vs idle-queue."""
+    if no_fanout:
+        if delivery == "queue":
+            return f"[artemis] followup — Hold · queued for {who} (after writeup)"
+        return f"[artemis] followup — Hold · delivering to {who}"
+
+    from backend.models import agent_display_key, provider_from_spec
+
+    def _is_cursor(spec: str) -> bool:
+        try:
+            return provider_from_spec(spec) == "cursor"
+        except Exception:
+            return False
+
+    # Resolve which models the crumb applies to (target agent → matching specs).
+    # Prefer roster display keys (``opus#2``) over raw specs so #N targets match.
+    relevant = list(models)
+    if target and models:
+        matched: list[str] = []
+        for i, spec in enumerate(models):
+            keys: list[str] = []
+            if i < len(roster):
+                keys.append(roster[i])
+            try:
+                keys.append(agent_display_key(spec, spec))
+            except Exception:
+                keys.append(spec.rsplit("/", 1)[-1])
+            for key in keys:
+                if (
+                    key == target
+                    or key.startswith(f"{target}#")
+                    or target.startswith(f"{key}#")
+                ):
+                    matched.append(spec)
+                    break
+        if matched:
+            relevant = matched
+
+    has_cursor = any(_is_cursor(m) for m in relevant) if relevant else False
+    all_soft = bool(relevant) and not has_cursor
+    # Unknown models (empty) → Cursor-style copy (historical default).
+    if delivery == "queue":
+        if all_soft:
+            return (
+                f"[artemis] followup — queued until next turn boundary on {who} "
+                "(not interrupting)"
+            )
+        return (
+            f"[artemis] followup — queued until idle on {who} "
+            "(not interrupting)"
+        )
+    return (
+        f"[artemis] followup — interrupting {who} "
+        "(cancels mid-turn when possible, then processes your message)"
+    )
 
 
 def cancel_pending_dialogs(broadcast=None, session: str | None = None) -> None:
@@ -24,7 +90,7 @@ def cancel_pending_dialogs(broadcast=None, session: str | None = None) -> None:
     When ``session`` is None, cancel everything (daemon shutdown).
     """
     sid_filter = normalize_session_id(session) if session is not None else None
-    for key, fut in list(_pending_dialogs.items()):
+    for key, (fut, kind, _meta) in list(_pending_dialogs.items()):
         sid, rid = key
         if sid_filter is not None and sid != sid_filter:
             continue
@@ -32,26 +98,78 @@ def cancel_pending_dialogs(broadcast=None, session: str | None = None) -> None:
             fut.set_result({"ok": False, "cancelled": True})
         _pending_dialogs.pop(key, None)
         if callable(broadcast):
+            dismiss = (
+                "flags_ask_dismiss" if kind == "flags_ask" else "flag_confirm_dismiss"
+            )
             try:
                 broadcast(
                     {
-                        "type": "flag_confirm_dismiss",
+                        "type": dismiss,
                         "session": sid,
                         "request_id": rid,
                     }
                 )
             except Exception:
-                logger.debug("flag_confirm_dismiss broadcast failed", exc_info=True)
+                logger.debug("%s broadcast failed", dismiss, exc_info=True)
 
 
-def register_dialog(rid: str, fut: asyncio.Future[Any], session: str | None = None) -> None:
+def register_dialog(
+    rid: str,
+    fut: asyncio.Future[Any],
+    session: str | None = None,
+    *,
+    kind: str = "flag_confirm",
+    meta: dict[str, Any] | None = None,
+) -> None:
     sid = normalize_session_id(session)
-    _pending_dialogs[(sid, rid)] = fut
+    _pending_dialogs[(sid, rid)] = (
+        fut,
+        kind if kind in ("flag_confirm", "flags_ask") else "flag_confirm",
+        dict(meta or {}),
+    )
 
 
 def pop_dialog(rid: str, session: str | None = None) -> asyncio.Future[Any] | None:
     sid = normalize_session_id(session)
-    return _pending_dialogs.pop((sid, rid), None)
+    entry = _pending_dialogs.pop((sid, rid), None)
+    return entry[0] if entry else None
+
+
+def rebroadcast_pending_dialogs(broadcast, session: str | None = None) -> int:
+    """Re-push open confirm/ask dialogs after a TUI reconnect. Returns count."""
+    if not callable(broadcast):
+        return 0
+    sid_filter = normalize_session_id(session) if session is not None else None
+    n = 0
+    for (sid, rid), (fut, kind, meta) in list(_pending_dialogs.items()):
+        if sid_filter is not None and sid != sid_filter:
+            continue
+        if fut.done():
+            continue
+        try:
+            if kind == "flags_ask":
+                broadcast(
+                    {
+                        "type": "flags_ask_request",
+                        "request_id": rid,
+                        "default": meta.get("default"),
+                        "challenge": meta.get("challenge"),
+                        "session": sid,
+                    }
+                )
+            else:
+                broadcast(
+                    {
+                        "type": "flag_confirm_request",
+                        "request_id": rid,
+                        "flag": meta.get("flag"),
+                        "session": sid,
+                    }
+                )
+            n += 1
+        except Exception:
+            logger.debug("rebroadcast pending dialog failed", exc_info=True)
+    return n
 
 
 class Handlers:
@@ -60,6 +178,7 @@ class Handlers:
     def __init__(self, state: DaemonState, supervisor: SwarmSupervisor) -> None:
         self.state = state
         self.supervisor = supervisor
+        self._setup_task: asyncio.Task[None] | None = None
 
     async def dispatch(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         mtype = msg.get("type", "")
@@ -97,15 +216,33 @@ class Handlers:
 
     # ---- bridge-backed ops ----------------------------------------------
     async def _h_load(self, payload: dict, *, session: str) -> dict:
+        from backend.sandbox.setup_ready import probe_setup_status
+
+        if self.supervisor.is_running(session):
+            return {
+                "text": "ERROR: swarm still running — /stop first, then load a new challenge",
+                "session_state": self.state.get_session(session),
+            }
+        status = probe_setup_status()
+        if not status.ready:
+            return {
+                "text": f"ERROR: sandbox not installed — {status.message}",
+                "session_state": self.state.get_session(session),
+                "setup": status.as_dict(),
+            }
         from backend.shell.bridge import _load_challenge
 
         text = await _load_challenge(self._bridge_payload(payload, session))
         from backend.shell.sandbox_session import load_session_state
 
+        if str(text).lstrip().upper().startswith("ERROR"):
+            # Bridge did not write session.json — do not re-read disk into daemon
+            # state or push stale challenge_dir back to the TUI on a failed load.
+            return {"text": text, "session_state": self.state.get_session(session)}
+
         self.state.set_session(load_session_state(session), session_id=session)
         # TUI owns the gate. Broadcast so flags → mode → models opens after load.
-        if not str(text).lstrip().upper().startswith("ERROR"):
-            self._broadcast_solve_flow(session, from_load=True)
+        self._broadcast_solve_flow(session, from_load=True)
         return {"text": text, "session_state": self.state.get_session(session)}
 
     async def _h_status(self, _payload: dict, *, session: str) -> dict:
@@ -119,6 +256,12 @@ class Handlers:
         }
 
     async def _h_clear_session(self, _payload: dict, *, session: str) -> dict:
+        if self.supervisor.is_running(session):
+            return {
+                "ok": False,
+                "error": "swarm still running — /stop first",
+                "session_state": self.state.get_session(session),
+            }
         self.state.clear_session(session)
         return {"session_state": self.state.get_session(session)}
 
@@ -170,12 +313,26 @@ class Handlers:
         return {"__push_only__": True}
 
     async def _h_sandbox_stop(self, payload: dict, *, session: str) -> dict:
-        from backend.shell.bridge import _stop
+        """Stop containers + swarm via supervisor (not raw bridge race kill)."""
+        from backend.shell.sandbox_session import stop_sandbox
 
-        return {"text": await _stop(self._bridge_payload(payload, session))}
+        parts = [
+            await stop_sandbox(payload.get("challenge_dir"), session_id=session),
+            await self.supervisor.stop(session_id=session),
+        ]
+        return {"text": "\n".join(parts)}
 
     # ---- swarm -----------------------------------------------------------
     async def _h_swarm_start(self, payload: dict, *, session: str) -> dict:
+        from backend.sandbox.setup_ready import probe_setup_status
+
+        status = probe_setup_status()
+        if not status.ready:
+            return {
+                "ok": False,
+                "error": f"sandbox not installed — {status.message}",
+                "setup": status.as_dict(),
+            }
         from backend.models import missing_swarm_credentials, normalize_swarm_specs
         from backend.shell.sandbox_session import load_session_state
 
@@ -225,6 +382,96 @@ class Handlers:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "swarm_id": swarm_id}
 
+    async def _h_swarm_operator_message(self, payload: dict, *, session: str) -> dict:
+        """Append a mid-solve operator note for solvers to pick up."""
+        if not self.supervisor.is_running(session):
+            return {"ok": False, "error": "no swarm running"}
+        text = str(payload.get("text") or payload.get("message") or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty message"}
+        delivery = str(payload.get("delivery") or "steer").strip().lower()
+        if delivery not in ("steer", "queue"):
+            delivery = "steer"
+        raw_target = str(payload.get("target") or "").strip() or None
+        no_fanout = bool(payload.get("no_fanout") or payload.get("noFanout"))
+        from backend.operator_inbox import append_operator_note, normalize_operator_target
+
+        target = normalize_operator_target(raw_target)
+        roster = [str(a).strip() for a in self.supervisor.last_roster(session) if str(a).strip()]
+        # Fan-out broadcast → one inbox row per agent so each Cursor can claim.
+        # no_fanout / Hold: single row scoped to the sole roster agent, or error
+        # when multi-agent and no explicit winner target (avoid unscoped steal).
+        targets: list[str | None]
+        if target:
+            targets = [target]
+        elif no_fanout:
+            # Hold / single without explicit target — prefer sole roster agent.
+            # Multi-agent without a winner key must not write an unscoped row
+            # (siblings could steal it; Hold refuses claimer=None on multi).
+            if len(roster) == 1:
+                targets = [roster[0]]
+            else:
+                return {
+                    "ok": False,
+                    "error": "Hold target unknown — open the winner agent page or wait for Solved by",
+                }
+        elif len(roster) > 1:
+            targets = list(roster)
+        elif len(roster) == 1:
+            targets = [roster[0]]
+        else:
+            targets = [None]
+
+        try:
+            for tgt in targets:
+                append_operator_note(
+                    text,
+                    session_id=session,
+                    delivery=delivery,  # type: ignore[arg-type]
+                    target=tgt,
+                )
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+        label = "queue" if delivery == "queue" else "steer"
+        # One crumb per inbox row so sticky pending matches multi-agent fan-out.
+        for tgt in targets:
+            scope = f"→{tgt}" if tgt else ""
+            self.state.broadcast(
+                {
+                    "type": "swarm_log",
+                    "session": session,
+                    "text": f"[artemis] you ({label}{scope}): {text[:2000]}",
+                }
+            )
+        who = target or ("all agents" if len(targets) > 1 else "solver")
+        models = [
+            str(m).strip()
+            for m in self.supervisor.last_models(session)
+            if str(m).strip()
+        ]
+        crumb = _operator_followup_crumb(
+            delivery=delivery,  # type: ignore[arg-type]
+            who=who,
+            no_fanout=no_fanout,
+            models=models,
+            target=target,
+            roster=roster,
+        )
+        self.state.broadcast(
+            {
+                "type": "swarm_log",
+                "session": session,
+                "text": crumb,
+            }
+        )
+        return {
+            "ok": True,
+            "delivery": delivery,
+            "target": target,
+            "fanout": len(targets),
+        }
+
     async def _h_swarm_stop(self, _payload: dict, *, session: str) -> dict:
         text = await self.supervisor.stop(session_id=session)
         return {"text": text}
@@ -269,3 +516,52 @@ class Handlers:
             fut.set_result({"n": n, "ok": True})
             return {"ok": True}
         return {"ok": False, "error": "no pending flags-ask for that id"}
+
+    # ---- first-run sandbox install gate ---------------------------------
+    async def _h_setup_status(self, _payload: dict, *, session: str) -> dict:
+        from backend.sandbox.setup_ready import probe_setup_status
+
+        status = probe_setup_status().as_dict()
+        task = getattr(self, "_setup_task", None)
+        status["installing"] = bool(task is not None and not task.done())
+        return status
+
+    async def _h_setup_install(self, payload: dict, *, session: str) -> dict:
+        """Start (or report) first-run L0+pack bake. Progress via setup_log pushes."""
+        if getattr(self, "_setup_task", None) is not None and not self._setup_task.done():
+            return {"ok": True, "running": True}
+        skip_warm = payload.get("skip_warm_runtime", True)
+        if skip_warm is None:
+            skip_warm = True
+
+        async def _run() -> None:
+            from backend.sandbox.setup_ready import probe_setup_status, run_gate_install
+
+            # Accumulate every session that was subscribed during this bake so
+            # a mid-install chat rebind cannot leave fan-out empty / stuck on
+            # the original session only.
+            seen: set[str] = {session}
+
+            def _fanout(event: dict) -> None:
+                seen.update(self.state.subscribed_sessions())
+                targets = seen or {session}
+                for sid in targets:
+                    self.state.broadcast({**event, "session": sid})
+
+            def _push(text: str) -> None:
+                _fanout({"type": "setup_log", "text": text})
+
+            _push("Starting sandbox install (Docker L0 + pack bake)…")
+            try:
+                await run_gate_install(
+                    skip_warm_runtime=bool(skip_warm),
+                    on_progress=_push,
+                )
+            except Exception as e:
+                logger.exception("setup_install failed")
+                _push(f"FAIL {type(e).__name__}: {e}")
+            status = probe_setup_status()
+            _fanout({"type": "setup_done", **status.as_dict()})
+
+        self._setup_task = asyncio.create_task(_run())
+        return {"ok": True, "running": True}

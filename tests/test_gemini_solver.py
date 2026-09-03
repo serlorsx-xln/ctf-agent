@@ -2,6 +2,7 @@
 
 These cover the CRITICAL/HIGH bugs fixed in the Gemini solver:
 - flag confirmation result must gate FLAG_FOUND (no FLAG_FOUND on reject)
+- ACCEPTED (more flags needed) must NOT set ``_confirmed`` — only challenge_complete
 - token usage must be committed via record_tokens (not just previewed)
 - bump() stashes insights (not a no-op)
 """
@@ -61,15 +62,31 @@ def test_submit_flag_rejected_does_not_set_flag(monkeypatch: pytest.MonkeyPatch)
     assert solver._flag is None  # not set on reject
 
 
-def test_submit_flag_accepted_sets_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_submit_flag_accepted_partial_does_not_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ACCEPTED with done=False (more flags needed) must not stop the solver."""
+    solver = _make_solver(monkeypatch)
+    solver.meta = ChallengeMeta(name="demo", description="d", flags_required=2)
+
+    async def submit_fn(flag: str) -> tuple[str, bool]:
+        return ("ACCEPTED — counting this flag (1/2).", False)
+
+    solver.submit_fn = submit_fn
+    out = asyncio.run(solver._exec_tool("submit_flag", {"flag": "flag{one}"}))
+    assert "ACCEPTED" in out
+    assert solver._accepted_flags == ["flag{one}"]
+    assert solver._confirmed is False
+    assert solver._flag is None
+
+
+def test_submit_flag_correct_sets_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
     solver = _make_solver(monkeypatch)
 
     async def submit_fn(flag: str) -> tuple[str, bool]:
-        return ("ACCEPTED — counting this flag.", True)
+        return ('CORRECT — accepted "flag{real}". Challenge complete for this run.', True)
 
     solver.submit_fn = submit_fn
     out = asyncio.run(solver._exec_tool("submit_flag", {"flag": "flag{real}"}))
-    assert "ACCEPTED" in out
+    assert "CORRECT" in out
     assert solver._confirmed is True
     assert solver._flag == "flag{real}"
 

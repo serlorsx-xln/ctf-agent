@@ -21,6 +21,18 @@ def test_unconfirmed_is_candidate_not_correct() -> None:
     assert not is_counted_accept_message(msg)
 
 
+def test_confirm_in_progress_mutes_cli_not_tui(monkeypatch) -> None:
+    """Sibling live-logs must keep flowing while the TUI confirm bar is up."""
+    import backend.flags as flags
+
+    monkeypatch.delenv("ARTEMIS_FLAG_CONFIRM", raising=False)
+    flags._confirm_active = True
+    assert flags.confirm_in_progress() is True
+    monkeypatch.setenv("ARTEMIS_FLAG_CONFIRM", "1")
+    assert flags.confirm_in_progress() is False
+    flags._confirm_active = False
+
+
 def test_confirmed_one_flag_correct() -> None:
     msg, done = accept_flag("CTF{hello_world_ok}", human_confirmed=True)
     assert done
@@ -202,6 +214,23 @@ def test_do_submit_flag_prompts_then_accepts() -> None:
         )
         assert not done2
         assert msg2.startswith("REJECTED by operator")
+
+    asyncio.run(_run())
+
+
+def test_do_submit_flag_already_solved_not_complete() -> None:
+    """Quota met — do_submit_flag must not propagate challenge_complete=True."""
+    from backend.tools.core import do_submit_flag
+
+    async def _run() -> None:
+        msg, done = await do_submit_flag(
+            "chal",
+            "CTF{extra_cccccccc}",
+            already_accepted=["CTF{user_aaaaaaaa}", "CTF{root_bbbbbbbb}"],
+            required=2,
+        )
+        assert msg.startswith("ALREADY SOLVED")
+        assert done is False
 
     asyncio.run(_run())
 

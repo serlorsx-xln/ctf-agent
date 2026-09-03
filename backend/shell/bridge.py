@@ -279,9 +279,8 @@ def _is_artemis_race_pid(pid: int) -> bool:
         # Non-python recycled PIDs stay False (do not kill strangers).
         if sys.platform == "win32":
             return _windows_executable_looks_like_python(pid)
-        # Unix: process exists but cmdline unreadable (permissions) — keep prior
-        # conservative "treat as live" behaviour for adopt/stop.
-        return True
+        # Unix: unreadable cmdline — fail closed (do not adopt/kill strangers).
+        return False
     return is_artemis_swarm_command(cmd)
 
 def _kill_pid_tree(pid: int) -> None:
@@ -321,6 +320,32 @@ def _kill_pid_tree(pid: int) -> None:
         pass
 
 
+def _wait_pid_gone(pid: int, *, timeout_s: float = 3.0) -> bool:
+    """Poll until ``pid`` is gone (or timeout). Returns True when dead.
+
+    ``PermissionError`` / other OS errors while probing must not be treated as
+    dead — the process may still be alive and unsignalable.
+    """
+    import time
+
+    deadline = time.monotonic() + max(0.05, timeout_s)
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            pass
+        time.sleep(0.05)
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
 async def _stop_race(_payload: dict) -> str:
     """Stop the active TUI swarm for one session (pidfile only).
 
@@ -353,15 +378,27 @@ async def _stop_race(_payload: dict) -> str:
             continue
         try:
             old_pid = int(pid_path.read_text(encoding="utf-8").strip())
-            if _is_artemis_race_pid(old_pid):
-                _kill_pid_tree(old_pid)
-                killed.append(str(old_pid))
         except (ValueError, OSError):
-            pass
-        try:
-            pid_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            try:
+                pid_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        if _is_artemis_race_pid(old_pid):
+            _kill_pid_tree(old_pid)
+            gone = _wait_pid_gone(old_pid, timeout_s=3.0)
+            killed.append(str(old_pid))
+            if gone:
+                try:
+                    pid_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            # Still alive after wait — keep pidfile so is_running/adopt stay honest.
+        else:
+            try:
+                pid_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # Global pgrep only when explicitly requested (legacy single-session stop-all).
     if stop_all:
@@ -561,11 +598,34 @@ async def _swarm_direct(payload: dict) -> str:
                     f"ERROR: a swarm is already running (pid {old_pid}). "
                     "Call artemis_stop_swarm, or pass force=true to replace it."
                 )
-        else:
+        elif old_pid:
+            # Alive PID with unreadable/non-matching cmdline — do not unlink;
+            # force-stop the tree so we do not dual-spawn.
             try:
-                pid_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+                os.kill(old_pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except (PermissionError, OSError):
+                alive = True
+            if alive:
+                if force:
+                    sys.stdout.write(
+                        f"[artemis] stopping previous swarm pid={old_pid} "
+                        "(identity unverified)\n"
+                    )
+                    sys.stdout.flush()
+                    await _stop_race({"session": sid})
+                else:
+                    return (
+                        f"ERROR: a swarm may already be running (pid {old_pid}). "
+                        "Call artemis_stop_swarm, or pass force=true to replace it."
+                    )
+            else:
+                try:
+                    pid_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     repo = os.environ.get("ARTEMIS_REPO_ROOT") or str(
         Path(__file__).resolve().parents[2]

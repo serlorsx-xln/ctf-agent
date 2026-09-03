@@ -36,6 +36,7 @@ from backend.agents.cursor_runtime import (
     force_recreate_client,
     format_cursor_run_error,
     humanize_cursor_error,
+    is_benign_cancel_error,
     release_client,
     resolve_api_key,
 )
@@ -238,6 +239,10 @@ class CursorSolver:
         self._api_key = ""
         # In-turn usage from SDKUsageMessage (absolute for this turn; not yet committed).
         self._turn_usage_pending: Any | None = None
+        # IDE force-followup: interrupt current run, then agent.send(operator) same session.
+        self._force_followup = asyncio.Event()
+        self._pending_followup: list[str] = []
+        self._active_run: Any | None = None
 
     async def start(self) -> None:
         from backend.agents.solver_control import start_sandbox_basics
@@ -431,20 +436,8 @@ class CursorSolver:
                 self.tracer.tool_result(name, str(preview)[:500], step)
                 _live(f"{self.agent_name} tool#{step} ← {name}", str(preview), limit=2000)
 
-                if step % 5 == 0 and self.message_bus:
-                    from backend.tools.core import do_check_findings
-
-                    findings = await do_check_findings(
-                        self.message_bus,
-                        getattr(self, "runner_id", None) or self.model_spec,
-                    )
-                    if findings and "No new findings" not in findings:
-                        if isinstance(text, dict):
-                            content = list(text.get("content") or [])
-                            content.append({"type": "text", "text": f"---\n{findings}"})
-                            text = {**text, "content": content}
-                        else:
-                            text = f"{text}\n\n---\n{findings}"
+                # Steer = IDE force-followup: interrupt this run; do not bury in tool text.
+                await self._claim_steer_followup()
                 return text
             except Exception as e:
                 err = f"Tool error: {e}"
@@ -757,50 +750,144 @@ class CursorSolver:
             ),
         }
 
-    async def run_until_done_or_gave_up(self) -> SolverResult:
-        if not self._started:
-            await self.start()
-        assert self._agent is not None
+    def _operator_followup_prompt(self, notes: list[str]) -> str:
+        """Bare operator text — same session context; no extra system sermon."""
+        return "\n\n".join(n.strip() for n in notes if n.strip())
 
-        t0 = time.monotonic()
-        steps_before = self._step_count
-
-        if self._bump_insights:
-            cont = build_continue_prompt(
-                accepted_flags=self._accepted_flags,
-                flags_required=getattr(self.meta, "flags_required", 1),
-                bump_insights=self._bump_insights,
-                infra_recovery=self._infra_recovery,
-            )
-            prompt = f"{self._system_prompt}\n\n{cont}"
-            self._bump_insights = None
-            self._infra_recovery = False
-        elif self._infra_recovery:
-            cont = build_continue_prompt(
-                accepted_flags=self._accepted_flags,
-                flags_required=getattr(self.meta, "flags_required", 1),
-                infra_recovery=True,
-            )
-            prompt = f"{self._system_prompt}\n\n{cont}"
-            self._infra_recovery = False
-        elif self._step_count == 0:
-            prompt = f"{self._system_prompt}\n\nSolve this CTF challenge."
-        else:
-            cont = build_continue_prompt(
-                accepted_flags=self._accepted_flags,
-                flags_required=getattr(self.meta, "flags_required", 1),
-            )
-            prompt = f"{self._system_prompt}\n\n{cont}"
-
+    async def _safe_cancel_run(self, run: Any) -> None:
+        """Cancel once; ignore already-terminal / unsupported double-cancel."""
+        if run is None:
+            return
         try:
-            _live(self.agent_name, "── turn start ──")
-            self._turn_usage_pending = None
-            run = await self._agent.send(prompt)
-            status_detail = ""
+            if not run.supports("cancel"):
+                return
+            await run.cancel()
+        except Exception as e:
+            if is_benign_cancel_error(str(e)):
+                return
+            # Still swallow — force-followup must not die on cancel races.
+            logger.debug("[%s] run.cancel ignored: %s", self.agent_name, e)
+
+    def _operator_claimer_key(self) -> str:
+        """Display key matching swarm_roster / TUI focus (e.g. default#1)."""
+        from backend.models import agent_display_key
+
+        rid = str(getattr(self, "runner_id", None) or self.model_spec or "").strip()
+        spec = str(getattr(self, "model_spec", None) or rid).strip()
+        if rid and spec:
+            return agent_display_key(rid, spec)
+        return self.agent_name.split("/", 1)[-1]
+
+    def _solve_continue_prompt(self) -> str:
+        cont = build_continue_prompt(
+            accepted_flags=self._accepted_flags,
+            session_sync=bool(self.submit_fn),
+            flags_required=getattr(self.meta, "flags_required", 1),
+        )
+        return f"{self._system_prompt}\n\n{cont}"
+
+    async def _restore_pending_followup(self) -> None:
+        """Put undelivered force-followup notes back in the inbox (hold / next turn)."""
+        if not self._pending_followup:
+            return
+        from backend.operator_inbox import append_operator_note
+
+        notes = [n for n in self._pending_followup if str(n or "").strip()]
+        self._pending_followup.clear()
+        claimer = self._operator_claimer_key()
+        # Sibling cancel after CORRECT: park unscoped so Hold's winner can claim.
+        cancelled = bool(
+            getattr(getattr(self, "cancel_event", None), "is_set", lambda: False)()
+        )
+        if cancelled and not getattr(self, "_confirmed", False):
+            claimer = None
+        for text in notes:
+            try:
+                append_operator_note(text, delivery="queue", target=claimer)
+                from backend.agents.live_log import emit_line
+
+                scope = f"→{claimer}" if claimer else ""
+                emit_line(f"[artemis] you (queue{scope}): {text[:2000]}")
+            except Exception:
+                logger.debug(
+                    "[%s] failed to restore operator note", self.agent_name, exc_info=True
+                )
+
+    async def _claim_steer_followup(self) -> list[str]:
+        """Drain steer notes and arm interrupt (IDE Send now)."""
+        from backend.agents.live_log import emit_line
+        from backend.operator_inbox import drain_operator_notes_to_bus
+
+        # Dying siblings must not vacuum unscoped notes parked for Hold.
+        if self.cancel_event.is_set() and not self._confirmed:
+            return []
+        notes = await drain_operator_notes_to_bus(
+            self.message_bus,
+            delivery="steer",
+            broadcast=False,
+            claimer=self._operator_claimer_key(),
+        )
+        if notes:
+            self._pending_followup.extend(notes)
+            self._force_followup.set()
+            preview = notes[0][:120] if notes else ""
+            emit_line(
+                "[artemis] followup — interrupting current turn"
+                + (f" · {preview}" if preview else "")
+            )
+            await self._safe_cancel_run(self._active_run)
+        return notes
+
+    async def _claim_queue_followup(self) -> list[str]:
+        """Drain queue notes after the current run goes idle."""
+        from backend.operator_inbox import drain_operator_notes_to_bus
+
+        if self.cancel_event.is_set() and not self._confirmed:
+            return []
+        notes = await drain_operator_notes_to_bus(
+            self.message_bus,
+            delivery="queue",
+            broadcast=False,
+            claimer=self._operator_claimer_key(),
+        )
+        if notes:
+            self._pending_followup.extend(notes)
+        return notes
+
+    async def _watch_steer_while_running(self, run: Any) -> None:
+        """Poll inbox during a long tool/stream so Send now interrupts promptly."""
+        try:
+            while not self.cancel_event.is_set() and not self._confirmed:
+                if self._force_followup.is_set():
+                    return
+                await self._claim_steer_followup()
+                if self._force_followup.is_set():
+                    return
+                try:
+                    await asyncio.wait_for(self._force_followup.wait(), timeout=0.6)
+                    return
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            return
+
+    async def _stream_one_run(self, prompt: str, *, force: bool = False) -> Any:
+        """Send one prompt on the same agent; cancel on swarm stop or force-followup."""
+        assert self._agent is not None
+        options: dict[str, Any] | None = None
+        if force:
+            options = {"local": {"force": True}}
+        self._force_followup.clear()
+        _live(self.agent_name, "── turn start ──")
+        self._turn_usage_pending = None
+        run = await self._agent.send(prompt, options)
+        self._active_run = run
+        status_detail = ""
+        watcher = asyncio.create_task(self._watch_steer_while_running(run))
+        try:
             async for message in run.stream():
-                if self.cancel_event.is_set() or self._confirmed:
-                    if run.supports("cancel"):
-                        await run.cancel()
+                if self.cancel_event.is_set() or self._confirmed or self._force_followup.is_set():
+                    await self._safe_cancel_run(run)
                     break
 
                 if isinstance(message, SDKStatusMessage):
@@ -809,8 +896,6 @@ class CursorSolver:
                         from backend.agents.cursor_runtime import is_quota_error_message
 
                         if is_quota_error_message(message.message):
-                            # Print immediately — waiting for turn teardown made the
-                            # TUI sit on "waiting · 0 events" for a long time.
                             if not getattr(self, "_quota_live_printed", False):
                                 self._quota_live_printed = True
                                 short = status_detail or (
@@ -837,8 +922,7 @@ class CursorSolver:
                                     except Exception:
                                         pass
                                     self.cancel_event.set()
-                                    if run.supports("cancel"):
-                                        await run.cancel()
+                                    await self._safe_cancel_run(run)
                                     break
                         else:
                             _live(
@@ -860,7 +944,6 @@ class CursorSolver:
                             _live(f"{self.agent_name} ai", text)
 
                 elif isinstance(message, SDKUsageMessage):
-                    # Provider-reported only — preview sidebar mid-turn (commit at turn end).
                     u = message.usage
                     if u is not None:
                         self._turn_usage_pending = u
@@ -872,7 +955,6 @@ class CursorSolver:
                         )
 
                 elif isinstance(message, SDKToolUseMessage):
-                    # Custom tools already log in _wrap — skip SDK duplicate dumps.
                     if message.name and "custom" in str(message.name).lower():
                         continue
                     if message.status == "running":
@@ -892,63 +974,204 @@ class CursorSolver:
                             limit=1500,
                         )
 
-            result = await run.wait()
+            # After force-followup cancel, a stuck in-flight tool can leave wait()
+            # hanging — bound it so the next same-session send can proceed.
+            interrupted = self._force_followup.is_set() and not self.cancel_event.is_set()
+            try:
+                if interrupted:
+                    result = await asyncio.wait_for(run.wait(), timeout=12.0)
+                else:
+                    result = await run.wait()
+            except TimeoutError:
+                from backend.agents.live_log import emit_line
+
+                emit_line(
+                    "[artemis] followup — previous turn slow to stop; continuing anyway"
+                )
+
+                class _Cancelled:
+                    status = "cancelled"
+                    result = None
+                    usage = None
+
+                result = _Cancelled()
             _live(self.agent_name, f"── turn end status={result.status} ──")
-            duration = time.monotonic() - t0
-            self.tracer.event("turn_complete", duration=round(duration, 1), steps=self._step_count)
+            return result, status_detail, interrupted
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except Exception:
+                pass
+            self._active_run = None
 
-            usage = result.usage if result.usage is not None else self._turn_usage_pending
-            self._turn_usage_pending = None
-            if usage is not None:
-                parsed = usage_from_provider(usage)
-                self.cost_tracker.record_tokens(
-                    self.agent_name,
-                    self.model_id,
-                    input_tokens=parsed["input"],
-                    output_tokens=parsed["output"],
-                    cache_read_tokens=parsed["cache_read"],
-                    duration_seconds=duration,
+    async def run_until_done_or_gave_up(self) -> SolverResult:
+        if not self._started:
+            await self.start()
+        assert self._agent is not None
+
+        t0 = time.monotonic()
+        steps_before = self._step_count
+
+        if self._bump_insights:
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+            session_sync=bool(self.submit_fn),
+                flags_required=getattr(self.meta, "flags_required", 1),
+                bump_insights=self._bump_insights,
+                infra_recovery=self._infra_recovery,
+            )
+            prompt = f"{self._system_prompt}\n\n{cont}"
+            self._bump_insights = None
+            self._infra_recovery = False
+        elif self._infra_recovery:
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+            session_sync=bool(self.submit_fn),
+                flags_required=getattr(self.meta, "flags_required", 1),
+                infra_recovery=True,
+            )
+            prompt = f"{self._system_prompt}\n\n{cont}"
+            self._infra_recovery = False
+        elif self._step_count == 0:
+            prompt = f"{self._system_prompt}\n\nSolve this CTF challenge."
+        else:
+            cont = build_continue_prompt(
+                accepted_flags=self._accepted_flags,
+            session_sync=bool(self.submit_fn),
+                flags_required=getattr(self.meta, "flags_required", 1),
+            )
+            prompt = f"{self._system_prompt}\n\n{cont}"
+
+        # Pending operator notes between turns → same-session follow-up first.
+        await self._claim_steer_followup()
+        await self._claim_queue_followup()
+        followups = list(self._pending_followup)
+        self._pending_followup.clear()
+        self._force_followup.clear()
+        prompt_queue: list[tuple[str, bool]] = []
+        if followups:
+            prompt_queue.append((self._operator_followup_prompt(followups), True))
+        prompt_queue.append((prompt, False))
+
+        try:
+            status_detail = ""
+            result = None
+            while prompt_queue and not self.cancel_event.is_set() and not self._confirmed:
+                next_prompt, force = prompt_queue.pop(0)
+                result, status_detail, interrupted = await self._stream_one_run(
+                    next_prompt, force=force
                 )
-                self.tracer.usage(parsed["input"], parsed["output"], parsed["cache_read"])
 
-            if result.result:
-                self._findings = (result.result or self._findings)[:2000]
-                self._maybe_parse_flag_json(result.result)
-
-            status = str(result.status)
-            if status == "error":
-                err = format_cursor_run_error(
-                    result_text=result.result,
-                    status_message=status_detail,
+                duration = time.monotonic() - t0
+                self.tracer.event(
+                    "turn_complete", duration=round(duration, 1), steps=self._step_count
                 )
-                self.tracer.event("error", error=err)
-                from backend.agents.solver_control import classify_turn_error
 
-                classified = classify_turn_error(err)
-                if classified == QUOTA_ERROR:
-                    self._findings = status_detail or humanize_cursor_error(err)
-                    return self._result(QUOTA_ERROR)
-                if classified == INFRA_ERROR:
-                    self._findings = f"Infra: {err}"
-                    return self._result(INFRA_ERROR)
-                self._findings = f"Error: {err}"
-                return self._result(ERROR)
+                usage = result.usage if result.usage is not None else self._turn_usage_pending
+                self._turn_usage_pending = None
+                if usage is not None:
+                    parsed = usage_from_provider(usage)
+                    self.cost_tracker.record_tokens(
+                        self.agent_name,
+                        self.model_id,
+                        input_tokens=parsed["input"],
+                        output_tokens=parsed["output"],
+                        cache_read_tokens=parsed["cache_read"],
+                        duration_seconds=duration,
+                    )
+                    self.tracer.usage(
+                        parsed["input"], parsed["output"], parsed["cache_read"]
+                    )
 
-            if self._confirmed and self._flag:
-                return self._result(FLAG_FOUND)
+                if result.result:
+                    self._findings = (result.result or self._findings)[:2000]
+                    self._maybe_parse_flag_json(result.result)
 
+                status = str(result.status)
+                if status == "error":
+                    err = format_cursor_run_error(
+                        result_text=result.result,
+                        status_message=status_detail,
+                    )
+                    # Double-cancel after Send now must not abort the follow-up loop.
+                    if is_benign_cancel_error(err) or is_benign_cancel_error(
+                        str(result.result or "")
+                    ):
+                        status = "cancelled"
+                        # Keep stream ``interrupted`` — do not skip queue drain
+                        # for unrelated benign cancel noise.
+                    else:
+                        await self._restore_pending_followup()
+                        self.tracer.event("error", error=err)
+                        from backend.agents.solver_control import classify_turn_error
+
+                        classified = classify_turn_error(err)
+                        if classified == QUOTA_ERROR:
+                            self._findings = status_detail or humanize_cursor_error(err)
+                            return self._result(QUOTA_ERROR)
+                        if classified == INFRA_ERROR:
+                            self._findings = f"Infra: {err}"
+                            return self._result(INFRA_ERROR)
+                        self._findings = f"Error: {err}"
+                        return self._result(ERROR)
+
+                if self._confirmed and self._flag:
+                    await self._restore_pending_followup()
+                    return self._result(FLAG_FOUND)
+
+                if self.cancel_event.is_set():
+                    await self._restore_pending_followup()
+                    return self._result(CANCELLED)
+
+                # Send now interrupt → steer only. Queue waits for a later *non-force*
+                # idle turn end (not the cancelled turn, not the force-followup turn).
+                await self._claim_steer_followup()
+                if not interrupted and not force:
+                    await self._claim_queue_followup()
+
+                more = list(self._pending_followup)
+                self._pending_followup.clear()
+                self._force_followup.clear()
+                if more:
+                    prompt_queue.insert(0, (self._operator_followup_prompt(more), True))
+
+                # Interrupt ate the solve prompt — always resume after follow-ups.
+                if interrupted:
+                    prompt_queue.append((self._solve_continue_prompt(), False))
+
+                # Never break while resume/solve prompts remain (e.g. after a
+                # force-followup turn finishes with an empty ``more``).
+                if more or interrupted or prompt_queue:
+                    continue
+
+                # Normal end of this solver turn (swarm may bump again).
+                break
             run_steps = self._step_count - steps_before
             return self._result(GAVE_UP, run_steps=run_steps)
 
         except asyncio.CancelledError:
+            await self._restore_pending_followup()
+            if self._confirmed and self._flag:
+                return self._result(FLAG_FOUND)
             return self._result(CANCELLED)
         except CursorAgentError as e:
             error_str = str(e)
+            if is_benign_cancel_error(error_str):
+                # Double-cancel noise after Send now — not a real failure.
+                logger.debug("[%s] ignoring benign cancel: %s", self.agent_name, e)
+                await self._restore_pending_followup()
+                if self._confirmed and self._flag:
+                    return self._result(FLAG_FOUND)
+                return self._result(CANCELLED)
             logger.error("[%s] Cursor startup/API error: %s", self.agent_name, e)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
             from backend.agents.solver_control import classify_turn_error
 
+            if self._confirmed and self._flag:
+                await self._restore_pending_followup()
+                return self._result(FLAG_FOUND)
             classified = classify_turn_error(error_str)
             if classified == QUOTA_ERROR:
                 return self._result(QUOTA_ERROR)
@@ -957,11 +1180,20 @@ class CursorSolver:
             return self._result(ERROR)
         except Exception as e:
             error_str = str(e)
+            if is_benign_cancel_error(error_str):
+                logger.debug("[%s] ignoring benign cancel: %s", self.agent_name, e)
+                await self._restore_pending_followup()
+                if self._confirmed and self._flag:
+                    return self._result(FLAG_FOUND)
+                return self._result(CANCELLED)
             logger.error("[%s] Error: %s", self.agent_name, e, exc_info=True)
             self._findings = f"Error: {e}"
             self.tracer.event("error", error=error_str)
             from backend.agents.solver_control import classify_turn_error
 
+            if self._confirmed and self._flag:
+                await self._restore_pending_followup()
+                return self._result(FLAG_FOUND)
             classified = classify_turn_error(error_str)
             if classified == QUOTA_ERROR:
                 return self._result(QUOTA_ERROR)
@@ -1022,32 +1254,49 @@ class CursorSolver:
 
     async def produce_writeup(self, prompt: str | None = None) -> str:
         """One more turn: narrative writeup for the operator recap (no tools expected)."""
+        from backend.agents.live_log import quiet_live
         from backend.writeup import WRITEUP_PROMPT
 
         if self._agent is None:
             return ""
         parts: list[str] = []
-        _live(self.agent_name, "── writeup ──")
-        run = await self._agent.send(prompt or WRITEUP_PROMPT)
-        async for message in run.stream():
-            if isinstance(message, SDKAssistantMessage):
-                for block in message.message.content:
-                    text = getattr(block, "text", None)
-                    if text and str(text).strip():
-                        parts.append(str(text).strip())
-                        # Do not stream token deltas to the live log — hundreds of
-                        # ``[agent writeup] x`` lines drown CORRECT / summary and
-                        # invent phantom status on the main page.
-        result = None
-        try:
-            from backend.writeup import WRITEUP_TIMEOUT_S
+        from backend.writeup import WRITEUP_TIMEOUT_S, coalesce_writeup_output
 
-            result = await asyncio.wait_for(run.wait(), timeout=WRITEUP_TIMEOUT_S)
-        except TimeoutError:
-            pass
-        from backend.writeup import coalesce_writeup_output
+        with quiet_live():
+            _live(self.agent_name, "── writeup ──")
+            run = await self._agent.send(prompt or WRITEUP_PROMPT)
+            try:
+                async def _collect() -> None:
+                    async for message in run.stream():
+                        if isinstance(message, SDKAssistantMessage):
+                            for block in message.message.content:
+                                text = getattr(block, "text", None)
+                                if text and str(text).strip():
+                                    parts.append(str(text).strip())
+
+                await asyncio.wait_for(_collect(), timeout=WRITEUP_TIMEOUT_S)
+            except TimeoutError:
+                await self._safe_cancel_run(run)
+            result = None
+            try:
+                result = await asyncio.wait_for(run.wait(), timeout=WRITEUP_TIMEOUT_S)
+            except TimeoutError:
+                await self._safe_cancel_run(run)
 
         return coalesce_writeup_output(parts, result)
+
+    async def qa_turn(self, question: str) -> str:
+        """Post-solve follow-up on the same Cursor agent session."""
+        q = (question or "").strip()
+        if not q or self._agent is None:
+            return ""
+        prompt = (
+            "The challenge is already solved. Answer the operator's follow-up "
+            "using what you learned in this session. Be concise. No tools unless "
+            "essential.\n\n"
+            f"Operator: {q}"
+        )
+        return await self.produce_writeup(prompt)
 
     async def stop(self) -> None:
         if self._step_count == 0 and not getattr(self, "_started", False):

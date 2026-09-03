@@ -21,6 +21,8 @@ class CoordinatorDeps:
 
     # Runtime state
     coordinator_inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # CLI HTTP coordinator path only — NOT the file-based soft-steer inbox
+    # (``backend.operator_inbox`` / sessions/*/operator_inbox.jsonl).
     operator_inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
     swarms: dict[str, Any] = field(default_factory=dict)
     swarm_tasks: dict[str, asyncio.Task] = field(default_factory=dict)

@@ -298,6 +298,23 @@ def is_quota_error_message(message: str | None) -> bool:
     )
 
 
+def is_benign_cancel_error(message: str | None) -> bool:
+    """True for double-cancel / already-terminal Cursor SDK noise.
+
+    Force-followup cancels the active run from the steer watcher and again from
+    the stream loop; the second cancel raises ``unsupported_run_operation`` and
+    must not become a fatal TUI ERROR.
+    """
+    if not message:
+        return False
+    err = message.lower()
+    return (
+        "unsupported_run_operation" in err
+        or ("cancel is not applicable" in err and "terminal status" in err)
+        or ("already in terminal status" in err and "cancel" in err)
+    )
+
+
 def humanize_cursor_error(message: str | None) -> str:
     """Collapse long Cursor billing/quota SDK dumps into a short operator line.
 
