@@ -12,7 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import aiodocker
 
@@ -69,9 +69,13 @@ class DockerSandbox:
     # Optional Settings (or duck-typed) for pack preflight / eval_strict_packs.
     settings: Any = None
     # Artemis TUI / swarm session id (container label + orphan cleanup scope).
-    session_id: str = "_default"
+    # Empty → fall back to ``ARTEMIS_SESSION_ID`` at label/bind time (not ``_default``).
+    session_id: str = ""
     # Wall time spent in pack prefetch (materialize + ensure) for eval artifacts.
     preflight_ms: float = 0.0
+    # Skip Docker inspect on every exec — re-check at most every HEALTH_TTL_S.
+    _health_checked_at: float = field(default=0.0, repr=False)
+    _HEALTH_TTL_S: ClassVar[float] = 2.0
     workspace_dir: str = ""
     ensured_packs: set[str] = field(default_factory=set)
     extra_path_dirs: list[str] = field(default_factory=list)
@@ -125,10 +129,16 @@ class DockerSandbox:
         if not self.workspace_dir or not self._binds:
             raise RuntimeError("Sandbox not started")
         if self._container is not None:
+            now = time.monotonic()
+            # Hot path: trust a recent successful inspect (bash/tools fire often).
+            if now - self._health_checked_at < self._HEALTH_TTL_S:
+                return
             try:
                 await self._container.show()
+                self._health_checked_at = now
                 return
             except Exception as e:
+                self._health_checked_at = 0.0
                 if not self._is_container_gone_error(e):
                     # Stale handle / daemon blip — still try recreate.
                     logger.warning("Sandbox inspect failed (%s) — recreating", e)
@@ -140,6 +150,7 @@ class DockerSandbox:
         else:
             logger.warning("Sandbox container missing — recreating (workspace kept)")
         await self._recreate_container_unlocked()
+        self._health_checked_at = time.monotonic()
 
     async def _recreate_container_unlocked(self) -> None:
         """Create a fresh container with the same binds/workspace; re-apply packs."""
@@ -296,10 +307,32 @@ class DockerSandbox:
 
             self._binds = binds
 
+            from backend.sandbox.warm_runtime import (
+                clear_warm_runtime_marker,
+                is_warm_runtime_image,
+            )
             from backend.tool_router import PREFETCH_RUNTIME_IMAGES, resolve_runtime_l0_image
 
             runtime_pref = resolve_runtime_l0_image(prefetch, self.image)
-            if runtime_pref in PREFETCH_RUNTIME_IMAGES.values():
+            if is_warm_runtime_image(runtime_pref):
+                from backend.sandbox.docker_client import _docker_cli
+
+                rc, _, _ = await _docker_cli("image", "inspect", runtime_pref, timeout_s=30)
+                if rc != 0:
+                    pack_hint = runtime_pref.removeprefix("ctf-sandbox-warm-")
+                    logger.warning(
+                        "Warm runtime %s missing; clearing marker and falling back to core",
+                        runtime_pref,
+                    )
+                    clear_warm_runtime_marker(pack_hint)
+                    runtime_pref = "ctf-sandbox-core"
+                else:
+                    logger.info(
+                        "Using warm runtime %s for prefetch %s",
+                        runtime_pref,
+                        sorted(prefetch),
+                    )
+            elif runtime_pref in PREFETCH_RUNTIME_IMAGES.values():
                 from backend.sandbox.donor_build import ensure_donor_image
 
                 pack_id = next(
@@ -353,8 +386,10 @@ class DockerSandbox:
                 if prefetch:
                     async def _prefetch_one(pack: str) -> None:
                         pack_t0 = time.monotonic()
-                        if pack == "pwn" and "pwn" in (self.image or ""):
-                            hint = "baked pwn runtime (usually seconds)"
+                        from backend.tool_router import l0_already_provides_pack
+
+                        if l0_already_provides_pack(self.image, pack):
+                            hint = "baked L0 finalize (seconds)"
                         elif pack == "ghidra":
                             hint = "ghidra apt/pip ~3–5 min on fresh core"
                         elif pack == "pwn":
@@ -422,7 +457,7 @@ class DockerSandbox:
                 continue
         raise RuntimeError(
             f"No L0 sandbox image found (tried {candidates}). "
-            "Build: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core ."
+            "Run `artemis setup` (or build via Artemis so ExFAT AppleDouble is scrubbed)."
         ) from last_err
 
     async def _create_and_start(self, image: str) -> None:
@@ -764,7 +799,10 @@ class DockerSandbox:
         async with self._lock:
             if not self._docker or not self._container:
                 raise RuntimeError("Sandbox not started")
-            if pack_id in self.ensured_packs or await self._pack_marker_present(pack_id):
+            # Already ensured this session — no inspect / marker / tools rewrite.
+            if pack_id in self.ensured_packs:
+                return "Required tools are already available."
+            if await self._pack_marker_present(pack_id):
                 self.ensured_packs.add(pack_id)
                 self._remember_pack_paths(pack_id)
                 await self._maybe_raise_memory([pack_id])
@@ -777,8 +815,9 @@ class DockerSandbox:
         # Donor build + host-cache extract can take many minutes — do them
         # outside the sandbox lock so bash/read/write stay responsive.
         from backend.sandbox.donor_build import DONOR_BUILD_SPECS, ensure_donor_image
+        from backend.tool_router import l0_already_provides_pack
 
-        if pack_id in DONOR_BUILD_SPECS:
+        if pack_id in DONOR_BUILD_SPECS and not l0_already_provides_pack(self.image, pack_id):
             await ensure_donor_image(pack_id)
         if needs_cache:
             try:
@@ -896,10 +935,21 @@ class DockerSandbox:
                     "Pack %s trees already bind-mounted; running bootstrap only",
                     pack_id,
                 )
-            boot = bootstrap_script(pack_id)
+            from backend.tool_router import l0_already_provides_pack
+
+            packages = not l0_already_provides_pack(self.image, pack_id)
+            if not packages:
+                logger.info(
+                    "Pack %s: L0 %s already provides tools — light finalize (no apt/pip)",
+                    pack_id,
+                    self.image,
+                )
+            boot = bootstrap_script(pack_id, packages=packages)
             from backend.tool_router import pack_bootstrap_timeout_s
 
             boot_timeout = pack_bootstrap_timeout_s(pack_id)
+            if not packages:
+                boot_timeout = min(boot_timeout, 60)
             boot_result = await self._exec_inner(boot, timeout_s=boot_timeout)
             if boot_result.exit_code != 0:
                 logger.warning(
@@ -972,7 +1022,11 @@ class DockerSandbox:
         from backend.tool_router import PACK_SPECS, pack_state_dir
 
         out: list[str] = []
-        sid = (self.session_id or "").strip() or None
+        sid = (
+            (self.session_id or "").strip()
+            or (os.environ.get("ARTEMIS_SESSION_ID") or "").strip()
+            or None
+        )
         for pack_id, spec in PACK_SPECS.items():
             for container_path in spec.state_dirs:
                 host = pack_state_dir(pack_id, container_path, session_id=sid)
@@ -1034,12 +1088,10 @@ class DockerSandbox:
                 await asyncio.to_thread(_release_pack_flock, fd)
 
     async def _finish_ready_pack_cache(self, pack_id: str) -> Path:
-        from backend.sandbox.setup_bake import maybe_upgrade_ready_marker
         from backend.tool_router import evict_pack_cache, pack_cache_dir, touch_pack_cache
 
         cache = pack_cache_dir(pack_id)
         await self._finalize_pack_cache(pack_id, cache)
-        maybe_upgrade_ready_marker(pack_id)
         touch_pack_cache(pack_id)
         evict_pack_cache(protect={pack_id})
         return cache

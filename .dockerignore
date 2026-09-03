@@ -14,7 +14,16 @@ build
 uv.lock
 .env
 agent-transcripts
+.DS_Store
 **/.DS_Store
+._*
 **/._*
+.AppleDouble
+**/.AppleDouble
 challenges.zip
 challenges*.zip
+chassis
+writeups
+docs
+tests
+.pytest_cache

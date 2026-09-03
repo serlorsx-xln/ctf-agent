@@ -547,6 +547,17 @@ async def _run_single(
         model_specs=model_specs,
     )
 
+    import signal
+
+    def _on_stop(_signum=None, _frame=None) -> None:
+        swarm.kill()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_stop)
+        signal.signal(signal.SIGINT, _on_stop)
+    except (ValueError, OSError):
+        pass
+
     result = await swarm.run()
     print_swarm_outcome(swarm, result, out=console)
 
@@ -618,22 +629,35 @@ async def _run_coordinator(
     help="Pack id to bake (repeatable). Default: common Jeopardy set.",
 )
 @click.option("--skip-core", is_flag=True, help="Do not build/check L0 core image")
+@click.option(
+    "--skip-warm-runtime",
+    is_flag=True,
+    help="Skip committing ctf-sandbox-warm-* images (host cache only)",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
-def setup_cmd(packs: tuple[str, ...], skip_core: bool, verbose: bool) -> None:
+def setup_cmd(
+    packs: tuple[str, ...], skip_core: bool, skip_warm_runtime: bool, verbose: bool
+) -> None:
     """Phase 3: warm L0 + common tool packs on this machine (once).
 
     \b
       artemis setup
       artemis setup --pack mobile --pack pwn
 
-    Extracts donor trees into ~/.cache/ctf-agent/packs so the first solve is
-    faster. Blutter Dart VMs still compile once per Dart version, then are
-    shared across every Artemis session.
+    Extracts donor trees into ~/.cache/ctf-agent/packs and commits warm L0
+    runtimes so the first solve skips cold apt/pip. Blutter Dart VMs still
+    compile once per Dart version, then are shared across sessions.
     """
     _setup_logging(verbose)
     from backend.sandbox.setup_bake import run_setup
 
-    lines = asyncio.run(run_setup(packs=list(packs) or None, skip_core=skip_core))
+    lines = asyncio.run(
+        run_setup(
+            packs=list(packs) or None,
+            skip_core=skip_core,
+            skip_warm_runtime=skip_warm_runtime,
+        )
+    )
     failed = False
     for line in lines:
         if line.startswith("FAIL"):
@@ -646,7 +670,7 @@ def setup_cmd(packs: tuple[str, ...], skip_core: bool, verbose: bool) -> None:
     if failed:
         sys.exit(1)
     console.print(
-        "[bold]Setup done.[/bold] Start Artemis as usual; packs load from cache."
+        "[bold]Setup done.[/bold] Start Artemis as usual; packs load from cache/warm runtimes."
     )
 
 
@@ -655,7 +679,12 @@ def setup_cmd(packs: tuple[str, ...], skip_core: bool, verbose: bool) -> None:
 @click.option("--port", default=9400, type=int, help="Coordinator message port")
 @click.option("--host", default="127.0.0.1", help="Coordinator host")
 def msg(message: str, port: int, host: str) -> None:
-    """Send a message to the running coordinator."""
+    """Send a message to the CLI coordinator HTTP inbox (not the TUI swarm).
+
+    For mid-solve notes in the interactive TUI, type in the session prompt —
+    that path uses the daemon operator inbox. This command only hits
+    ``http://HOST:PORT/msg`` used by ``artemis swarm`` coordinator mode.
+    """
     import json
     import urllib.request
 

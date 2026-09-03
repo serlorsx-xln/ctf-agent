@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from backend.sandbox.container import DockerSandbox, ExecResult
+from backend.sandbox.container import DockerSandbox
 from backend.sandbox.docker_client import cleanup_orphan_containers, configure_semaphore
 from backend.sandbox.harden import (
     harden_hosts_edit_command,
@@ -13,13 +13,11 @@ from backend.sandbox.packs import (
     _acquire_pack_flock,
     _pack_cache_is_ready,
     _pack_cache_lock,
-    _pack_cache_lock_path,
     _release_pack_flock,
 )
 
 __all__ = [
     "DockerSandbox",
-    "ExecResult",
     "cleanup_orphan_containers",
     "configure_semaphore",
     "harden_hosts_edit_command",
@@ -29,6 +27,5 @@ __all__ = [
     "_acquire_pack_flock",
     "_pack_cache_is_ready",
     "_pack_cache_lock",
-    "_pack_cache_lock_path",
     "_release_pack_flock",
 ]

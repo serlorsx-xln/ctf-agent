@@ -873,12 +873,41 @@ def blutter_wrapper_source() -> str:
         return ""
 
 
-def pack_marker_path(pack_id: str) -> str:
-    """Opaque in-container marker (no pack id in the path).
+def image_tag_base(image: str | None) -> str:
+    """Strip optional ``:tag`` / digest for L0 / donor comparisons."""
+    raw = (image or "").strip()
+    if not raw:
+        return ""
+    if "@" in raw:
+        raw = raw.split("@", 1)[0]
+    if ":" in raw:
+        name, suffix = raw.rsplit(":", 1)
+        # ``registry:5000/name`` has no tag; ``name:tag`` / ``reg/name:tag`` do.
+        if "/" not in suffix:
+            return name
+    return raw
 
-    Fingerprint includes apt/pip/gems so growing a pack's recipe invalidates
-    the old marker and re-runs bootstrap (otherwise stale containers keep
-    missing newly added tools like qemu-arm-static / sqlite3).
+
+def l0_already_provides_pack(image: str | None, pack_id: str) -> bool:
+    """True when the running L0 image already baked this pack's tools.
+
+    Used to skip cold apt/pip during prefetch (mobile/pwn donors and warm-* commits).
+    Still run a light finalize (wrappers / symlinks / marker).
+    """
+    base = image_tag_base(image)
+    if not base or not pack_id:
+        return False
+    donor = PREFETCH_RUNTIME_IMAGES.get(pack_id)
+    if donor and base == donor:
+        return True
+    return base == f"ctf-sandbox-warm-{pack_id}"
+
+
+def pack_recipe_fingerprint(pack_id: str) -> str:
+    """Hash of apt/pip/gems (+ mobile wrapper) — same inputs as ``pack_marker_path``.
+
+    Warm markers include this so PackSpec/bootstrap edits invalidate warm images
+    even when the donor Dockerfile is unchanged.
     """
     spec = PACK_SPECS.get(pack_id)
     if spec is None:
@@ -893,10 +922,19 @@ def pack_marker_path(pack_id: str) -> str:
             )
         )
         if pack_id == "mobile":
-            # Wrapper is written by bootstrap; editing it must re-bootstrap.
             wrapper = blutter_wrapper_source()
             payload += "|" + hashlib.sha256(wrapper.encode("utf-8")).hexdigest()[:16]
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def pack_marker_path(pack_id: str) -> str:
+    """Opaque in-container marker (no pack id in the path).
+
+    Fingerprint includes apt/pip/gems so growing a pack's recipe invalidates
+    the old marker and re-runs bootstrap (otherwise stale containers keep
+    missing newly added tools like qemu-arm-static / sqlite3).
+    """
+    digest = pack_recipe_fingerprint(pack_id)
     return f"/var/lib/ctf/.ready-{digest}"
 
 
@@ -1128,13 +1166,24 @@ def resolve_runtime_l0_image(
     prefetch: Iterable[str],
     preferred: str | None = None,
 ) -> str:
-    """Choose L0 runtime from prefetch — use baked pack runtimes when available."""
+    """Choose L0 runtime from prefetch — warm commit or baked pack donors.
+
+    Prefer ``ctf-sandbox-warm-<pack>`` markers from ``artemis setup``, then
+    donor runtimes (``pwn`` / ``mobile``), else core.
+    """
+    from backend.sandbox.warm_runtime import is_warm_runtime_image, read_warm_runtime
+
     pref = {p.strip() for p in (prefetch or []) if (p or "").strip()}
     base = (preferred or "").strip() or "ctf-sandbox-core"
+    if is_warm_runtime_image(base):
+        return base
     if base not in RUNTIME_L0_IMAGES:
         return base
     for pack_id in _PACK_PRIORITY:
         if pack_id in pref:
+            warm = read_warm_runtime(pack_id)
+            if warm:
+                return warm
             runtime = PREFETCH_RUNTIME_IMAGES.get(pack_id)
             if runtime:
                 return runtime
@@ -1236,14 +1285,18 @@ def _pip_import_module(package: str) -> str:
     return aliases.get(name, name.replace("-", "_"))
 
 
-def bootstrap_script(pack_id: str) -> str:
-    """Shell script run inside L0 after files are copied."""
+def bootstrap_script(pack_id: str, *, packages: bool = True) -> str:
+    """Shell script run inside L0 after files are copied.
+
+    ``packages=False`` skips apt/pip/gems installs (donor / warm L0 already has them)
+    but still writes wrappers, env seeds, symlinks, PATH, and the ready marker.
+    """
     spec = PACK_SPECS[pack_id]
     lines = [
         "set -e",
         "export DEBIAN_FRONTEND=noninteractive",
     ]
-    if spec.apt:
+    if packages and spec.apt:
         pkgs = " ".join(shlex.quote(p) for p in spec.apt)
         # Skip apt-get update when every package is already installed — the slow
         # path on Mac/amd64 emulation is usually "apt-get update", not install.
@@ -1256,7 +1309,7 @@ def bootstrap_script(pack_id: str) -> str:
             f"  apt-get install -y --no-install-recommends {pkgs} || true",
             "fi",
         ]
-    if spec.pip:
+    if packages and spec.pip:
         pkgs = " ".join(shlex.quote(p) for p in spec.pip)
         import_ok = " && ".join(
             f"python3 -c 'import {_pip_import_module(p)}' 2>/dev/null" for p in spec.pip
@@ -1273,28 +1326,34 @@ def bootstrap_script(pack_id: str) -> str:
     if pack_id == "crypto":
         # Sage tree is often RO bind-mounted; only touch writable wrapper paths.
         # Host finalize already seeds pycryptodome into the Sage env when possible.
+        if packages:
+            lines += [
+                "set +e",
+                "if [ -w /opt/sagemath ] && [ -x /opt/sagemath/bin/python3 ]; then",
+                "  /opt/sagemath/bin/python3 -m pip install --no-cache-dir "
+                "pycryptodome 2>/dev/null || true",
+                "fi",
+                "set -e",
+            ]
         lines += [
-            "set +e",
-            "if [ -w /opt/sagemath ] && [ -x /opt/sagemath/bin/python3 ]; then",
-            "  /opt/sagemath/bin/python3 -m pip install --no-cache-dir "
-            "pycryptodome 2>/dev/null || true",
-            "fi",
             "printf '%s\\n' '#!/bin/bash' 'exec /opt/sagemath/bin/sage \"$@\"' "
             "> /usr/local/bin/sage",
             "printf '%s\\n' '#!/bin/bash' "
             "'exec /opt/sagemath/bin/python3 \"$@\"' > /usr/local/bin/sage-python",
             "chmod +x /usr/local/bin/sage /usr/local/bin/sage-python",
-            "set -e",
             # Require sage binary from the bind/copy — fail loud if missing.
             "test -x /opt/sagemath/bin/sage",
         ]
     if pack_id == "crypto-tools":
+        if packages:
+            lines += [
+                "if [ -d /opt/RsaCtfTool ]; then",
+                "  PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+                "  $PIP3 install --no-cache-dir --break-system-packages /opt/RsaCtfTool "
+                "|| $PIP3 install --no-cache-dir /opt/RsaCtfTool || true",
+                "fi",
+            ]
         lines += [
-            "if [ -d /opt/RsaCtfTool ]; then",
-            "  PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
-            "  $PIP3 install --no-cache-dir --break-system-packages /opt/RsaCtfTool "
-            "|| $PIP3 install --no-cache-dir /opt/RsaCtfTool || true",
-            "fi",
             "mkdir -p /usr/local/bin",
             "if [ -x /opt/cado-nfs/bin/cado-nfs ]; then",
             "  cp -f /opt/cado-nfs/bin/cado-nfs /usr/local/bin/cado-nfs || true",
@@ -1318,6 +1377,7 @@ def bootstrap_script(pack_id: str) -> str:
     if pack_id == "ghidra":
         lines += [
             # Non-login bash -c does not source profile.d — seed env for every python3.
+            # Always finalize (warm L0 light path must still set GHIDRA_INSTALL_DIR).
             "SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])')",
             "printf '%s\\n' "
             "'import os' "
@@ -1406,22 +1466,24 @@ def bootstrap_script(pack_id: str) -> str:
             "/usr/local/bin/q64 /usr/local/bin/q32",
         ]
     if pack_id == "ml":
+        if packages:
+            lines += [
+                "PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+                # PyTorch CPU (existing path).
+                "$PIP3 install --no-cache-dir --break-system-packages "
+                "--ignore-installed sympy "
+                "torch --index-url https://download.pytorch.org/whl/cpu "
+                "|| $PIP3 install --no-cache-dir torch "
+                "--index-url https://download.pytorch.org/whl/cpu || true",
+                # TensorFlow + common CTF/ML helpers (ANC / adversarial / notebooks).
+                "$PIP3 install --no-cache-dir --break-system-packages "
+                "tensorflow tqdm imageio "
+                "|| $PIP3 install --no-cache-dir tensorflow tqdm imageio || true",
+                "$PIP3 install --no-cache-dir --break-system-packages keras "
+                "|| $PIP3 install --no-cache-dir keras || true",
+            ]
         lines += [
-            "PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
-            # PyTorch CPU (existing path).
-            "$PIP3 install --no-cache-dir --break-system-packages "
-            "--ignore-installed sympy "
-            "torch --index-url https://download.pytorch.org/whl/cpu "
-            "|| $PIP3 install --no-cache-dir torch "
-            "--index-url https://download.pytorch.org/whl/cpu || true",
-            # TensorFlow + common CTF/ML helpers (ANC / adversarial / notebooks).
-            "$PIP3 install --no-cache-dir --break-system-packages "
-            "tensorflow tqdm imageio "
-            "|| $PIP3 install --no-cache-dir tensorflow tqdm imageio || true",
-            "$PIP3 install --no-cache-dir --break-system-packages keras "
-            "|| $PIP3 install --no-cache-dir keras || true",
             # Prefer TF for `import keras` (matches many DEF CON / archive challenges).
-            # Torch remains available via `import torch`; override with KERAS_BACKEND=torch.
             "printf '%s\\n' 'export KERAS_BACKEND=tensorflow' "
             "> /etc/profile.d/ctf-keras-backend.sh || true",
             "if grep -q '^KERAS_BACKEND=' /etc/environment 2>/dev/null; then "
@@ -1438,15 +1500,20 @@ def bootstrap_script(pack_id: str) -> str:
             "> /opt/linux-tools/bin/linpeas",
             "  chmod +x /opt/linux-tools/bin/linpeas",
             "fi",
-            # NetExec: install from git (PyPI has no `netexec` dist). Needs rustc/cargo
-            # from apt above. Best-effort — bloodhound/impacket still usable if this fails.
-            "if ! command -v nxc >/dev/null 2>&1; then",
-            "  PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
-            "  $PIP3 install --no-cache-dir --break-system-packages "
-            "'git+https://github.com/Pennyw0rth/NetExec.git' "
-            "|| $PIP3 install --no-cache-dir "
-            "'git+https://github.com/Pennyw0rth/NetExec.git' || true",
-            "fi",
+        ]
+        if packages:
+            lines += [
+                # NetExec: install from git (PyPI has no `netexec` dist). Needs rustc/cargo
+                # from apt above. Best-effort — bloodhound/impacket still usable if this fails.
+                "if ! command -v nxc >/dev/null 2>&1; then",
+                "  PIP3=$(command -v /usr/bin/pip3 || command -v pip3)",
+                "  $PIP3 install --no-cache-dir --break-system-packages "
+                "'git+https://github.com/Pennyw0rth/NetExec.git' "
+                "|| $PIP3 install --no-cache-dir "
+                "'git+https://github.com/Pennyw0rth/NetExec.git' || true",
+                "fi",
+            ]
+        lines += [
             # /etc/hosts is often a Docker bind-mount — sed -i fails.
             "cat > /usr/local/bin/ctf-hosts-add <<'EOF'",
             "#!/bin/bash",
@@ -1469,12 +1536,12 @@ def bootstrap_script(pack_id: str) -> str:
             "EOF",
             "chmod +x /usr/local/bin/ctf-hosts-add",
         ]
-    if pack_id == "containers":
+    if packages and pack_id == "containers":
         lines += [
             # Nested containers are best-effort (same as upstream fat image).
             "command -v podman >/dev/null 2>&1 || true",
         ]
-    if spec.gems:
+    if packages and spec.gems:
         gems = " ".join(shlex.quote(g) for g in spec.gems)
         gem_ok = " && ".join(f"command -v {shlex.quote(g)} >/dev/null 2>&1" for g in spec.gems)
         lines += [
@@ -1615,4 +1682,4 @@ def donor_build_hint(pack_id: str) -> str:
     if not spec:
         return ""
     dockerfile, image = spec
-    return f" Build the donor: docker build -f {dockerfile} -t {image} ."
+    return f" Build the donor with `artemis setup` (or: docker build -f {dockerfile} -t {image} sandbox on APFS)"

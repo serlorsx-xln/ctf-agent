@@ -106,9 +106,18 @@ async def main() -> int:
                 results.append((pack, "SKIP", "unknown pack"))
                 continue
             print(f"\n=== ensure {pack} ===", flush=True)
+            ensure_timeout = int(os.environ.get("ARTEMIS_SMOKE_ENSURE_TIMEOUT", "900"))
             try:
-                msg = await sb.ensure_pack(pack)
+                msg = await asyncio.wait_for(
+                    sb.ensure_pack(pack), timeout=ensure_timeout
+                )
                 print(f"  ensure: {msg}", flush=True)
+            except TimeoutError:
+                results.append(
+                    (pack, "FAIL", f"ensure timed out after {ensure_timeout}s")
+                )
+                print(f"  FAIL ensure: timed out after {ensure_timeout}s", flush=True)
+                continue
             except Exception as e:
                 results.append((pack, "FAIL", f"ensure exception: {e}"))
                 print(f"  FAIL ensure: {e}", flush=True)

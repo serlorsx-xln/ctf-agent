@@ -55,5 +55,8 @@ def test_pack_cache_is_ready_requires_marker_and_paths(tmp_path: Path, monkeypat
     (cache / "usr" / "local" / "bin" / "sage-python").write_text("#!/bin/bash\n")
     assert sandbox._pack_cache_is_ready("crypto") is False
 
-    (cache / ".ready").write_text("ok\n")
+    # Bare ``ok`` is stale when a pack_source_digest exists — stamp a real digest.
+    from backend.sandbox.setup_bake import write_pack_ready_marker
+
+    write_pack_ready_marker(cache, "crypto")
     assert sandbox._pack_cache_is_ready("crypto") is True

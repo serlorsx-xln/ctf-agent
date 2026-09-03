@@ -1,8 +1,8 @@
 # Mobile / Flutter RE sandbox.
 # Ubuntu 24.04 for g++>=13 + modern ICU (required by blutter).
 #
-# Build (from repo root):
-#   docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
+# Build (context = sandbox/):
+#   docker build -f Dockerfile.mobile -t ctf-sandbox-mobile .
 #
 # The tool router selects this image automatically when challenge files look
 # like Android/Flutter; users should not need --image.
@@ -101,11 +101,11 @@ RUN set -e; \
 
 # blutter (needs g++>=13; Ubuntu 24.04)
 RUN git clone --depth=1 https://github.com/worawit/blutter.git /opt/blutter
-COPY sandbox/scripts/blutter.sh /usr/local/bin/blutter
+COPY scripts/blutter.sh /usr/local/bin/blutter
 RUN chmod +x /usr/local/bin/blutter \
     && test -f /opt/blutter/blutter.py
 
-COPY sandbox/sandbox-tools-mobile.txt /tools.txt
+COPY sandbox-tools-mobile.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

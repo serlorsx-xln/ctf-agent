@@ -1,8 +1,8 @@
 # Pwn runtime + donor (extends L0 core — Ubuntu 24.04, shared with mobile/crypto).
 #
-# Build order (repo root):
-#   docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
-#   docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
+# Build order (context = sandbox/):
+#   docker build -f Dockerfile.core -t ctf-sandbox-core .   # run from sandbox/
+#   docker build -f Dockerfile.pwn -t ctf-sandbox-pwn .
 #
 # When ``pwn`` is prefetched, sandboxes start from this image instead of core so
 # apt/pip/gem bootstrap becomes a no-op (qemu wrappers still written at ensure time).
@@ -33,7 +33,7 @@ RUN gem install one_gadget seccomp-tools --no-document
 RUN curl -fsSL https://raw.githubusercontent.com/hugsy/gef/main/gef.py -o /root/.gdbinit-gef.py \
     && printf 'source /root/.gdbinit-gef.py\n' > /root/.gdbinit
 
-COPY sandbox/sandbox-tools-pwn.txt /tools.txt
+COPY sandbox-tools-pwn.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

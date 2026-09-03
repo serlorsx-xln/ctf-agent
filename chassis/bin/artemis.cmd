@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-REM Artemis TUI launcher for Windows — no blocking waits before UI.
+REM Artemis TUI launcher for Windows.
 if defined SystemRoot set "PATH=%SystemRoot%\System32;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%"
 set "PATH=%USERPROFILE%\.bun\bin;%USERPROFILE%\.local\bin;%PATH%"
 set "ROOT=%~dp0.."
@@ -24,16 +24,28 @@ if not defined BUN (
   exit /b 1
 )
 
+set "PY="
+if exist "%REPO%\.venv\Scripts\python.exe" set "PY=%REPO%\.venv\Scripts\python.exe"
+if not defined PY if exist "%USERPROFILE%\.local\bin\uv.exe" set "PY=UV"
+if not defined PY (
+  echo Run scripts/install.ps1 first.
+  exit /b 1
+)
+
+REM Pre-TUI setup gate (terminal prompt + logs; TUI starts only after).
+if "%PY%"=="UV" (
+  "%USERPROFILE%\.local\bin\uv.exe" run --directory "%REPO%" python "%REPO%\scripts\pre_tui_setup.py"
+) else (
+  "%PY%" "%REPO%\scripts\pre_tui_setup.py"
+)
+
 set "CREDS_FILE=%TEMP%\artemis-creds-%RANDOM%.env"
 set "BOOT_ERR=%USERPROFILE%\.cache\artemis\logs\bootstrap.err"
 if not exist "%USERPROFILE%\.cache\artemis\logs" mkdir "%USERPROFILE%\.cache\artemis\logs" >nul 2>&1
-if exist "%REPO%\.venv\Scripts\python.exe" (
-  "%REPO%\.venv\Scripts\python.exe" "%REPO%\scripts\tui_bootstrap.py" --emit cmd > "%CREDS_FILE%" 2> "%BOOT_ERR%"
-) else if exist "%USERPROFILE%\.local\bin\uv.exe" (
+if "%PY%"=="UV" (
   "%USERPROFILE%\.local\bin\uv.exe" run --directory "%REPO%" python "%REPO%\scripts\tui_bootstrap.py" --emit cmd > "%CREDS_FILE%" 2> "%BOOT_ERR%"
 ) else (
-  echo Run scripts/install.ps1 first.
-  exit /b 1
+  "%PY%" "%REPO%\scripts\tui_bootstrap.py" --emit cmd > "%CREDS_FILE%" 2> "%BOOT_ERR%"
 )
 if exist "%CREDS_FILE%" (
   for /f "usebackq tokens=1,* delims==" %%A in ("%CREDS_FILE%") do set "%%A=%%B"
@@ -42,6 +54,22 @@ if exist "%CREDS_FILE%" (
 for %%A in ("%BOOT_ERR%") do if %%~zA GTR 0 echo artemis: bootstrap warnings (see %BOOT_ERR%)
 
 cd /d "%ROOT%"
-"%BUN%" --cwd packages/opencode --conditions=browser src/index.ts %*
+REM Prefer prebuilt binary (fast). Set ARTEMIS_TUI_DEV=1 to force bun src.
+set "TUI_BIN="
+if defined OPENCODE_BIN_PATH if exist "%OPENCODE_BIN_PATH%" set "TUI_BIN=%OPENCODE_BIN_PATH%"
+if not defined TUI_BIN if not "%ARTEMIS_TUI_DEV%"=="1" (
+  if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    set "TUI_CAND=%ROOT%\packages\opencode\dist\opencode-windows-arm64\bin\opencode.exe"
+  ) else (
+    set "TUI_CAND=%ROOT%\packages\opencode\dist\opencode-windows-x64\bin\opencode.exe"
+  )
+)
+if not defined TUI_BIN if defined TUI_CAND if exist "%TUI_CAND%" set "TUI_BIN=%TUI_CAND%"
+if defined TUI_BIN (
+  "%TUI_BIN%" %*
+) else (
+  echo artemis: no prebuilt TUI — using bun src (slow). Run: bash scripts/build-tui.sh 1>&2
+  "%BUN%" --cwd packages/opencode --conditions=browser src/index.ts %*
+)
 set "EC=%ERRORLEVEL%"
 exit /b %EC%

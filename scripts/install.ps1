@@ -104,19 +104,68 @@ $bi = $script:InvokeExternalExitCode
 if ($bi -ne 0) { throw "bun install failed (exit $bi)" }
 Pop-Location
 
+Log "TUI binary (fast cold start)..."
+Push-Location $RepoRoot
+bash scripts/build-tui.sh
+if ($LASTEXITCODE -ne 0) {
+  Log "TUI binary build failed — artemis will fall back to slow bun src/index.ts"
+}
+Pop-Location
+
 $dockerOk = Ensure-Docker
 if ($dockerOk) {
-  Log "Building ctf-sandbox-core (L0)..."
-  Invoke-ArtemisDocker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
-  if ($LASTEXITCODE -ne 0) { throw "docker build ctf-sandbox-core failed (exit $LASTEXITCODE)" }
+  $artemisCache = if ($env:ARTEMIS_CACHE) { $env:ARTEMIS_CACHE } else { Join-Path $env:USERPROFILE ".cache\artemis" }
+  function New-SandboxCtx {
+    $src = Join-Path $RepoRoot "sandbox"
+    $unique = "sandbox-{0}-{1}" -f $PID, [guid]::NewGuid().ToString("N").Substring(0, 8)
+    $dest = Join-Path $artemisCache ("docker-ctx\" + $unique)
+    New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+    Copy-Item -Recurse $src $dest
+    Get-ChildItem -Path $dest -Recurse -Force -Filter "._*" | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $dest -Recurse -Force -Filter ".DS_Store" | Remove-Item -Force -ErrorAction SilentlyContinue
+    return $dest
+  }
+  $coreOk = $false
+  foreach ($attempt in 1..3) {
+    Log "Building ctf-sandbox-core (L0) (attempt $attempt/3)..."
+    $ctxRoot = New-SandboxCtx
+    try {
+      Invoke-ArtemisDocker build -f (Join-Path $ctxRoot "Dockerfile.core") -t ctf-sandbox-core $ctxRoot
+      if ($LASTEXITCODE -eq 0) { $coreOk = $true; break }
+    } finally {
+      if (Test-Path $ctxRoot) { Remove-Item -Recurse -Force $ctxRoot -ErrorAction SilentlyContinue }
+    }
+    Log "ctf-sandbox-core failed (attempt $attempt) — retrying in 20s"
+    Start-Sleep -Seconds 20
+  }
+  if (-not $coreOk) { throw "docker build ctf-sandbox-core failed after 3 attempts" }
   if ($Full) {
-    Log "Building donor images..."
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
-    Invoke-ArtemisDocker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
+    Log "Building all donor images..."
+    $donors = @(
+      @("Dockerfile.pwn", "ctf-sandbox-pwn"),
+      @("Dockerfile.mobile", "ctf-sandbox-mobile"),
+      @("Dockerfile.crypto", "ctf-sandbox-crypto"),
+      @("Dockerfile.crypto-tools", "ctf-sandbox-crypto-tools"),
+      @("Dockerfile.ghidra", "ctf-sandbox-ghidra"),
+      @("Dockerfile.steg", "ctf-sandbox-steg"),
+      @("Dockerfile.linux", "ctf-sandbox-linux")
+    )
+    foreach ($d in $donors) {
+      $ok = $false
+      foreach ($attempt in 1..3) {
+        Log "docker build $($d[1]) (attempt $attempt/3)..."
+        $ctxRoot = New-SandboxCtx
+        try {
+          Invoke-ArtemisDocker build -f (Join-Path $ctxRoot $d[0]) -t $d[1] $ctxRoot
+          if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+        } finally {
+          if (Test-Path $ctxRoot) { Remove-Item -Recurse -Force $ctxRoot -ErrorAction SilentlyContinue }
+        }
+        Log "$($d[1]) failed (attempt $attempt) — retrying in 20s"
+        Start-Sleep -Seconds 20
+      }
+      if (-not $ok) { throw "docker build $($d[1]) failed after 3 attempts" }
+    }
     if (-not $SkipBake) {
       Log "Warming pack caches..."
       & $uv run artemis setup -v

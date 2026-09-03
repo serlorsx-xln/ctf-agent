@@ -9,10 +9,12 @@ for common packs. Blutter Dart VMs still compile on first use of a Dart version
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger("ctf.setup")
@@ -27,6 +29,7 @@ DEFAULT_BAKE_PACKS: tuple[str, ...] = (
     "steg",
     "forensics",
     "web",
+    "linux",
 )
 
 # Host-cache paths that must exist after a successful donor extract. Top-level
@@ -111,21 +114,35 @@ def dockerfile_digest(dockerfile: Path) -> str:
 
 
 def pack_source_digest(pack_id: str) -> str:
-    """Digest of the donor Dockerfile for ``pack_id`` (empty when unknown)."""
-    from backend.sandbox.donor_build import donor_dockerfile_for
+    """Digest covering donor Dockerfile + pack recipe (apt/pip/gems/wrapper).
 
+    Warm / ``.ready`` markers store this so recipe-only edits invalidate caches
+    even when the Dockerfile is unchanged.
+    """
+    from backend.sandbox.donor_build import donor_dockerfile_for
+    from backend.tool_router import pack_recipe_fingerprint
+
+    parts: list[str] = []
     path = donor_dockerfile_for(pack_id)
-    if path is None or not path.is_file():
+    if path is not None and path.is_file():
+        parts.append(dockerfile_digest(path))
+    recipe = pack_recipe_fingerprint(pack_id)
+    if recipe:
+        parts.append(recipe)
+    if not parts:
         return ""
-    return dockerfile_digest(path)
+    if len(parts) == 1:
+        return parts[0]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def pack_cache_stale(pack_id: str) -> bool:
-    """True when ``.ready`` exists but Dockerfile digest no longer matches.
+    """True when ``.ready`` exists but ``pack_source_digest`` no longer matches.
 
-    Legacy markers that are just ``ok`` (no digest) are treated as still valid —
-    the next successful materialize upgrades the marker. Only a *mismatched*
-    digest forces a rebuild.
+    Digest covers donor Dockerfile + PackSpec/bootstrap recipe fingerprint.
+    Legacy markers that are just ``ok`` (no digest) are treated as **stale**
+    when a digest is available, so the next materialize stamps a real digest.
+    Only a *matching* digest keeps the cache.
     """
     from backend.tool_router import pack_cache_dir
 
@@ -140,69 +157,105 @@ def pack_cache_stale(pack_id: str) -> bool:
         have = marker.read_text(encoding="utf-8").strip().split()[-1]
     except OSError:
         return True
+    # Legacy bare ``ok`` must rematerialize once so the digest is stamped —
+    # upgrading the marker without extract would hide a stale tree forever.
     if have in ("ok", ""):
-        return False
+        return True
     return have != want
 
 
-def maybe_upgrade_ready_marker(pack_id: str) -> None:
-    """Rewrite legacy ``ok`` markers to include the current Dockerfile digest."""
-    from backend.tool_router import pack_cache_dir
-
-    cache = pack_cache_dir(pack_id)
-    marker = cache / ".ready"
-    if not marker.is_file():
-        return
-    want = pack_source_digest(pack_id)
-    if not want:
-        return
-    try:
-        body = marker.read_text(encoding="utf-8").strip()
-    except OSError:
-        return
-    if body == "ok" or not body.endswith(want):
-        write_pack_ready_marker(cache, pack_id)
-
-
 def write_pack_ready_marker(cache: Path, pack_id: str) -> None:
-    """Write ``.ready`` with optional Dockerfile digest for later staleness checks."""
+    """Write ``.ready`` with optional ``pack_source_digest`` for later staleness checks."""
     digest = pack_source_digest(pack_id)
     cache.mkdir(parents=True, exist_ok=True)
     payload = f"ok {digest}\n" if digest else "ok\n"
     (cache / ".ready").write_text(payload, encoding="utf-8")
 
 
-async def ensure_core_image(image: str = "ctf-sandbox-core") -> tuple[bool, str]:
+async def ensure_core_image(
+    image: str = "ctf-sandbox-core",
+    *,
+    on_progress: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
     """Build L0 core when missing (same donor path as packs)."""
     from backend.sandbox.docker_client import _docker_cli
+    from backend.sandbox.docker_hygiene import (
+        cleanup_sandbox_build_context,
+        prepare_sandbox_build_context,
+    )
     from backend.sandbox.donor_build import repo_root
+
+    def _emit(text: str) -> None:
+        if on_progress:
+            on_progress(text)
 
     rc, _, _ = await _docker_cli("image", "inspect", image, timeout_s=30)
     if rc == 0:
         return True, f"L0 image ready: {image}"
-    dockerfile = repo_root() / "sandbox" / "Dockerfile.core"
-    if not dockerfile.is_file():
-        return False, f"Missing {dockerfile}"
-    logger.info("Building L0 %s from %s …", image, dockerfile)
-    rc, out, err = await _docker_cli(
-        "build",
-        "-t",
-        image,
-        "-f",
-        str(dockerfile),
-        str(repo_root()),
-        timeout_s=int(os.environ.get("CTF_CORE_BUILD_TIMEOUT_S", "1800") or 1800),
+    root = repo_root()
+    ctx = await asyncio.to_thread(prepare_sandbox_build_context, root)
+    try:
+        dockerfile = ctx / "Dockerfile.core"
+        if not dockerfile.is_file():
+            return False, f"Missing {dockerfile}"
+        logger.info("Building L0 %s from %s …", image, dockerfile)
+        _emit(f"Building L0 image {image} (docker build — often 5–20+ min)…")
+
+        async def _heartbeat() -> None:
+            elapsed = 0
+            while True:
+                await asyncio.sleep(15)
+                elapsed += 15
+                mins, secs = divmod(elapsed, 60)
+                _emit(f"Still building L0… {mins}m{secs:02d}s elapsed (Docker is working)")
+
+        beat = asyncio.create_task(_heartbeat())
+        try:
+            rc, out, err = await _docker_cli(
+                "build",
+                "-t",
+                image,
+                "-f",
+                str(dockerfile),
+                str(ctx),
+                timeout_s=int(os.environ.get("CTF_CORE_BUILD_TIMEOUT_S", "1800") or 1800),
+            )
+        finally:
+            beat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await beat
+
+        if rc != 0:
+            return False, (err or out or f"docker build {image} failed").strip()
+        _emit(f"L0 image built: {image}")
+        return True, f"Built L0 image: {image}"
+    finally:
+        await asyncio.to_thread(cleanup_sandbox_build_context, ctx)
+
+
+async def _ensure_pack_prepared(pack_id: str, cache: Path) -> None:
+    """Finish host-side finalize (``.prepared``) when ``.ready`` already exists."""
+    if (cache / ".prepared").is_file():
+        return
+    from backend.config import Settings
+    from backend.sandbox.container import DockerSandbox
+
+    tmp = Path(os.environ.get("TMPDIR") or "/tmp") / "artemis-setup"
+    tmp.mkdir(parents=True, exist_ok=True)
+    sb = DockerSandbox(
+        image="ctf-sandbox-core",
+        challenge_dir=str(tmp),
+        settings=Settings(),
+        session_id="_setup",
     )
-    if rc != 0:
-        return False, (err or out or f"docker build {image} failed").strip()
-    return True, f"Built L0 image: {image}"
+    await sb._finish_ready_pack_cache(pack_id)
 
 
 async def materialize_pack(pack_id: str) -> tuple[bool, str]:
     """Extract one pack into the host cache (builds donor if needed).
 
     Uses the same cross-process pack flock as solve-time materialize. Rebuilds
-    when the donor Dockerfile digest no longer matches ``.ready``.
+    when ``pack_source_digest`` no longer matches ``.ready``.
     """
     from backend.config import Settings
     from backend.sandbox.container import DockerSandbox
@@ -220,8 +273,24 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
             )
             invalidate_pack_cache(pack_id)
         else:
-            maybe_upgrade_ready_marker(pack_id)
-            return True, f"Pack {pack_id}: cache already ready at {cache}"
+            # Sage/pip finalize must serialize with solve-time ensure_pack.
+            fd = -1
+            try:
+                fd = await asyncio.to_thread(_acquire_pack_flock, pack_id)
+                if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):
+                    if pack_cache_incomplete(pack_id):
+                        invalidate_pack_cache(pack_id)
+                    else:
+                        await _ensure_pack_prepared(pack_id, cache)
+                        if pack_id == "crypto" and not (cache / ".prepared").is_file():
+                            return False, (
+                                f"Pack {pack_id}: cache at {cache} but Sage finalize "
+                                "failed — retry setup"
+                            )
+                        return True, f"Pack {pack_id}: cache already ready at {cache}"
+            finally:
+                if fd >= 0:
+                    await asyncio.to_thread(_release_pack_flock, fd)
 
     tmp = Path(os.environ.get("TMPDIR") or "/tmp") / "artemis-setup"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -243,7 +312,12 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
                 )
                 invalidate_pack_cache(pack_id)
             else:
-                maybe_upgrade_ready_marker(pack_id)
+                await _ensure_pack_prepared(pack_id, cache)
+                if pack_id == "crypto" and not (cache / ".prepared").is_file():
+                    return False, (
+                        f"Pack {pack_id}: cache at {cache} but Sage finalize "
+                        "failed — retry setup"
+                    )
                 return True, f"Pack {pack_id}: cache already ready at {cache}"
         if pack_cache_stale(pack_id):
             logger.info("Pack %s: Dockerfile changed — rematerializing cache", pack_id)
@@ -254,6 +328,12 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
                 pass
         path = await sb._materialize_pack_cache_unlocked(pack_id)
         write_pack_ready_marker(cache, pack_id)
+        await sb._finalize_pack_cache(pack_id, cache)
+        if pack_id == "crypto" and not (cache / ".prepared").is_file():
+            return False, (
+                f"Pack {pack_id}: extracted at {path} but Sage finalize failed — "
+                "retry `artemis setup` or the next solve will retry under flock"
+            )
         return True, f"Pack {pack_id}: materialized at {path}"
     except Exception as e:
         logger.exception("materialize %s failed", pack_id)
@@ -280,22 +360,63 @@ async def run_setup(
     *,
     packs: list[str] | None = None,
     skip_core: bool = False,
+    skip_warm_runtime: bool = False,
+    on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Warm L0 + selected packs. Returns human-readable status lines."""
+    """Warm L0 + selected packs (+ optional committed warm runtimes).
+
+    Host cache materialize first; then ``ctf-sandbox-warm-<pack>`` commits so
+    the first real solve skips cold apt/pip bootstrap for those packs.
+    """
+    from backend.sandbox.warm_runtime import WARM_BAKE_PACKS, warm_pack_runtime
+
+    def _emit(text: str) -> None:
+        if on_progress:
+            on_progress(text)
+
     lines: list[str] = []
     for tip in probe_docker_env():
-        lines.append(f"INFO {tip}")
+        line = f"INFO {tip}"
+        lines.append(line)
+        _emit(line)
 
     if not skip_core:
-        ok, msg = await ensure_core_image()
-        lines.append(("OK  " if ok else "FAIL") + " " + msg)
+        _emit("Checking / building L0 core image…")
+        ok, msg = await ensure_core_image(on_progress=on_progress)
+        line = ("OK  " if ok else "FAIL") + " " + msg
+        lines.append(line)
+        _emit(line)
         if not ok:
             return lines
 
     chosen = list(packs) if packs else list(DEFAULT_BAKE_PACKS)
-    for pack_id in chosen:
+    total = len(chosen)
+    for i, pack_id in enumerate(chosen, start=1):
+        _emit(f"Pack {i}/{total}: {pack_id}…")
         ok, msg = await materialize_pack(pack_id)
-        lines.append(("OK  " if ok else "FAIL") + " " + msg)
+        line = ("OK  " if ok else "FAIL") + " " + msg
+        lines.append(line)
+        _emit(line)
 
-    lines.append("OK  " + await warm_shared_blutter_state())
+    blutter = await warm_shared_blutter_state()
+    line = "OK  " + blutter
+    lines.append(line)
+    _emit(line)
+
+    if not skip_warm_runtime:
+        warm_ids = [p for p in chosen if p in WARM_BAKE_PACKS]
+        # Always include default warm set when using DEFAULT_BAKE_PACKS so
+        # ``artemis setup`` alone kills cold apt on first solve.
+        if packs is None:
+            warm_ids = list(WARM_BAKE_PACKS)
+        for pack_id in warm_ids:
+            _emit(f"Warm runtime: {pack_id}…")
+            ok, msg = await warm_pack_runtime(pack_id)
+            line = ("OK  " if ok else "FAIL") + " " + msg
+            lines.append(line)
+            _emit(line)
+    else:
+        _emit("Skipping warm runtime commits (use `artemis setup` later for faster solves).")
+
+    _emit("Install steps finished.")
     return lines

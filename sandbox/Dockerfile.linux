@@ -2,8 +2,8 @@
 # Multi-stage: build tools (Go) stay out of the final donor image.
 # Runtime: L0 copies /opt/linux-tools only.
 #
-# Build (from repo root):
-#   docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
+# Build (context = sandbox/):
+#   docker build -f Dockerfile.linux -t ctf-sandbox-linux .
 
 FROM ubuntu:24.04 AS build
 
@@ -55,7 +55,7 @@ ENV TERM=xterm
 ENV LANG=C.UTF-8
 
 COPY --from=build /opt/linux-tools /opt/linux-tools
-COPY sandbox/sandbox-tools-linux.txt /tools.txt
+COPY sandbox-tools-linux.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

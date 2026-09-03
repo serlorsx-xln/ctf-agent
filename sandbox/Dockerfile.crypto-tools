@@ -3,7 +3,7 @@
 # runtime apt/pip deps when the pack is ensured.
 #
 # Build (from repo root; cado-nfs compile is slow / large):
-#   docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
+#   docker build -f Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
 
 FROM ubuntu:24.04 AS build
 
@@ -55,7 +55,7 @@ ENV LANG=C.UTF-8
 COPY --from=build /opt/flatter /opt/flatter
 COPY --from=build /opt/RsaCtfTool /opt/RsaCtfTool
 COPY --from=build /opt/cado-nfs /opt/cado-nfs
-COPY sandbox/sandbox-tools-crypto-tools.txt /tools.txt
+COPY sandbox-tools-crypto-tools.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

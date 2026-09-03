@@ -157,35 +157,47 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
                 )
                 await _docker_cli("rmi", "-f", image, timeout_s=120)
 
+            from backend.sandbox.docker_hygiene import (
+                cleanup_sandbox_build_context,
+                prepare_sandbox_build_context,
+            )
+
             timeout_s = int(
                 os.environ.get("ARTEMIS_DONOR_BUILD_TIMEOUT_S", str(_DEFAULT_BUILD_TIMEOUT_S))
             )
-            logger.info(
-                "Building missing donor image %s from %s (timeout=%ss)",
-                image,
-                dockerfile,
-                timeout_s,
-            )
-            # Surface progress into the agent bash stream via stderr logger.
-            rc, out, err = await _docker_cli(
-                "build",
-                "-f",
-                str(dockerfile),
-                "-t",
-                image,
-                str(root),
-                timeout_s=timeout_s,
-            )
-            if rc != 0:
-                detail = (err or out or "").strip()[-800:]
-                logger.warning("Donor build failed for %s: %s", image, detail)
-                return (
-                    False,
-                    f"Auto-build of {image} failed (exit {rc}). "
-                    f"Build manually: docker build -f {dockerfile_rel} -t {image} . "
-                    f"Detail: {detail or 'no output'}",
+            ctx = await asyncio.to_thread(prepare_sandbox_build_context, root)
+            try:
+                dockerfile_name = Path(dockerfile_rel).name
+                logger.info(
+                    "Building missing donor image %s from %s (context=%s timeout=%ss)",
+                    image,
+                    dockerfile_name,
+                    ctx,
+                    timeout_s,
                 )
-            logger.info("Donor image ready: %s", image)
-            return True, f"Built donor {image}"
+                # Surface progress into the agent bash stream via stderr logger.
+                rc, out, err = await _docker_cli(
+                    "build",
+                    "-f",
+                    str(ctx / dockerfile_name),
+                    "-t",
+                    image,
+                    str(ctx),
+                    timeout_s=timeout_s,
+                )
+                if rc != 0:
+                    detail = (err or out or "").strip()[-800:]
+                    logger.warning("Donor build failed for %s: %s", image, detail)
+                    return (
+                        False,
+                        f"Auto-build of {image} failed (exit {rc}). "
+                        f"Build manually after scrubbing AppleDouble (._*) files, or: "
+                        f"docker build -f {dockerfile_name} -t {image} <clean-sandbox-copy>. "
+                        f"Detail: {detail or 'no output'}",
+                    )
+                logger.info("Donor image ready: %s", image)
+                return True, f"Built donor {image}"
+            finally:
+                await asyncio.to_thread(cleanup_sandbox_build_context, ctx)
         finally:
             await asyncio.to_thread(_release_donor_flock, fd)

@@ -1,8 +1,8 @@
 # Ghidra + PyGhidra donor (additive into L0).
 # Large (~500MB+ zip). Bind-mounted RO from host pack cache at ensure time.
 #
-# Build (from repo root):
-#   docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .
+# Build (context = sandbox/):
+#   docker build -f Dockerfile.ghidra -t ctf-sandbox-ghidra .
 
 FROM ubuntu:24.04
 
@@ -29,7 +29,7 @@ RUN curl -fsSL -o /tmp/ghidra.zip \
 
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 
-COPY sandbox/sandbox-tools-ghidra.txt /tools.txt
+COPY sandbox-tools-ghidra.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

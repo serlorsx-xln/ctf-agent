@@ -16,6 +16,7 @@ def test_default_bake_packs_cover_common_jeopardy():
     assert "mobile" in DEFAULT_BAKE_PACKS
     assert "pwn" in DEFAULT_BAKE_PACKS
     assert "crypto" in DEFAULT_BAKE_PACKS
+    assert "linux" in DEFAULT_BAKE_PACKS
     assert "ml" not in DEFAULT_BAKE_PACKS  # stay light by default
 
 
@@ -79,5 +80,13 @@ def test_ready_marker_digest_roundtrip(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "backend.sandbox.setup_bake.pack_source_digest",
         lambda pack_id: "deadbeefdeadbeef",
+    )
+    assert pack_cache_stale("mobile") is True
+
+    # Legacy bare ``ok`` must rematerialize once a digest exists.
+    (cache / ".ready").write_text("ok\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.sandbox.setup_bake.pack_source_digest",
+        lambda pack_id: digest,
     )
     assert pack_cache_stale("mobile") is True

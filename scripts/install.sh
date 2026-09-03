@@ -19,7 +19,7 @@ for arg in "$@"; do
 Artemis install — Python 3.14 + uv + Bun + Docker L0 (+ optional pack warm).
 
   bash scripts/install.sh              # deps + L0 image
-  bash scripts/install.sh --full       # also warm common pack caches (slow)
+  bash scripts/install.sh --full       # all donor images + pack warm (slow, Sage ~1GB)
   bash scripts/install.sh --skip-docker  # no docker build (CI / no daemon)
 
 Platforms: macOS (Intel/ARM), Linux, WSL2 (use this script, not .ps1).
@@ -119,19 +119,52 @@ wait_docker() {
   return 1
 }
 
+docker_build() {
+  local dockerfile="$1" tag="$2"
+  local name attempt ctx
+  name="$(basename "$dockerfile")"
+  # ExFAT AppleDouble breaks BuildKit — scrub + build from APFS cache copy.
+  export COPYFILE_DISABLE=1
+  find "$REPO_ROOT" -name '._*' ! -path '*/.git/*' ! -path '*/.venv/*' ! -path '*/node_modules/*' -delete 2>/dev/null || true
+  # Unique context per build so concurrent install/test-install cannot rmtree
+  # a context another docker build is still reading.
+  ctx="${ARTEMIS_CACHE:-$HOME/.cache/artemis}/docker-ctx/sandbox-$$-$(date +%s)-$RANDOM"
+  mkdir -p "$(dirname "$ctx")"
+  # ditto/rsync avoid copying AppleDouble when possible; fallback cp -R
+  if command -v rsync >/dev/null 2>&1; then
+    mkdir -p "$ctx"
+    rsync -a --no-xattrs --exclude '._*' --exclude '.DS_Store' "$REPO_ROOT/sandbox/" "$ctx/"
+  else
+    cp -R "$REPO_ROOT/sandbox" "$ctx"
+    find "$ctx" -name '._*' -delete 2>/dev/null || true
+  fi
+  for attempt in 1 2 3; do
+    log "docker build ${tag} (attempt ${attempt}/3)…"
+    if docker build -f "${ctx}/${name}" -t "$tag" "$ctx"; then
+      rm -rf "$ctx" 2>/dev/null || true
+      return 0
+    fi
+    warn "${tag} failed (attempt ${attempt}) — retrying in 20s"
+    sleep 20
+  done
+  rm -rf "$ctx" 2>/dev/null || true
+  echo "docker build ${tag} failed after 3 attempts" >&2
+  return 1
+}
+
 build_l0() {
-  log "Building ctf-sandbox-core (L0)…"
-  docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
+  docker_build sandbox/Dockerfile.core ctf-sandbox-core
 }
 
 build_donors() {
-  log "Building common donor images (pwn, mobile, crypto, ghidra, steg, linux)…"
-  docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
-  docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
-  docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
-  docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .
-  docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
-  docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
+  log "Building all donor images (pwn, mobile, crypto, crypto-tools, ghidra, steg, linux)…"
+  docker_build sandbox/Dockerfile.pwn ctf-sandbox-pwn
+  docker_build sandbox/Dockerfile.mobile ctf-sandbox-mobile
+  docker_build sandbox/Dockerfile.crypto ctf-sandbox-crypto
+  docker_build sandbox/Dockerfile.crypto-tools ctf-sandbox-crypto-tools
+  docker_build sandbox/Dockerfile.ghidra ctf-sandbox-ghidra
+  docker_build sandbox/Dockerfile.steg ctf-sandbox-steg
+  docker_build sandbox/Dockerfile.linux ctf-sandbox-linux
 }
 
 install_cli() {
@@ -187,6 +220,11 @@ if ! ( cd chassis && bun install ); then
   ( cd chassis && bun install --ignore-scripts )
 fi
 
+log "TUI binary (fast cold start)…"
+if ! bash scripts/build-tui.sh; then
+  warn "TUI binary build failed — artemis will fall back to slow bun src/index.ts"
+fi
+
 install_cli
 
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
@@ -205,7 +243,7 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
     warn "  Linux: sudo systemctl enable --now docker"
     warn "         sudo usermod -aG docker \"\$USER\"  (then log out / reboot)"
     warn "  WSL2: enable Docker Desktop WSL integration"
-    warn "  Then: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core ."
+    warn "  Then: docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core sandbox"
   fi
 else
   log "Skipping Docker (--skip-docker)."

@@ -3,8 +3,8 @@
 เอกสารนี้อธิบายสถาปัตย์ที่เลือกไว้สำหรับ **Artemis** (fork จาก Veria CTF Agent / Cursor backend)
 เพื่อให้ **เบาบนเครื่องลูกค้า** แต่ **ทำโจทย์ได้ครบหมวด** โดยไม่เปลี่ยน logic หลักของระบบ
 
-สถานะ: **สถาปัตย์ล็อกแล้ว** — Phase 0–2 ลงโค้ดแล้ว (L0 core + L1 additive packs + cache)  
-อัปเดตล่าสุด: 2026-07-22  
+สถานะ: **สถาปัตย์ล็อกแล้ว** — Phase 0–3 (+ warm runtime) ลงโค้ดแล้ว  
+อัปเดตล่าสุด: 2026-08-30  
 
 | Phase | สถานะ |
 |-------|--------|
@@ -12,6 +12,8 @@
 | 1 L0 `Dockerfile.core` + additive `ensure_pack` + host cache + prefetch | ทำแล้ว |
 | 2 packs (mobile / pwn / crypto / crypto-tools / steg / linux / forensics / web / ml / containers) | ทำแล้ว — ครอบคลุมชุดต้นฉบับ + linux box เบา |
 | 3 Customer CLI setup / bake | ทำแล้ว — ``artemis setup`` (L0 + common packs; blutter VM shared) |
+| 3b Warm runtime commit | ทำแล้ว — ``ctf-sandbox-warm-<pack>`` หลัง setup สำหรับ pack ที่ apt/pip หนัก |
+| 3c Donor L0 fast finalize | ทำแล้ว — เมื่อ L0 คือ ``ctf-sandbox-mobile`` / ``pwn`` / warm-* ข้าม apt/pip ตอน prefetch (เหลือแค่ wrapper/symlink/marker) |
 
 **ยกเลิกแล้ว (ไม่ทำ):** L2 Customer Kali bridge · L3 cloud rental worker  
 เหตุผล: ไม่คุ้ม / ไม่ตรงผลิตภัณฑ์ — ลูกค้าใช้ L0+L1 บนเครื่องตัวเอง; แผนไกลเรื่องขาย = **brain บนเซิร์ฟเวอร์เรา + tools บนเครื่องลูกค้า** (deferred SaaS) ไม่ใช่ bridge ไป Kali หรือย้าย sandbox ขึ้นคลาวด์
@@ -339,7 +341,7 @@ Lazy packs (L0 + L1) ชนะเพราะครบเงื่อนไข�
 - [x] CLI setup: ``uv run artemis setup`` (และ ``--pack`` / ``--skip-core``) — แยกจาก solve loop
 - [x] ตรวจ Docker / Colima + แนะนำ `DOCKER_HOST` บน Mac (`probe_docker_env` ใน setup)
 - [x] Bake ตามรายการ pack: ขั้นต่ำ L0 + default common set (`mobile`/`pwn`/`ghidra`/…); ขยายด้วย ``--pack``
-- [x] Idempotent + digest stale check (Dockerfile hash ใน ``.ready``; mismatch → rematerialize)
+- [x] Idempotent + digest stale check (``pack_source_digest`` = Dockerfile + PackSpec/recipe fingerprint in ``.ready``; mismatch → rematerialize)
 - [x] Lock ข้าม process ตอน bake (reuse pack extract flock — สอง `artemis setup` รอคิว)
 - [x] ไม่ bake ตอน solve รายวัน — solve ใช้ image/cache ที่พร้อมแล้ว (missing donor = warning + fail-soft)
 - [x] เอกสารชี้ ``artemis setup`` (README + `.env.example`); รายการ `docker build` คงเป็น fallback / CI

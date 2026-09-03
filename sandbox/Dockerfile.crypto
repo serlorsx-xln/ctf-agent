@@ -2,7 +2,7 @@
 # Ubuntu 24.04 to match ctf-sandbox-core userspace (apt has no sagemath on 24.04).
 #
 # Build (from repo root, needs network + ~10–20 min + several GB):
-#   docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
+#   docker build -f Dockerfile.crypto -t ctf-sandbox-crypto .
 #
 # Runtime: L0 stays ctf-sandbox-core; pack "crypto" copies /opt/sagemath in.
 
@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Micromamba + Sage into a single prefix we can docker-cp into L0.
+# conda-forge Sage is ~1GB; slow links hit libmamba's 30s stall timeout.
+ENV MAMBA_NO_BANNER=1
 RUN set -eux; \
     arch="$(uname -m)"; \
     case "$arch" in \
@@ -27,10 +29,24 @@ RUN set -eux; \
       x86_64|amd64)  mb_arch=linux-64 ;; \
       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://micro.mamba.pm/api/micromamba/${mb_arch}/latest" \
+    curl --retry 8 --retry-all-errors --retry-delay 5 -fsSL \
+      "https://micro.mamba.pm/api/micromamba/${mb_arch}/latest" \
       | tar -xj -C /tmp bin/micromamba; \
     mv /tmp/bin/micromamba /usr/local/bin/micromamba; \
-    micromamba create -y -p /opt/sagemath -c conda-forge sage; \
+    micromamba config set remote_connect_timeout_secs 120; \
+    micromamba config set remote_backoff_factor 2; \
+    micromamba config set remote_max_retries 10; \
+    ok=0; \
+    for i in 1 2 3 4 5; do \
+      rm -rf /opt/sagemath; \
+      if micromamba create -y -p /opt/sagemath -c conda-forge sage; then \
+        ok=1; \
+        break; \
+      fi; \
+      echo "sage create failed (attempt $i/5) — retrying" >&2; \
+      sleep $((i * 20)); \
+    done; \
+    test "$ok" = 1; \
     micromamba clean -a -y; \
     rm -rf /tmp/bin "$MAMBA_ROOT_PREFIX/pkgs"
 
@@ -49,12 +65,12 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     pip3 install --no-cache-dir pycryptodome sympy galois pwntools requests
 RUN /opt/sagemath/bin/python3 -m pip install --no-cache-dir pycryptodome
 
-COPY sandbox/scripts/gf128_roots.py /opt/ctf/gf128_roots.py
+COPY scripts/gf128_roots.py /opt/ctf/gf128_roots.py
 RUN printf '%s\n' '#!/bin/bash' 'exec python3 /opt/ctf/gf128_roots.py "$@"' \
       > /usr/local/bin/gf128-roots \
     && chmod +x /usr/local/bin/gf128-roots
 
-COPY sandbox/sandbox-tools-crypto.txt /tools.txt
+COPY sandbox-tools-crypto.txt /tools.txt
 
 WORKDIR /challenge
 CMD ["sleep", "infinity"]

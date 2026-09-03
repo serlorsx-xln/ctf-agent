@@ -64,6 +64,27 @@ if have uv && test -d .venv; then
   check pydantic-ai uv run python -c "from pydantic_ai.usage import RunUsage"
 fi
 
+# Prebuilt TUI (install / build-tui.sh) — without it cold open uses slow bun src.
+tui_bin=""
+case "$(uname -s)" in
+  Darwin) _plat=darwin ;;
+  Linux) _plat=linux ;;
+  *) _plat="" ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) _cpu=arm64 ;;
+  x86_64|amd64) _cpu=x64 ;;
+  *) _cpu="" ;;
+esac
+if [[ -n "$_plat" && -n "$_cpu" ]]; then
+  tui_bin="chassis/packages/opencode/dist/opencode-${_plat}-${_cpu}/bin/opencode"
+fi
+if [[ -n "$tui_bin" ]]; then
+  check "tui-binary" test -x "$tui_bin"
+else
+  printf '  WARN tui-binary (unsupported platform for prebuild check)\n'
+fi
+
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
   if [[ -z "${DOCKER_HOST:-}" ]]; then
     for candidate in \

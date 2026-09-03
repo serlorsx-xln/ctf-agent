@@ -16,3 +16,9 @@ def test_crypto_prefetch_stays_on_core():
 
 def test_custom_l0_not_overridden():
     assert resolve_runtime_l0_image(["pwn"], "my-custom-image") == "my-custom-image"
+
+
+def test_warm_image_as_preferred_is_kept():
+    assert (
+        resolve_runtime_l0_image(["web"], "ctf-sandbox-warm-web") == "ctf-sandbox-warm-web"
+    )

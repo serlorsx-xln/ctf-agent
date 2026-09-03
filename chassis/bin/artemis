@@ -23,6 +23,56 @@ resolve_bun() {
   return 1
 }
 
+# Prefer prebuilt binary — avoids cold `bun src/index.ts` (blank "bun" window for minutes).
+# Sync a copy under ~/.cache/artemis so USB/ExFAT repo trees are not re-read every launch.
+resolve_tui_bin() {
+  if [[ -n "${OPENCODE_BIN_PATH:-}" && -x "${OPENCODE_BIN_PATH}" ]]; then
+    echo "${OPENCODE_BIN_PATH}"
+    return 0
+  fi
+  # Force slow source path for chassis development.
+  if [[ "${ARTEMIS_TUI_DEV:-}" == "1" ]]; then
+    return 1
+  fi
+  local plat cpu
+  case "$(uname -s)" in
+    Darwin) plat=darwin ;;
+    Linux) plat=linux ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) cpu=arm64 ;;
+    x86_64|amd64) cpu=x64 ;;
+    *) return 1 ;;
+  esac
+  local src="$ROOT/packages/opencode/dist/opencode-${plat}-${cpu}/bin/opencode"
+  if [[ ! -x "$src" ]]; then
+    return 1
+  fi
+  local cache_root="${ARTEMIS_CACHE:-$HOME/.cache/artemis}"
+  local cached="$cache_root/tui-bin/opencode"
+  local stamp="$cache_root/tui-bin/stamp"
+  local src_stamp
+  src_stamp="$(wc -c <"$src" | tr -d ' '):$(stat -f '%m' "$src" 2>/dev/null || stat -c '%Y' "$src" 2>/dev/null || echo 0)"
+  if [[ -x "$cached" && -f "$stamp" && "$(cat "$stamp" 2>/dev/null)" == "$src_stamp" ]]; then
+    echo "$cached"
+    return 0
+  fi
+  mkdir -p "$cache_root/tui-bin" 2>/dev/null || true
+  if cp -f "$src" "$cached" 2>/dev/null; then
+    chmod +x "$cached" 2>/dev/null || true
+    # USB/ExFAT → APFS copy often breaks adhoc signature → macOS SIGKILL at launch.
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+      codesign --force --sign - "$cached" >/dev/null 2>&1 || true
+    fi
+    printf '%s\n' "$src_stamp" >"$stamp" 2>/dev/null || true
+    echo "$cached"
+    return 0
+  fi
+  echo "$src"
+  return 0
+}
+
 run_python() {
   if [[ -x "$REPO/.venv/bin/python" ]]; then
     "$REPO/.venv/bin/python" "$@"
@@ -58,6 +108,10 @@ if [[ -f "$REPO/.env" ]]; then
 fi
 unset CURSOR_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY 2>/dev/null || true
 
+# Pre-TUI setup gate: ask in the terminal (never open TUI during setup).
+# Skip with ARTEMIS_SKIP_LAUNCH_SETUP=1 or ARTEMIS_SETUP_AUTO=0/1.
+run_python "$REPO/scripts/pre_tui_setup.py" || true
+
 # Inject keys + start daemon/stub in background (no blocking waits).
 # Credentials on stdout (eval); bootstrap warnings go to bootstrap.log and
 # optionally the terminal if ARTEMIS_BOOTSTRAP_VERBOSE=1.
@@ -77,8 +131,15 @@ unset _BOOT_ERR
 
 cd "$ROOT"
 set +e
-"$BUN_BIN" --cwd packages/opencode --conditions=browser src/index.ts "$@"
-code=$?
+if TUI_BIN="$(resolve_tui_bin)"; then
+  "$TUI_BIN" "$@"
+  code=$?
+else
+  # Slow path: transpile TypeScript on the fly (first paint can take a long time).
+  echo "artemis: no prebuilt TUI — using bun src (slow). Run: bash scripts/build-tui.sh" >&2 || true
+  "$BUN_BIN" --cwd packages/opencode --conditions=browser src/index.ts "$@"
+  code=$?
+fi
 set -e
 
 exit "$code"

@@ -51,7 +51,19 @@ log "5/7 Fresh install CLI help"
 if [[ "$WITH_DOCKER" -eq 1 ]]; then
   log "5b Docker L0 on fresh tree (optional)"
   if docker info >/dev/null 2>&1; then
-    ( cd "$FRESH" && docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core . )
+    # Unique context per build (same race fix as install.sh / Python bake).
+    export COPYFILE_DISABLE=1
+    ctx="${ARTEMIS_CACHE:-$HOME/.cache/artemis}/docker-ctx/sandbox-$$-$(date +%s)-$RANDOM"
+    mkdir -p "$(dirname "$ctx")"
+    if command -v rsync >/dev/null 2>&1; then
+      mkdir -p "$ctx"
+      rsync -a --no-xattrs --exclude '._*' --exclude '.DS_Store' "$FRESH/sandbox/" "$ctx/"
+    else
+      cp -R "$FRESH/sandbox" "$ctx"
+      find "$ctx" -name '._*' -delete 2>/dev/null || true
+    fi
+    docker build -f "${ctx}/Dockerfile.core" -t ctf-sandbox-core "$ctx"
+    rm -rf "$ctx" 2>/dev/null || true
     bash "$FRESH/scripts/verify-install.sh"
   else
     log "Docker not running — skipped L0 build"
