@@ -254,7 +254,6 @@ Top-level API groups exposed to `tui(api, options, meta)`:
 - To surface a command in the host command palette, set `namespace: "palette"` and provide metadata such as `title`, `category`, `desc`, `suggested`, `hidden`, `enabled`, `slashName`, and `slashAliases` on the command.
 - Use `api.keymap.dispatchCommand(name)` for user-style execution semantics and `api.keymap.runCommand(name)` only for forced programmatic execution.
 - Disposers returned by `api.keymap` registrations and `acquireResource(...)` are automatically cleaned up when the plugin deactivates. You do not need to add those disposers to `api.lifecycle.onDispose(...)` yourself.
-- Built-in which-key shortcuts are resolved from flat `keybinds` command ids such as `which_key_toggle`, not plugin options.
 
 #### Mode-aware layers
 
@@ -507,16 +506,19 @@ Metadata is persisted by plugin id.
 
 ## Built-in plugins
 
+Artemis chassis builtins (ids as registered):
+
+- `internal:home-footer`
 - `internal:home-tips`
-- `internal:sidebar-context`
-- `internal:sidebar-mcp`
-- `internal:sidebar-lsp`
-- `internal:sidebar-todo`
-- `internal:sidebar-files`
+- `internal:sidebar-challenge` (order `50`)
+- `internal:sidebar-context` (order `100`)
+- `internal:sidebar-mcp` (order `200`)
+- `internal:sidebar-todo` (order `400`)
 - `internal:sidebar-footer`
+- `internal:notifications`
 - `internal:plugin-manager`
 
-Sidebar content order is currently: context `100`, mcp `200`, lsp `300`, todo `400`, files `500`.
+Removed upstream builtins (not shipped): which-key, sidebar-lsp, sidebar-files, standalone diff viewer.
 
 The plugin manager is exposed as a command with title `Plugins` and value `plugins.list`.
 
@@ -538,7 +540,4 @@ The plugin manager is exposed as a command with title `Plugins` and value `plugi
 
 ## Current in-repo examples
 
-- Local smoke plugin: `.opencode/plugins/tui-smoke.tsx`
-- Local vim plugin: `.opencode/plugins/tui-vim.tsx`
-- Local smoke config: `.opencode/tui.json`
-- Local smoke theme: `.opencode/plugins/smoke-theme.json`
+Upstream OpenCode smoke plugins under `.opencode/` are not vendored in this Artemis tree. Use `api.plugins.add` / the Plugins dialog to load external TUI plugins.

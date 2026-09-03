@@ -5,6 +5,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ExFAT AppleDouble next to this script / tree can confuse tools — scrub.
+find "$REPO_ROOT/scripts" -maxdepth 1 -name '._*' -delete 2>/dev/null || true
+find "$REPO_ROOT/backend" "$REPO_ROOT/tests" "$REPO_ROOT/chassis/packages/tui/src" \
+  "$REPO_ROOT/chassis/packages/tui/test" "$REPO_ROOT/chassis/packages/opencode/test" \
+  -name '._*' -delete 2>/dev/null || true
+
 SKIP_DOCKER=0
 SKIP_TUI=0
 for arg in "$@"; do
@@ -25,28 +31,41 @@ if [[ ! -x "$PY" ]]; then
   PY="$("$have_uv" run python -c 'import sys; print(sys.executable)')"
 fi
 
-log "ruff…"
-"$PY" -m ruff check backend tests scripts
+log "ruff"
+RUFF_BIN=""
+if [[ -f "${REPO_ROOT}/.venv/bin/ruff" ]]; then
+  RUFF_BIN="${REPO_ROOT}/.venv/bin/ruff"
+elif command -v ruff >/dev/null 2>&1; then
+  RUFF_BIN="$(command -v ruff)"
+fi
+[[ -n "$RUFF_BIN" ]] || fail "ruff missing — run scripts/install.sh / uv sync"
+"$RUFF_BIN" check backend tests scripts
 
-log "pytest (361+)…"
+log "pytest"
 "$PY" -m pytest tests/ -q --tb=no
 
 if [[ "$SKIP_TUI" -eq 0 ]]; then
   BUN="$(command -v bun || true)"
   [[ -n "$BUN" ]] || fail "bun missing — run scripts/install.sh"
-  log "TUI typecheck…"
+  log "TUI typecheck"
   ( cd chassis/packages/tui && "$BUN" run typecheck )
-  log "TUI tests…"
+  log "TUI tests"
   ( cd chassis/packages/tui && "$BUN" test --timeout 30000 )
-  log "artemis-auth…"
+  log "artemis-auth"
   ( cd chassis/packages/opencode && "$BUN" test test/provider/artemis-auth.test.ts --timeout 30000 )
 fi
 
 if [[ "$SKIP_DOCKER" -eq 0 ]] && docker info >/dev/null 2>&1; then
-  log "Docker pack smoke (11 packs)…"
-  "$PY" scripts/smoke_packs.py
+  log "Docker pack smoke"
+  # Default: overlay packs that usually use pack caches (fast, Docker-stable).
+  # ARTEMIS_SMOKE_ALL=1 runs the full matrix (pwn/ghidra/crypto/… — slow; can wedge Desktop).
+  if [[ -n "${ARTEMIS_SMOKE_ALL:-}" ]]; then
+    "$PY" scripts/smoke_packs.py
+  else
+    "$PY" scripts/smoke_packs.py web forensics steg
+  fi
 else
-  log "Docker smoke skipped (no daemon or --skip-docker)"
+  log "Docker smoke skipped"
 fi
 
 log "ALL QA PASSED"

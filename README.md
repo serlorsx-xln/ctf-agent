@@ -16,10 +16,12 @@ Solves across pwn, rev, crypto, forensics, web, and misc.
 
 One flow inside the Artemis TUI:
 
-1. Paste challenge text / path / `@files` → `artemis_load_challenge`
-2. If `flags_required` unknown → digits dialog → starts swarm
-3. Solvers stream think / bash / tools into the chat; confirm flag candidates in a TUI dialog
-4. Summarize how the flag was found
+1. Paste challenge text / path / `@files` → load in daemon
+2. **Flags gate** → digits dialog for how many flags to find
+3. **Single vs Swarm** → pick one model or a multi-model race
+4. **Models gate** → choose provider(s) → `swarm_start`
+5. Solvers stream think / bash / tools into the chat; confirm flag candidates in a TUI dialog
+6. After CORRECT → Hold Q&A / writeup recap on the main feed
 
 ```bash
 ./chassis/bin/artemis
@@ -48,7 +50,14 @@ bash Artemis-Install.sh                              # macOS / Linux / WSL2
 # After install: open a NEW terminal, then run:  artemis
 ```
 
-After install: open a **new** terminal → `artemis` → `/connect` → paste challenge.
+After install: open a **new** terminal → `artemis`. If L0 / packs / warm runtimes
+are incomplete, the launcher asks **in the terminal** (before TUI) whether to run
+full setup and prints live logs; answer `n` to continue with what you have.
+`ARTEMIS_SETUP_AUTO=1` forces setup; `ARTEMIS_SKIP_LAUNCH_SETUP=1` skips the
+prompt. Rebuild the fast TUI binary with `bash scripts/build-tui.sh` after
+chassis changes. The in-TUI **Install** screen still blocks solving if core/packs
+are missing.
+
 
 **Verify / full install test:**
 
@@ -80,25 +89,21 @@ Manual steps (equivalent):
 # Install
 uv sync
 
-# Build L0 sandbox (+ optional pack donors)
-docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core .
-docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile .
-docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn .
+# Prefer: build L0 + pack caches via Artemis (scrubbed build context — safe on ExFAT/USB)
+# uv run artemis setup
+# uv run artemis setup --skip-warm-runtime   # host cache only (faster setup, slower first solve)
+#
+# Manual docker builds (APFS clone recommended; ExFAT ``._*`` sidecars break BuildKit):
+# docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core sandbox
+# docker build -f sandbox/Dockerfile.mobile -t ctf-sandbox-mobile sandbox
+# docker build -f sandbox/Dockerfile.pwn -t ctf-sandbox-pwn sandbox
 # SageMath donor for .sage challenges (first build is large / slow):
-docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto .
-# Optional donors (loaded on demand; multi-stage — toolchain not kept in final image):
-# docker build -f sandbox/Dockerfile.crypto-tools -t ctf-sandbox-crypto-tools .
-# docker build -f sandbox/Dockerfile.ghidra -t ctf-sandbox-ghidra .   # PyGhidra / analyzeHeadless
-# docker build -f sandbox/Dockerfile.steg -t ctf-sandbox-steg .
-# docker build -f sandbox/Dockerfile.linux -t ctf-sandbox-linux .
+# docker build -f sandbox/Dockerfile.crypto -t ctf-sandbox-crypto sandbox
 
 # Launch Artemis TUI (Bun required). Configure providers via /connect — not .env:
 #   Cursor / Claude / Codex / Gemini — paste challenge text or a path to solve (swarm + live logs)
 uv run artemis
 # or: chassis/bin/artemis
-
-# Optional once: warm L0 + common pack caches (faster first solve)
-# uv run artemis setup
 
 # Headless swarm (optional CI). Keys from TUI auth.json, or env for automation:
 # uv run artemis swarm --challenge ./challenges/my-chal --models cursor/composer-2.5 -v

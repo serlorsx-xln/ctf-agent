@@ -46,7 +46,6 @@ import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogDebug } from "./component/dialog-debug"
-import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
@@ -61,6 +60,7 @@ import { PromptStashProvider } from "./component/prompt/stash"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
 import { DialogConfirmRestart } from "./component/dialog-confirm-restart"
+import { DialogSetupGate } from "./component/dialog-setup-install"
 import {
   confirmRestartOpts,
   hasDaemonArtemisResidue,
@@ -134,7 +134,6 @@ const appBindingCommands = [
   "theme.mode.lock",
   "help.show",
   "docs.open",
-  "diff.open",
   "workspace.list",
   "app.debug",
   "app.console",
@@ -524,7 +523,15 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       if (route.data.type === "session" && route.data.sessionID) {
         daemon.setSessionId(route.data.sessionID)
       }
-      void daemon.ensureConnected()
+      void daemon.ensureConnected().then(async () => {
+        const ok = await DialogSetupGate.ensure(dialog)
+        if (!ok) {
+          toast.show({
+            message: "Sandbox install required before solving",
+            variant: "warning",
+          })
+        }
+      })
     }
     batch(() => {
       if (args.agent) local.agent.set(args.agent)
@@ -860,34 +867,40 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
         category: "System",
       },
-      {
-        name: "theme.switch",
-        title: "Switch theme",
-        slashName: "themes",
-        run: () => {
-          dialog.replace(() => <DialogThemeList />)
-        },
-        category: "System",
-      },
-      {
-        name: "theme.switch_mode",
-        title: mode() === "dark" ? "Switch to light mode" : "Switch to dark mode",
-        run: () => {
-          setMode(mode() === "dark" ? "light" : "dark")
-          dialog.clear()
-        },
-        category: "System",
-      },
-      {
-        name: "theme.mode.lock",
-        title: locked() ? "Unlock theme mode" : "Lock theme mode",
-        run: () => {
-          if (locked()) unlock()
-          else lock()
-          dialog.clear()
-        },
-        category: "System",
-      },
+      ...(process.env.ARTEMIS !== "1"
+        ? ([
+            {
+              name: "theme.switch",
+              title: "Switch theme",
+              slashName: "themes",
+              run: () => {
+                void import("./component/dialog-theme-list").then(({ DialogThemeList }) => {
+                  dialog.replace(() => <DialogThemeList />)
+                })
+              },
+              category: "System",
+            },
+            {
+              name: "theme.switch_mode",
+              title: mode() === "dark" ? "Switch to light mode" : "Switch to dark mode",
+              run: () => {
+                setMode(mode() === "dark" ? "light" : "dark")
+                dialog.clear()
+              },
+              category: "System",
+            },
+            {
+              name: "theme.mode.lock",
+              title: locked() ? "Unlock theme mode" : "Lock theme mode",
+              run: () => {
+                if (locked()) unlock()
+                else lock()
+                dialog.clear()
+              },
+              category: "System",
+            },
+          ] as const)
+        : []),
       {
         name: "help.show",
         title: "Help",

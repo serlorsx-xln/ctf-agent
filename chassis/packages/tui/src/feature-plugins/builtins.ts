@@ -16,7 +16,7 @@ export type BuiltinTuiPlugin = Omit<TuiPluginModule, "id"> & {
 }
 
 /** Artemis builtins: Challenge + Context + MCP + Todo + Footer (no LSP / Diff / WhichKey / Files). */
-export function createBuiltinPlugins(_options: { experimentalEventSystem: boolean }): BuiltinTuiPlugin[] {
+export function createBuiltinPlugins(): BuiltinTuiPlugin[] {
   return [
     HomeFooter,
     HomeTips,

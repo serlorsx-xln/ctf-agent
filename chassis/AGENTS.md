@@ -21,5 +21,6 @@ Specs: `cursor/<id>`, `claude-sdk/<id>` (or `anthropic/<id>`), `codex/<id>` (or 
 2. Never invent flags.
 3. Do not ask the user for API keys or tokens.
 4. Do not invent challenge paths — use what they paste/provide.
-5. Single solve flow only — no mode switching.
-6. Flag confirmation happens in the TUI dialog — do not ask the user to type y/N in chat.
+5. Single solve flow only — do not invent alternate OpenCode agent modes (Single vs Swarm is the TUI gate after load).
+6. Flag confirmation happens in the TUI dialog when a solver calls `submit_flag` — do not ask the user to type y/N in chat.
+7. While a swarm is running, free text on **main** opens Send now / Queue for **all** agents; on an **agent page** chat stays unlocked and targets that agent only. Pending Queue notes pin in a sticky panel; Send now must not clear Queue. During post-CORRECT hold, notes go to the winner via QA (dialog skipped; Queue coerced to Send now). Empty Enter / Esc / `/stop` releases/stops. After the run exits, normal chat/`/resume` is fine.

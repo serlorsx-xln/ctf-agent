@@ -36,12 +36,9 @@ function View(_props: { api: TuiPluginApi; session_id: string }) {
       <Show
         when={state()}
         fallback={
-          <>
-            <text fg={theme().textMuted}>
-              {running() ? "waiting for provider usage…" : "tokens not reported"}
-            </text>
-            <text fg={theme().textMuted}>— spent</text>
-          </>
+          <text fg={theme().textMuted}>
+            {running() ? "waiting for provider usage…" : "tokens not reported"}
+          </text>
         }
       >
         {(s) => {

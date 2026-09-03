@@ -109,15 +109,28 @@ it.instance("keeps server and tui plugin merge semantics aligned", () =>
       const tuiOrigins = yield* getTuiPluginOrigins(test.directory)
       const serverPlugins = (server.plugin ?? []).map((item) => ConfigPlugin.pluginSpecifier(item))
       const tuiPlugins = (tui.plugin ?? []).map((item) => ConfigPlugin.pluginSpecifier(item))
+      // Host machines may inject absolute file:// plugins outside the cleaned
+      // Global.Path.config tree (e.g. Application Support hooks). Ignore those
+      // when asserting merge semantics for the fixtures we write.
+      const projectOnly = (plugins: string[]) => plugins.filter((item) => !item.startsWith("file://"))
 
-      expect(serverPlugins).toEqual(tuiPlugins)
+      expect(projectOnly(serverPlugins)).toEqual(projectOnly(tuiPlugins))
       expect(serverPlugins).toContain("shared-plugin@2.0.0")
       expect(serverPlugins).not.toContain("shared-plugin@1.0.0")
 
-      const serverOrigins = server.plugin_origins ?? []
-      expect(serverOrigins.map((item) => ConfigPlugin.pluginSpecifier(item.spec))).toEqual(serverPlugins)
-      expect(tuiOrigins.map((item) => ConfigPlugin.pluginSpecifier(item.spec))).toEqual(tuiPlugins)
-      expect(serverOrigins.map((item) => item.scope)).toEqual(tuiOrigins.map((item) => item.scope))
+      const serverOrigins = (server.plugin_origins ?? []).filter(
+        (item) => !ConfigPlugin.pluginSpecifier(item.spec).startsWith("file://"),
+      )
+      const tuiOriginsFiltered = tuiOrigins.filter(
+        (item) => !ConfigPlugin.pluginSpecifier(item.spec).startsWith("file://"),
+      )
+      expect(serverOrigins.map((item) => ConfigPlugin.pluginSpecifier(item.spec))).toEqual(
+        projectOnly(serverPlugins),
+      )
+      expect(tuiOriginsFiltered.map((item) => ConfigPlugin.pluginSpecifier(item.spec))).toEqual(
+        projectOnly(tuiPlugins),
+      )
+      expect(serverOrigins.map((item) => item.scope)).toEqual(tuiOriginsFiltered.map((item) => item.scope))
     }),
   ),
 )
@@ -478,14 +491,15 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
         keybinds: {
           leader: { key: { name: "g", ctrl: true } },
           command_list: "alt+p",
-          diff_open: "ctrl+j",
-          which_key_toggle: "alt+k",
+          app_toggle_diffwrap: "ctrl+j",
           editor_open: "ctrl+e",
           "prompt.autocomplete.next": "ctrl+j",
           "dialog.prompt.submit": "ctrl+s",
           "dialog.mcp.toggle": "ctrl+t",
           model_favorite_toggle: "ctrl+f",
           "dialog.plugins.install": "shift+i",
+          which_key_toggle: "alt+k",
+          not_a_real_keybind: "ctrl+q",
         },
         leader_timeout: 1234,
       })
@@ -494,15 +508,12 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("leader")?.[0]?.key).toEqual({ name: "g", ctrl: true })
       expect(config.leader_timeout).toBe(1234)
       expect(config.keybinds.get("command.palette.show")?.[0]?.key).toBe("alt+p")
-      expect(config.keybinds.get("diff.open")?.[0]?.key).toBe("ctrl+j")
+      expect(config.keybinds.get("app.toggle.diffwrap")?.[0]?.key).toBe("ctrl+j")
       expect(config.keybinds.get("session.new")?.[0]?.key).toBe("<leader>n")
-      expect(config.keybinds.get("which-key.toggle")?.[0]?.key).toBe("alt+k")
-      expect(config.keybinds.get("which-key.layout.toggle")?.[0]?.key).toBe("ctrl+alt+shift+k")
-      expect(config.keybinds.get("which-key.pending.toggle")?.[0]?.key).toBe("ctrl+alt+shift+p")
-      expect(config.keybinds.get("which-key.group.next")?.[0]?.key).toBe("ctrl+alt+right,ctrl+alt+]")
-      expect((config.keybinds.get("which-key.toggle")?.[0] as { desc?: unknown } | undefined)?.desc).toBe(
-        "Toggle which-key panel",
-      )
+      // Removed which-key / diff viewer binds are dropped as unknown.
+      expect(config.keybinds.get("which-key.toggle")).toEqual([])
+      expect(config.keybinds.get("diff.open")).toEqual([])
+      expect(config.keybinds.get("not_a_real_keybind")).toEqual([])
       expect(config.keybinds.get("prompt.editor")?.[0]?.key).toBe("ctrl+e")
       expect(config.keybinds.get("prompt.autocomplete.next")?.[0]?.key).toBe("ctrl+j")
       expect(config.keybinds.get("dialog.prompt.submit")?.[0]?.key).toBe("ctrl+s")

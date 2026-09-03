@@ -221,7 +221,7 @@ test("kv plugin_enabled overrides tui config on startup", async () => {
   }
 })
 
-test("loads disabled-by-default internal plugin inactive and activates on demand", async () => {
+test("loads plugin-manager builtin active by default", async () => {
   await using tmp = await tmpdir()
   const config = createTuiResolvedConfig()
   const wait = spyOn(TuiConfig, "waitForDependencies").mockResolvedValue()
@@ -235,27 +235,9 @@ test("loads disabled-by-default internal plugin inactive and activates on demand
       enabled: true,
       active: true,
     })
-    expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
-      id: "which-key",
-      source: "internal",
-      spec: "which-key",
-      target: "which-key",
-      enabled: false,
-      active: false,
-    })
-
-    await expect(TuiPluginRuntime.activatePlugin("which-key")).resolves.toBe(true)
-    expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
-      id: "which-key",
-      source: "internal",
-      spec: "which-key",
-      target: "which-key",
-      enabled: true,
-      active: true,
-    })
-    expect(api.kv.get("plugin_enabled", {})).toEqual({
-      "which-key": true,
-    })
+    expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toBeUndefined()
+    expect(TuiPluginRuntime.list().find((item) => item.id === "internal:sidebar-lsp")).toBeUndefined()
+    expect(TuiPluginRuntime.list().find((item) => item.id === "internal:sidebar-files")).toBeUndefined()
   } finally {
     await TuiPluginRuntime.dispose()
     cwd.mockRestore()
