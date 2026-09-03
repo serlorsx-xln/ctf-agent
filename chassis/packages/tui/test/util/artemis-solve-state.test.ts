@@ -75,14 +75,29 @@ describe("artemis-solve-state", () => {
     ).toBe(true)
   })
 
-  test("stopAndClear drops a leaked solveFlowBusy", async () => {
+  test("stopAndClear drops a leaked solveFlowBusy and declines flag confirm", async () => {
     daemon.solveFlowBusy[1](true)
     daemon.suppressSolveGate[1](true)
     daemon.solveLocked[1](true)
-    await stopAndClearArtemisState()
-    expect(daemon.solveFlowBusy[0]()).toBe(false)
-    expect(daemon.suppressSolveGate[0]()).toBe(false)
-    expect(daemon.solveLocked[0]()).toBe(false)
-    expect(solveGateOpen()).toBe(false)
+    daemon.flagConfirm[1]({ request_id: "rid-1", flag: "CTF{x}" })
+    const calls: Array<{ type: string; payload: Record<string, unknown> }> = []
+    const request = daemon.request.bind(daemon)
+    ;(daemon as { request: typeof daemon.request }).request = (async (type, payload = {}) => {
+      calls.push({ type, payload })
+      return {}
+    }) as typeof daemon.request
+    try {
+      await stopAndClearArtemisState()
+      expect(daemon.solveFlowBusy[0]()).toBe(false)
+      expect(daemon.suppressSolveGate[0]()).toBe(false)
+      expect(daemon.solveLocked[0]()).toBe(false)
+      expect(solveGateOpen()).toBe(false)
+      expect(daemon.flagConfirm[0]()).toBeNull()
+      expect(calls.some((c) => c.type === "flag_confirm_answer" && c.payload.ok === false)).toBe(
+        true,
+      )
+    } finally {
+      ;(daemon as { request: typeof daemon.request }).request = request
+    }
   })
 })

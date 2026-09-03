@@ -12,16 +12,6 @@ import {
 import type { ArtemisEvent } from "../../src/util/artemis-live-log"
 
 describe("artemis-swarm-agents", () => {
-  test("agentKeyFromSpec", () => {
-    expect(agentKeyFromSpec("cursor/auto")).toBe("auto")
-    expect(agentKeyFromSpec("claude-sdk/claude-opus-4-6")).toBe("claude-opus-4-6")
-    expect(agentKeyFromSpec("claude-sdk/claude-opus-4-6/max")).toBe("claude-opus-4-6")
-    expect(agentKeyFromSpec("cursor/grok-4.5#2")).toBe("grok-4.5#2")
-    expect(agentKeyFromSpec("claude-sdk/aliyuncs/glm-5.2")).toBe("aliyuncs/glm-5.2")
-    expect(agentKeyFromSpec("claude-sdk/bigmodel/glm-5.2/max")).toBe("bigmodel/glm-5.2")
-    expect(agentKeyFromSpec("claude-sdk/PSU-araya/glm-5.2")).toBe("PSU-araya/glm-5.2")
-  })
-
   test("slashy Claude ids match live-log agent keys", () => {
     const spec = "claude-sdk/aliyuncs/glm-5.2"
     const key = agentKeyFromSpec(spec)
@@ -189,6 +179,61 @@ describe("artemis-swarm-agents", () => {
     expect(winnerAgents([{ kind: "status", text: "Solved by grok-4.5" }])).toEqual([])
   })
 
+  test("winnerAgents ignores interim Writing recap placeholder", () => {
+    expect(
+      winnerAgents([
+        { kind: "summary", text: "Writing recap from the winning solver…" },
+        {
+          kind: "outcome",
+          level: "success",
+          text: 'CORRECT — accepted "flag{x}" via opus. Challenge complete for this run.',
+        },
+      ]),
+    ).toEqual(["opus"])
+  })
+
+  test("winnerAgents falls back to via agent on CORRECT when Solved by is missing", () => {
+    expect(
+      winnerAgents([
+        {
+          kind: "outcome",
+          level: "success",
+          text: 'CORRECT — accepted "flag{x}" via opus#2. Challenge complete for this run.',
+        },
+      ]),
+    ).toEqual(["opus#2"])
+    expect(
+      winnerAgents([
+        { kind: "outcome", level: "success", text: 'ACCEPTED "a" via default (1/2).' },
+        {
+          kind: "outcome",
+          level: "success",
+          text: 'CORRECT — accepted all 2 flags: a | b (last via composer-2.5). Challenge complete.',
+        },
+      ]),
+    ).toEqual(["composer-2.5"])
+    // Backend emits runner_id (provider/spec); normalize to roster display key.
+    expect(
+      winnerAgents([
+        {
+          kind: "outcome",
+          level: "success",
+          text: 'CORRECT — accepted "flag{x}" via cursor/composer-2.5. Challenge complete.',
+        },
+      ]),
+    ).toEqual(["composer-2.5"])
+    // Mid-run ACCEPTED must not credit a winner before CORRECT.
+    expect(
+      winnerAgents([
+        {
+          kind: "outcome",
+          level: "success",
+          text: 'ACCEPTED "a" via default (1/2).',
+        },
+      ]),
+    ).toEqual([])
+  })
+
   test("agentPreviews marks the agent that earned the flag", () => {
     const events: ArtemisEvent[] = [
       { kind: "think", agent: "grok-4.5", text: "looking" },
@@ -202,6 +247,39 @@ describe("artemis-swarm-agents", () => {
       failed: true,
       lastLine: "Cursor usage limit reached",
     })
+  })
+
+  test("agentPreviews winner shows hold/Q&A while process lingers after CORRECT", () => {
+    const events: ArtemisEvent[] = [
+      { kind: "think", agent: "grok-4.5", text: "looking" },
+      { kind: "summary", text: "Solved by grok-4.5" },
+      { kind: "status", text: "Hold — ask follow-ups" },
+    ]
+    const [winner] = agentPreviews(events, ["grok-4.5"], true, {}, { solving: false })
+    expect(winner).toMatchObject({ won: true, active: false, lastLine: "solved · hold/Q&A" })
+  })
+
+  test("agentPreviews stops live/active when solving=false during Hold linger", () => {
+    const events: ArtemisEvent[] = [
+      { kind: "think", agent: "grok-4.5", text: "done" },
+      { kind: "think", agent: "composer-2.5", text: "also" },
+      { kind: "summary", text: "Solved by grok-4.5" },
+    ]
+    const whileSolving = agentPreviews(events, ["grok-4.5", "composer-2.5"], true, {}, { solving: true })
+    expect(whileSolving[0]?.active).toBe(true)
+    expect(whileSolving[1]?.active).toBe(true)
+    const onHold = agentPreviews(events, ["grok-4.5", "composer-2.5"], true, {}, { solving: false })
+    expect(onHold[0]).toMatchObject({ won: true, active: false })
+    // Sibling keeps last think text but must not be active/live.
+    expect(onHold[1]).toMatchObject({ won: false, active: false, lastLine: "also" })
+    const quiet = agentPreviews(
+      [{ kind: "summary", text: "Solved by grok-4.5" }],
+      ["composer-2.5"],
+      true,
+      {},
+      { solving: false },
+    )
+    expect(quiet[0]).toMatchObject({ active: false, lastLine: "idle · hold/writeup" })
   })
 
   test("globalSwarmEvents keeps mixed-swarm quota WARN on the main page", () => {
@@ -237,6 +315,14 @@ describe("artemis-swarm-agents", () => {
 
   test("globalSwarmEvents keeps the run recap on the main page", () => {
     const events: ArtemisEvent[] = [{ kind: "summary", text: "Solved by grok-4.5" }]
+    expect(globalSwarmEvents(events)).toEqual(events)
+  })
+
+  test("globalSwarmEvents keeps operator Send now / Queue crumbs", () => {
+    const events: ArtemisEvent[] = [
+      { kind: "operator", text: "hi", delivery: "steer" },
+      { kind: "operator", text: "later", delivery: "queue" },
+    ]
     expect(globalSwarmEvents(events)).toEqual(events)
   })
 

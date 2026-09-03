@@ -37,7 +37,7 @@ export function extractChallengePaths(text: string): string[] {
 }
 
 /** User text with detected paths removed. */
-export function extractPasteWithoutPaths(text: string, paths: string[]): string {
+function extractPasteWithoutPaths(text: string, paths: string[]): string {
   if (!text) return ""
   let out = text
   for (const p of paths) out = out.replaceAll(p, " ")
@@ -50,13 +50,15 @@ export function filePathsFromPromptParts(
     type?: string
     url?: string
     filename?: string
-    source?: { path?: string }
+    // File chips use source.path; AgentPart uses a different source shape.
+    source?: unknown
   }>,
 ): string[] {
   const seen: string[] = []
   for (const part of parts) {
     if (part.type !== "file") continue
-    let p = part.source?.path || part.filename
+    const src = part.source as { path?: string } | null | undefined
+    let p = src?.path || part.filename
     if (!p && typeof part.url === "string" && part.url.startsWith("file://")) {
       try {
         p = fileURLToPath(part.url)
@@ -77,7 +79,7 @@ export function combinedPromptForLoad(
     type?: string
     url?: string
     filename?: string
-    source?: { path?: string }
+    source?: unknown
   }> = [],
 ): string {
   const files = filePathsFromPromptParts(parts)

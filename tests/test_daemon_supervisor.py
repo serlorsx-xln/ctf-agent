@@ -150,7 +150,10 @@ def test_stop_gen_guards_swarm_exit_broadcast(
 
 
 def test_respawn_does_not_emit_intermediate_swarm_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo_root: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_root: str,
+    fake_swarm_script: str,
 ) -> None:
     """Stopping inside spawn (restart) must not broadcast swarm_exit mid-run."""
     cache = tmp_path / "cache"
@@ -166,9 +169,9 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
 
     monkeypatch.setattr("backend.sandbox.cleanup_orphan_containers", _noop_cleanup)
 
-    # Long-lived fake so the first spawn is still running when we respawn.
-    long_script = tmp_path / "long_swarm.py"
-    long_script.write_text(
+    # Override the autouse short fake in-place. Re-wrapping create_subprocess_exec
+    # nests under the autouse fake and still runs the short script.
+    Path(fake_swarm_script).write_text(
         "import time\n"
         "import os, sys\n"
         "sys.path.insert(0, os.environ['ARTEMIS_REPO_ROOT'])\n"
@@ -178,20 +181,6 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
         "close_disk_tee()\n",
         encoding="utf-8",
     )
-    import backend.daemon.supervisor as sup_mod
-    from backend.subprocess_platform import swarm_subprocess_kwargs
-
-    orig = sup_mod.asyncio.create_subprocess_exec
-
-    async def fake_exec(*cmd, **kw):
-        return await orig(
-            sys.executable,
-            str(long_script),
-            env=kw.get("env", os.environ.copy()),
-            **swarm_subprocess_kwargs(),
-        )
-
-    monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
 
     sup = SwarmSupervisor(state)
 
@@ -202,7 +191,15 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
             flags_required=1,
             session_id="s1",
         )
-        await asyncio.sleep(0.2)
+        for _ in range(50):
+            if any(
+                e.get("type") == "swarm_log" and "boot" in str(e.get("text", ""))
+                for e in seen
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError(f"first swarm never booted; seen={seen}")
         before = len([e for e in seen if e.get("type") == "swarm_exit"])
         await sup.spawn(
             challenge="fake-chal",
@@ -210,7 +207,7 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
             flags_required=1,
             session_id="s1",
         )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         after = [e for e in seen if e.get("type") == "swarm_exit"]
         assert len(after) == before, f"respawn must not emit swarm_exit, got {after}"
         await sup.stop(session_id="s1")
@@ -219,14 +216,17 @@ def test_respawn_does_not_emit_intermediate_swarm_exit(
 
 
 def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo_root: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_root: str,
+    fake_swarm_script: str,
 ) -> None:
     cache = tmp_path / "cache"
     monkeypatch.setenv("ARTEMIS_CACHE", str(cache))
     monkeypatch.setenv("ARTEMIS_REPO_ROOT", repo_root)
 
-    long_script = tmp_path / "long_swarm.py"
-    long_script.write_text(
+    # Override autouse short fake in-place (do not re-wrap create_subprocess_exec).
+    Path(fake_swarm_script).write_text(
         "import time\n"
         "import os, sys\n"
         "sys.path.insert(0, os.environ['ARTEMIS_REPO_ROOT'])\n"
@@ -236,20 +236,6 @@ def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
         "close_disk_tee()\n",
         encoding="utf-8",
     )
-    import backend.daemon.supervisor as sup_mod
-    from backend.subprocess_platform import swarm_subprocess_kwargs
-
-    orig = sup_mod.asyncio.create_subprocess_exec
-
-    async def fake_exec(*cmd, **kw):
-        return await orig(
-            sys.executable,
-            str(long_script),
-            env=kw.get("env", os.environ.copy()),
-            **swarm_subprocess_kwargs(),
-        )
-
-    monkeypatch.setattr(sup_mod.asyncio, "create_subprocess_exec", fake_exec)
 
     async def _noop_cleanup() -> None:
         return None
@@ -257,6 +243,8 @@ def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
     monkeypatch.setattr("backend.sandbox.cleanup_orphan_containers", _noop_cleanup)
 
     state = DaemonState()
+    seen: list[dict] = []
+    monkeypatch.setattr(state, "broadcast", lambda ev: seen.append(dict(ev)))
     sup = SwarmSupervisor(state)
 
     async def run() -> None:
@@ -272,6 +260,14 @@ def test_two_sessions_spawn_concurrently_stop_a_leaves_b(
             flags_required=1,
             session_id="B",
         )
+        for _ in range(50):
+            if sum(
+                1
+                for e in seen
+                if e.get("type") == "swarm_log" and "boot" in str(e.get("text", ""))
+            ) >= 2:
+                break
+            await asyncio.sleep(0.05)
         assert sup.is_running("A")
         assert sup.is_running("B")
         await sup.stop(session_id="A")

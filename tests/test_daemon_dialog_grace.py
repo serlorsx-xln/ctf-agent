@@ -133,7 +133,49 @@ def test_reconnect_keeps_pending_confirm(daemon_env: str, monkeypatch: pytest.Mo
     asyncio.run(run())
 
 
-def test_no_tui_returns_cancels_confirm(daemon_env: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_swarm_disconnect_dismisses_flag_confirm(
+    daemon_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swarm EOF must dismiss the sticky bar even while a confirm is open.
+
+    Historically ``await fut`` blocked the swarm read loop, so disconnect never
+    reached ``cancel_pending_dialogs`` and the TUI kept a zombie FlagConfirmBar.
+    """
+
+    async def run() -> None:
+        d, task = await _start()
+        try:
+            tr, tw = await _hello(daemon_env, "tui")
+            sr, sw = await _hello(daemon_env, "swarm")
+            sw.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "fc",
+                            "type": "flag_confirm_request",
+                            "request_id": "FC3",
+                            "flag": "flag{z}",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await sw.drain()
+            await _await_push(tr, "flag_confirm_request")
+
+            # Drop the swarm while the operator has not answered.
+            sw.close()
+            dismiss = await _await_push(tr, "flag_confirm_dismiss", timeout=3.0)
+            assert dismiss.get("request_id") == "FC3"
+            assert ("s1", "FC3") not in handlers_mod._pending_dialogs
+            tw.close()
+            _ = sr
+        finally:
+            await _stop(d, task)
+
+    asyncio.run(run())
+
     monkeypatch.setattr(server_mod, "TUI_RECONNECT_GRACE_S", 0.3)
 
     async def run() -> None:
@@ -168,3 +210,29 @@ def test_no_tui_returns_cancels_confirm(daemon_env: str, monkeypatch: pytest.Mon
             await _stop(d, task)
 
     asyncio.run(run())
+
+
+def test_rebroadcast_pending_flag_confirm() -> None:
+    handlers_mod._pending_dialogs.clear()
+    seen: list[dict] = []
+    loop = asyncio.new_event_loop()
+    try:
+        fut = loop.create_future()
+        handlers_mod.register_dialog(
+            "FC-re",
+            fut,
+            session="s1",
+            kind="flag_confirm",
+            meta={"flag": "flag{x}"},
+        )
+        n = handlers_mod.rebroadcast_pending_dialogs(
+            lambda m: seen.append(m), session="s1"
+        )
+        assert n == 1
+        assert seen[0]["type"] == "flag_confirm_request"
+        assert seen[0]["flag"] == "flag{x}"
+        assert seen[0]["request_id"] == "FC-re"
+        assert not fut.done()
+    finally:
+        handlers_mod._pending_dialogs.clear()
+        loop.close()

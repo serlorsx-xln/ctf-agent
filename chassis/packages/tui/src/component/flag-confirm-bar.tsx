@@ -1,5 +1,5 @@
 import { TextAttributes, type InputRenderable } from "@opentui/core"
-import { createMemo, createSignal, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useTheme } from "../context/theme"
 import { useBindings } from "../keymap"
 import { daemon } from "../artemis/client"
@@ -15,6 +15,14 @@ export function FlagConfirmBar() {
   const [asking, setAsking] = createSignal(false)
   const [reason, setReason] = createSignal("")
   let input: InputRenderable | undefined
+
+  // New / replaced confirm must always start on y/n, not a leftover reject box.
+  createEffect(() => {
+    const id = req()?.request_id
+    void id
+    setAsking(false)
+    setReason("")
+  })
 
   function send(ok: boolean, why = "") {
     const r = req()

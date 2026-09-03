@@ -215,3 +215,69 @@ def test_failed_load_does_not_broadcast_solve_flow(daemon_env: str) -> None:
             await _stop(d, task)
 
     asyncio.run(run())
+
+
+def test_failed_load_keeps_daemon_session_state(daemon_env: str) -> None:
+    """ERROR load must not re-read disk into daemon state or drop prior challenge."""
+
+    async def run() -> None:
+        cache = Path(os.environ["ARTEMIS_CACHE"])
+        chal = cache / "keep"
+        chal.mkdir(parents=True, exist_ok=True)
+        (chal / "challenge.txt").write_text("test\n", encoding="utf-8")
+        from backend.shell.sandbox_session import save_session_state
+
+        save_session_state("s-keep", challenge_dir=str(chal), challenge_name="keep")
+
+        d, task = await _start()
+        try:
+            tr, tw = await open_connection()
+            tw.write(
+                (
+                    json.dumps(
+                        {"v": 1, "id": "h", "type": "hello", "role": "tui", "session": "s-keep"}
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await tw.drain()
+            await asyncio.wait_for(tr.readline(), 3)
+
+            tw.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "ld-keep",
+                            "type": "load",
+                            "session": "s-keep",
+                            "path": "/no/such/challenge/dir",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await tw.drain()
+
+            saw = False
+            for _ in range(15):
+                line = await asyncio.wait_for(tr.readline(), 5)
+                if not line:
+                    break
+                msg = json.loads(line)
+                if msg.get("id") != "ld-keep":
+                    continue
+                saw = True
+                st = msg.get("session_state") or {}
+                assert st.get("challenge_name") == "keep"
+                assert str(st.get("challenge_dir") or "").endswith("keep")
+                assert "ERROR" in str(msg.get("text") or "").upper()
+                break
+            assert saw, "failed load response missing"
+            mem = d.state.get_session("s-keep")
+            assert mem.get("challenge_name") == "keep"
+            tw.close()
+        finally:
+            await _stop(d, task)
+
+    asyncio.run(run())

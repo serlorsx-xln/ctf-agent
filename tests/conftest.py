@@ -17,3 +17,8 @@ def _force_unix_daemon_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "1")
     else:
         monkeypatch.setenv("ARTEMIS_DAEMON_TCP", "0")
+    # Most tests assume load/swarm work without a real Docker bake.
+    monkeypatch.setenv("ARTEMIS_SKIP_SETUP_GATE", "1")
+    # Never block or prompt during pytest helper launches.
+    monkeypatch.setenv("ARTEMIS_SKIP_LAUNCH_SETUP", "1")
+    monkeypatch.setenv("ARTEMIS_SKIP_SOLVER_HOLD", "1")

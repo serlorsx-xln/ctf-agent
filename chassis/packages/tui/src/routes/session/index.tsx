@@ -40,20 +40,27 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
-import { formatDuration } from "../../util/format"
+import { formatSwarmElapsed } from "../../util/format"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { hasAgentActivity, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, dropPostSolveAgentChatter, type ArtemisEvent } from "../../util/artemis-live-log"
+import { hasAgentActivity, hasCorrectSolveOutcome, hasGlobalQuotaOutcome, hasTerminalSolveOutcome, dropPostSolveAgentChatter, isFeedVisibleStatus, isSolverHoldActive, type ArtemisEvent } from "../../util/artemis-live-log"
+import { targetsMatch } from "../../util/artemis-agent-key"
 import {
+  agentKeyFromSpec,
   agentPreviews,
   globalSwarmEvents,
   listSwarmAgents,
   partitionEventsByAgent,
+  winnerAgents,
 } from "../../util/artemis-swarm-agents"
 import { DialogFlagsRequired } from "../../component/dialog-flags-required"
 import { FlagConfirmBar } from "../../component/flag-confirm-bar"
+import { OperatorQueueBar } from "../../component/operator-queue-bar"
 import { SwarmAgentFooter } from "../../component/swarm-agent-footer"
 import { DialogConfirmRestart, confirmStopWork } from "../../component/dialog-confirm-restart"
+import { DialogOperatorDelivery } from "../../component/dialog-operator-delivery"
+import { DialogSetupGate } from "../../component/dialog-setup-install"
 import { DialogConfirm } from "../../ui/dialog-confirm"
+import { DialogPrompt } from "../../ui/dialog-prompt"
 import {
   confirmRestartOpts,
   hasActiveSolveWork,
@@ -65,6 +72,7 @@ import {
 import { prefillModelFromRaceSpec } from "../../component/dialog-model"
 import { daemon } from "../../artemis/client"
 import { combinedPromptForLoad, looksLikeChallengePaste } from "../../util/artemis-challenge-paste"
+import { classifyArtemisPromptSubmit } from "../../util/artemis-prompt-intent"
 import { tuiLoadChallenge } from "../../util/artemis-tui-load"
 import { runSolveFlowGate } from "../../util/artemis-solve-flow"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
@@ -277,10 +285,8 @@ export function Session() {
       permissions().length > 0 ||
       questions().length > 0 ||
       dialog.stack.length > 0 ||
-      solveGateBusy() ||
-      // Chat only on main — agent pages always lock the prompt.
-      // Active Solving no longer locks main: send asks to stop work first.
-      (process.env.ARTEMIS === "1" && daemon.swarmFocus[0]() != null),
+      solveGateBusy(),
+    // Agent pages stay chatable during swarm (target = focused agent).
   )
 
   const pending = createMemo(() => {
@@ -514,40 +520,182 @@ export function Session() {
   async function beforePromptSubmit(): Promise<boolean> {
     if (process.env.ARTEMIS !== "1") return true
     if (dialog.stack.length > 0 || daemon.solveFlowBusy[0]()) return false
-    if (daemon.swarmFocus[0]() != null) {
-      toast.show({ message: "Esc → main to chat", variant: "warning" })
-      return false
+    if (daemon.setupReady[0]() !== true) {
+      const ok = await DialogSetupGate.ensure(dialog)
+      if (!ok) {
+        toast.show({ message: "Install the sandbox before solving", variant: "warning" })
+        return false
+      }
     }
+    const focusAgent = daemon.swarmFocus[0]()
     const raw = promptTextForLoad()
-    if (looksLikeChallengePaste(raw)) {
+    const intent = classifyArtemisPromptSubmit({
+      raw,
+      looksLikeChallenge: looksLikeChallengePaste(raw),
+      swarmRunning: daemon.swarmRunning[0](),
+      solveLocked: daemon.solveLocked[0](),
+      hasChallenge: Boolean(daemon.sessionState[0]().challenge_dir),
+      flowCompleted: daemon.flowCompleted[0](),
+      hasPriorState: hasPriorArtemisState(),
+    })
+
+    if (intent.kind === "challenge_paste") {
       if (hasPriorArtemisState()) {
         const ok = await DialogConfirmRestart.show(dialog, confirmRestartOpts())
         if (!ok) return false
         await clearSolvedSession({ newChat: false })
         if (route.sessionID) {
-          await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+          void sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
         }
       }
       daemon.setSuppressSolveGate(false)
       await tryLoadChallengeFromPrompt()
       return false
     }
-    if (!hasPriorArtemisState()) {
+
+    if (intent.kind === "need_challenge") {
       toast.show({
         message: "Paste a challenge, path, or @files. Artemis loads first, then asks flags / mode / models.",
         variant: "info",
       })
       return false
     }
-    if (daemon.solveLocked[0]() || daemon.swarmRunning[0]()) {
+
+    if (intent.kind === "steer_swarm" || intent.kind === "queue_swarm") {
+      // Post-CORRECT writeup/hold — inbox is for the winner (not sibling fan-out).
+      const onHold =
+        daemon.swarmRunning[0]() && isSolverHoldActive(daemon.swarmEvents[0]())
+      const postCorrectLive =
+        daemon.swarmRunning[0]() && hasCorrectSolveOutcome(daemon.swarmEvents[0]())
+      const winnerScoped = onHold || postCorrectLive
+      let noteText = intent.text.trim()
+      if (!noteText) {
+        // Bare `/queue` (or empty steer) — collect the note, then choose delivery.
+        const typed = await DialogPrompt.show(dialog, "Operator note", {
+          placeholder: "Message for the solver…",
+        })
+        noteText = String(typed || "").trim()
+        if (!noteText) return false
+      }
+      // main → all agents; agent page → that agent only.
+      // Post-CORRECT (writeup/hold) → winner only (no fan-out to dead siblings).
+      const winners = winnerAgents(daemon.swarmEvents[0]())
+      const roster = daemon.swarmRoster[0]()
+      // Last credited acceptor matches backend hold claimer (last CORRECT).
+      // Prefer Solved by; if missing (replay lag), allow the focused agent page
+      // so the toast's "open the winner page" path actually works.
+      const holdTarget =
+        (winners.length ? winners[winners.length - 1] : undefined) ||
+        (roster.length === 1 ? roster[0] : undefined) ||
+        (winnerScoped ? focusAgent ?? undefined : undefined)
+      // main+multi → undefined (broadcast); main+single / agent page / post-CORRECT → concrete key
+      const target = winnerScoped
+        ? holdTarget
+        : focusAgent ?? (roster.length === 1 ? roster[0] : undefined)
+      if (winnerScoped && !holdTarget) {
+        toast.show({
+          message: "Hold target unknown — open the winner agent page or wait for Solved by",
+          variant: "error",
+        })
+        return false
+      }
+      const queueOnHold = winnerScoped && intent.kind === "queue_swarm"
+      // During Writeup (CORRECT but Hold banner not yet), park notes as queue —
+      // Hold drains delivery=None; steer would sit unread with a false "sent" toast.
+      const writeupWindow = postCorrectLive && !onHold
+      let delivery: "steer" | "queue" | null = winnerScoped
+        ? writeupWindow
+          ? "queue"
+          : "steer"
+        : await DialogOperatorDelivery.show(dialog, {
+            prefer: intent.kind === "queue_swarm" ? "queue" : undefined,
+            targetLabel: target
+              ? target
+              : roster.length === 1
+                ? roster[0]!
+                : "all agents",
+            softOnly: (() => {
+              const models = daemon.lastModels[0]()
+              if (!models.length) return false
+              const isCursor = (m: string) => String(m).toLowerCase().startsWith("cursor/")
+              if (target) {
+                const matching = models.filter((m) => {
+                  const key = agentKeyFromSpec(m)
+                  return key === target || key.startsWith(`${target}#`) || target.startsWith(`${key}#`)
+                })
+                if (matching.length) return matching.every((m) => !isCursor(m))
+              }
+              return models.every((m) => !isCursor(m))
+            })(),
+          })
+      if (!delivery) return false
+      try {
+        await daemon.sendOperatorMessage(noteText, {
+          delivery,
+          target: target ?? undefined,
+          noFanout: winnerScoped,
+        })
+        prompt?.reset()
+        const who = winnerScoped
+          ? holdTarget || "winner"
+          : target
+            ? target
+            : roster.length === 1
+              ? roster[0]!
+              : "all agents"
+        toast.show({
+          message: writeupWindow
+            ? `Queued for Hold Q&A · ${who}`
+            : queueOnHold
+              ? `Hold has no idle queue — sent now to ${who}`
+              : delivery === "queue"
+                ? `Queued for ${who}`
+                : `Sent to ${who}`,
+          variant: "info",
+        })
+      } catch (e) {
+        toast.show({
+          message: e instanceof Error ? e.message : "Failed to send to swarm",
+          variant: "error",
+        })
+      }
       abortCoordinator()
       return false
     }
-    // Loaded but not finished — keep the chat model off until Start or a new paste.
-    if (daemon.sessionState[0]().challenge_dir && !daemon.flowCompleted[0]()) {
+
+    if (intent.kind === "stop_swarm") {
+      const multi =
+        daemon.swarmRoster[0]().length > 1 || daemon.lastModels[0]().length > 1
+      const alreadyDone = hasTerminalSolveOutcome(daemon.swarmEvents[0](), multi)
+      if (!alreadyDone) {
+        const ok = await confirmStopWork(dialog)
+        if (!ok) return false
+      }
+      try {
+        await daemon.request("swarm_stop", {})
+        daemon.flagConfirm[1](null)
+        prompt?.reset()
+      } catch (e) {
+        toast.show({
+          message: e instanceof Error ? e.message : "Failed to stop swarm",
+          variant: "error",
+        })
+      }
       abortCoordinator()
       return false
     }
+
+    if (intent.kind === "wait_for_start") {
+      // Loaded but gate not finished — keep host chat off until Start / new paste.
+      abortCoordinator()
+      toast.show({
+        message: "Finish flags / mode / models, or paste a new challenge",
+        variant: "info",
+      })
+      return false
+    }
+
+    // flowCompleted or idle chat — allow OpenCode LLM (summarize / resume).
     return true
   }
 
@@ -729,9 +877,22 @@ export function Session() {
         challengeName: push.challenge,
         cancelable: false,
       }).then((n) => {
+        answered.delete(`ask-open:${push.request_id}`)
         const value = n ?? Math.max(1, Math.min(64, push.default ?? 1))
         void daemon.answerFlagsAsk(push.request_id, value).catch(() => {})
       })
+      answered.add(`ask-open:${push.request_id}`)
+    })
+    const offAskDismiss = daemon.onFlagsAskDismiss((rid) => {
+      if (!rid || !answered.has(`ask-open:${rid}`)) return
+      answered.delete(`ask-open:${rid}`)
+      answered.delete(`ask:${rid}`)
+      // Close the digits dialog if it is still on the stack.
+      try {
+        dialog.clear()
+      } catch {
+        /* ignore */
+      }
     })
     // Flag confirm: inline FlagConfirmBar reads daemon.flagConfirm (no modal).
     onCleanup(() => {
@@ -739,6 +900,7 @@ export function Session() {
       offSolve()
       offTool()
       offAsk()
+      offAskDismiss()
     })
   })
 
@@ -1790,6 +1952,7 @@ export function Session() {
                 </Show>
                 <Show when={process.env.ARTEMIS === "1" && !session()?.parentID}>
                   <FlagConfirmBar />
+                  <OperatorQueueBar />
                   <SwarmAgentFooter />
                 </Show>
                 <Show when={session()?.parentID}>
@@ -2324,6 +2487,9 @@ type SwarmGroup =
   | { type: "flag_confirm"; flag: string }
   | { type: "status"; text: string }
   | { type: "summary"; lines: string[] }
+  | { type: "operator"; text: string; delivery: "steer" | "queue"; target?: string }
+  | { type: "qa"; lines: string[]; agent?: string }
+  | { type: "qa_sep" }
 
 /** Group consecutive bash/tool/result events into one tool card per agent. */
 function groupSwarmEvents(events: ArtemisEvent[], swarmRunning: boolean): SwarmGroup[] {
@@ -2356,6 +2522,12 @@ function groupSwarmEvents(events: ArtemisEvent[], swarmRunning: boolean): SwarmG
       else cur.items.push({ kind: "result", text: ev.text })
     } else {
       flush()
+      if (ev.kind === "qa_sep") {
+        // Visible sentinel in the group stream so the next Q&A block does not
+        // merge with the previous turn (continue alone left last.type === "qa").
+        out.push({ type: "qa_sep" })
+        continue
+      }
       if (ev.kind === "think") out.push({ type: "think", text: ev.text, agent: ev.agent })
       else if (ev.kind === "ai") out.push({ type: "ai", text: ev.text, agent: ev.agent })
       else if (ev.kind === "flags_ask") out.push({ type: "flags_ask", default: ev.default, challenge: ev.challenge })
@@ -2375,7 +2547,36 @@ function groupSwarmEvents(events: ArtemisEvent[], swarmRunning: boolean): SwarmG
         if (/Confirmed|CORRECT|FLAG FOUND|Challenge complete|usage limit/i.test(ev.text) && seenOutcome.has(key))
           continue
         if (/Confirmed|CORRECT|FLAG FOUND|Challenge complete|usage limit/i.test(ev.text)) seenOutcome.add(key)
+        // Coalesce Hold Q&A reply lines into one assistant-style block.
+        // Operator / qa_sep already ends the previous block via flush above;
+        // also start a new block when the agent key changes.
+        if (/^Q&A(?:\s·|\b)/i.test(ev.text)) {
+          // Keep whitespace after the prefix (paragraph / fence breaks).
+          const body = ev.text.replace(/^Q&A(?:\s·\s*|\s+)/i, "")
+          const last = out[out.length - 1]
+          const sameAgent =
+            last?.type === "qa" &&
+            (!ev.agent || !last.agent || ev.agent === last.agent)
+          if (sameAgent) {
+            last.lines.push(body)
+            if (ev.agent && !last.agent) last.agent = ev.agent
+          } else {
+            out.push({
+              type: "qa",
+              lines: [body],
+              ...(ev.agent ? { agent: ev.agent } : {}),
+            })
+          }
+          continue
+        }
         out.push({ type: "status", text: ev.text })
+      } else if (ev.kind === "operator") {
+        out.push({
+          type: "operator",
+          text: ev.text,
+          delivery: ev.delivery,
+          ...(ev.target ? { target: ev.target } : {}),
+        })
       }
     }
   }
@@ -2407,16 +2608,21 @@ function SwarmToolCard(props: { group: ToolGroup; running: boolean; part?: ToolP
   const summary = createMemo(() => {
     const last = props.group.items[props.group.items.length - 1]
     if (!last) return props.group.agent
-    if (last.kind === "bash") return `$ ${last.command}`
-    if (last.kind === "tool") {
+    let line: string
+    if (last.kind === "bash") line = `$ ${last.command}`
+    else if (last.kind === "tool") {
       const label =
         last.tool === "read_file" ? "Read"
           : last.tool === "write_file" ? "Write"
             : last.tool === "list_files" ? "List"
               : last.tool === "submit_flag" ? "Submit" : last.tool
-      return `${label} ${last.detail}`
+      line = `${label} ${last.detail}`
+    } else {
+      line = `↳ ${last.text}`
     }
-    return `↳ ${last.text}`
+    // Collapsed title must stay one short line — raw bytes dumps used to fill the feed.
+    const flat = line.replace(/\s+/g, " ").trim()
+    return flat.length > 96 ? `${flat.slice(0, 93)}…` : flat
   })
   const maxLines = createMemo(() => (props.running ? 12 : 6))
   const maxChars = createMemo(() => maxLines() * Math.max(20, ctx.width - 6))
@@ -2458,7 +2664,9 @@ function SwarmToolCard(props: { group: ToolGroup; running: boolean; part?: ToolP
 }
 
 function ArtemisSwarm(props: { part?: ToolPart }) {
-  const { theme } = useTheme()
+  const { theme, syntax } = useTheme()
+  const local = useLocal()
+  const ctx = use()
   const events = createMemo(() => daemon.swarmEvents[0]())
   const agents = createMemo(() =>
     listSwarmAgents(events(), daemon.lastModels[0](), daemon.swarmRoster[0]()),
@@ -2477,6 +2685,8 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
         props.part?.state.status === "pending" ||
         processAlive()),
   )
+  // Same predicate as swarm-agent-footer ``solving`` (elapsed tick/freeze).
+  const solvingElapsed = createMemo(() => processAlive() && !terminalDone())
   const agentStarted = createMemo(() => hasAgentActivity(events()))
   const focus = createMemo(() => (multiAgent() ? daemon.swarmFocus[0]() : null))
 
@@ -2504,8 +2714,9 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
       .filter((ev) => {
         if (ev.kind === "turn") return false
         if (ev.kind === "boot") return false
+        if (ev.kind === "qa_sep") return true
         if (ev.kind === "status") {
-          return /Waiting for flag|Confirmed|Rejected|swarm exit|Possible flag|submit_flag/i.test(ev.text)
+          return isFeedVisibleStatus(ev.text)
         }
         if (ev.kind === "flags_ask") return !agentStarted()
         return true
@@ -2519,7 +2730,25 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
     if (!f) {
       list = multiAgent() ? globalSwarmEvents(list) : list
     } else {
-      list = partitionEventsByAgent(list, f)
+      // Agent work + operator notes addressed to this agent (or broadcast).
+      list = list.filter((ev) => {
+        if (ev.kind === "qa_sep") {
+          const winners = winnerAgents(events())
+          return winners.length === 0 || winners.some((w) => targetsMatch(w, f!))
+        }
+        if (ev.kind === "operator") return !ev.target || targetsMatch(ev.target, f)
+        if (ev.kind === "status") {
+          const t = String(ev.text || "")
+          // Hold / Q&A are winner-scoped conversation, not agent-tagged tool lines.
+          if (/^Hold\b|^Q&A\b|^Answering/i.test(t)) {
+            if (ev.agent) return targetsMatch(ev.agent, f)
+            const winners = winnerAgents(events())
+            return winners.length === 0 || winners.some((w) => targetsMatch(w, f!))
+          }
+          if (ev.delivery === "queue" && ev.target) return targetsMatch(ev.target, f)
+        }
+        return partitionEventsByAgent([ev], f).length > 0
+      })
     }
     return dropPostSolveAgentChatter(list)
   })
@@ -2539,7 +2768,10 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
   // Pass processAlive (not Solving UI) so not-started siblings stay starting…
   // until swarm_exit — matches DoD not-started ≠ no-quota.
   const previews = createMemo(() =>
-    agentPreviews(events(), agents(), processAlive(), daemon.agentLineCounts[0]()),
+    agentPreviews(events(), agents(), processAlive(), daemon.agentLineCounts[0](), {
+      // After CORRECT/quota the process may linger (writeup/hold) — do not spin "live".
+      solving: isRunning(),
+    }),
   )
   // Multi-agent: show boxes as soon as roster/models known (including boot).
   const showGrid = createMemo(() => multiAgent() && !focus())
@@ -2572,15 +2804,15 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
     }, 1200)
     onCleanup(() => clearTimeout(t))
   })
-  const elapsedLabel = createMemo(() => {
-    const started = daemon.swarmStartedAt[0]()
-    if (started == null) return null
-    const end = processAlive() ? now() : (daemon.swarmEndedAt[0]() ?? now())
-    const secs = Math.max(0, Math.floor((end - started) / 1000))
-    // Integer seconds while live (1s, 2s, …); keep showing after exit.
-    if (secs < 60) return `${secs}s`
-    return formatDuration(secs) || `${secs}s`
-  })
+  const elapsedLabel = createMemo(() =>
+    // Freeze at first terminal outcome (Hold / Writeup) — same rule as SwarmAgentFooter.
+    formatSwarmElapsed(
+      daemon.swarmStartedAt[0](),
+      daemon.swarmEndedAt[0](),
+      now(),
+      solvingElapsed(),
+    ),
+  )
 
   const outcomeColor = (level: string) => {
     if (level === "success") return theme.success
@@ -2590,7 +2822,7 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
   }
 
   const renderGroups = () => (
-    <For each={groupedEvents()}>
+    <For each={groupedEvents().filter((g) => g.type !== "qa_sep")}>
       {(group) => (
         <Switch>
           <Match when={group.type === "flags_ask"}>
@@ -2602,11 +2834,93 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
             </box>
           </Match>
           <Match when={group.type === "think"}>
-            <box paddingLeft={3} flexDirection="column" flexShrink={0} gap={0}>
+            <box paddingLeft={3} flexShrink={0}>
               <text fg={theme.textMuted} wrapMode="char">
                 {(group as { text: string }).text}
               </text>
-              <text fg={theme.textMuted}>Cogitated</text>
+            </box>
+          </Match>
+          <Match when={group.type === "operator"}>
+            {/* Match OpenCode UserMessage: left border + panel (not a bare "You ·" line). */}
+            <box
+              ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+              border={["left"]}
+              borderColor={
+                (group as { delivery: string }).delivery === "queue"
+                  ? theme.warning
+                  : local.agent.color(local.agent.current()?.name ?? "build")
+              }
+              customBorderChars={SplitBorder.customBorderChars}
+              marginTop={1}
+              flexShrink={0}
+            >
+              <box
+                paddingTop={1}
+                paddingBottom={1}
+                paddingLeft={2}
+                backgroundColor={theme.backgroundPanel}
+                flexShrink={0}
+                gap={0}
+              >
+                <text fg={theme.text} wrapMode="word">
+                  {(group as { text: string }).text}
+                </text>
+                <Show when={(group as { delivery: string }).delivery === "queue"}>
+                  <text fg={theme.textMuted} marginTop={1}>
+                    <span style={{ bg: theme.warning, fg: theme.background, bold: true }}> QUEUED </span>
+                    <Show when={(group as { target?: string }).target}>
+                      <span style={{ fg: theme.textMuted }}>
+                        {" "}
+                        → {(group as { target?: string }).target}
+                      </span>
+                    </Show>
+                  </text>
+                </Show>
+                <Show
+                  when={
+                    (group as { delivery: string }).delivery !== "queue" &&
+                    (group as { target?: string }).target
+                  }
+                >
+                  <text fg={theme.textMuted} marginTop={1}>
+                    → {(group as { target?: string }).target}
+                  </text>
+                </Show>
+              </box>
+            </box>
+          </Match>
+          <Match when={group.type === "qa"}>
+            {/* Match AssistantMessage TextPart: markdown body + ▣ agent · Q&A footer. */}
+            <box paddingLeft={3} flexShrink={0} marginTop={1} flexDirection="column" gap={0}>
+              <Show when={(group as { lines: string[] }).lines.length > 0}>
+                <markdown
+                  syntaxStyle={syntax()}
+                  streaming={false}
+                  internalBlockMode="top-level"
+                  content={(group as { lines: string[] }).lines.join("\n")}
+                  tableOptions={{ style: "grid" }}
+                  conceal={ctx.conceal()}
+                  fg={theme.markdownText}
+                  bg={theme.background}
+                />
+              </Show>
+              <text marginTop={1}>
+                <span
+                  style={{
+                    fg: local.agent.color(
+                      (group as { agent?: string }).agent ||
+                        local.agent.current()?.name ||
+                        "build",
+                    ),
+                  }}
+                >
+                  ▣{" "}
+                </span>
+                <span style={{ fg: theme.text }}>
+                  {(group as { agent?: string }).agent || "solver"}
+                </span>
+                <span style={{ fg: theme.textMuted }}> · Q&A</span>
+              </text>
             </box>
           </Match>
           <Match when={group.type === "ai"}>
@@ -2636,7 +2950,7 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
           </Match>
           <Match when={group.type === "status"}>
             <box paddingLeft={3} flexShrink={0}>
-              <text fg={theme.textMuted} wrapMode="char">
+              <text fg={theme.textMuted} wrapMode="word">
                 {(group as { text: string }).text}
               </text>
             </box>
@@ -2764,7 +3078,7 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
             <BlockTool
               title={p.agent}
               part={props.part}
-              spinner={!p.won && (p.active || (processAlive() && p.eventCount === 0 && !p.failed))}
+              spinner={!p.won && (p.active || (isRunning() && p.eventCount === 0 && !p.failed))}
               onClick={() => {
                 const i = agents().indexOf(p.agent)
                 daemon.setSwarmNavCursor(i >= 0 ? i + 1 : 0)
@@ -2780,7 +3094,7 @@ function ArtemisSwarm(props: { part?: ToolPart }) {
                 <Show when={p.failed}>
                   <text fg={theme.error}>failed</text>
                 </Show>
-                <Show when={!p.won && !p.failed && (p.active || (processAlive() && p.eventCount === 0))}>
+                <Show when={!p.won && !p.failed && (p.active || (isRunning() && p.eventCount === 0))}>
                   <Spinner color={theme.text}>{p.eventCount === 0 ? "starting" : "live"}</Spinner>
                 </Show>
                 <text fg={p.won ? theme.success : p.failed ? theme.error : theme.textMuted} wrapMode="char">

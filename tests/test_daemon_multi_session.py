@@ -170,6 +170,80 @@ def test_two_tui_sessions_isolated_pushes(daemon_env: str) -> None:
     asyncio.run(run())
 
 
+def test_tui_hello_rebinds_session_subscription(daemon_env: str) -> None:
+    """Mid-install chat switch re-hellos on the same socket — must rebind push fan-out."""
+
+    async def run() -> None:
+        d = Daemon()
+        await d.start()
+        task = asyncio.create_task(d.serve())
+        await asyncio.sleep(0.15)
+        try:
+            r, w = await open_connection()
+            w.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "h1",
+                            "type": "hello",
+                            "role": "tui",
+                            "session": "old-sess",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await w.drain()
+            await asyncio.wait_for(r.readline(), 3)
+            for _ in range(4):
+                try:
+                    await asyncio.wait_for(r.readline(), 0.2)
+                except TimeoutError:
+                    break
+
+            w.write(
+                (
+                    json.dumps(
+                        {
+                            "v": 1,
+                            "id": "h2",
+                            "type": "hello",
+                            "role": "tui",
+                            "session": "new-sess",
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            await w.drain()
+            hello2 = json.loads(await asyncio.wait_for(r.readline(), 3))
+            assert hello2.get("type") == "hello"
+            assert hello2.get("session") == "new-sess"
+
+            d.state.broadcast({"type": "boot", "session": "new-sess", "text": "new-only"})
+            d.state.broadcast({"type": "boot", "session": "old-sess", "text": "old-only"})
+
+            got = None
+            for _ in range(8):
+                line = await asyncio.wait_for(r.readline(), 2)
+                m = json.loads(line)
+                if m.get("type") == "boot":
+                    got = m
+                    break
+            assert got and got.get("text") == "new-only"
+            w.close()
+        finally:
+            d.request_stop()
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, 2.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    asyncio.run(run())
+
+
 def test_two_sessions_load_isolated_disk(daemon_env: str, tmp_path: Path) -> None:
     """Daemon load RPCs must write sessions/<sid>/session.json, not share _default."""
 

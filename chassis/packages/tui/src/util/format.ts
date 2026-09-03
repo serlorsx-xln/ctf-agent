@@ -18,3 +18,17 @@ export function formatDuration(secs: number) {
   const weeks = Math.floor(secs / 604800)
   return weeks === 1 ? "~1 week" : `~${weeks} weeks`
 }
+
+/** Swarm footer / Solve card elapsed — freezes when ``running`` is false. */
+export function formatSwarmElapsed(
+  startedAt: number | null | undefined,
+  endedAt: number | null | undefined,
+  now: number,
+  running: boolean,
+): string | null {
+  if (startedAt == null) return null
+  const end = running ? now : (endedAt ?? now)
+  const secs = Math.max(0, Math.floor((end - startedAt) / 1000))
+  if (secs < 60) return `${secs}s`
+  return formatDuration(secs) || `${secs}s`
+}

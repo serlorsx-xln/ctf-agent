@@ -64,6 +64,16 @@ export function confirmRestartOpts(): { active: boolean; completed: boolean } {
 
 /** Stop any live swarm and reset daemon + swarm UI state. Never throws. */
 export async function stopAndClearArtemisState(): Promise<void> {
+  // Clear local UI flags first so a dead/missing daemon cannot leave the
+  // flags→models gate stuck after /new, /restart, or prompt clear.
+  daemon.clearSwarmEvents()
+  daemon.setLastModels([])
+  daemon.setFlowCompleted(false)
+  daemon.setSolveLocked(false)
+  daemon.setSolveFlowBusy(false)
+  daemon.setSuppressSolveGate(false)
+  daemon.declinePendingFlagConfirm()
+
   if (daemon.swarmRunning[0]()) {
     try {
       await daemon.request("swarm_stop", {})
@@ -76,11 +86,4 @@ export async function stopAndClearArtemisState(): Promise<void> {
   } catch {
     /* ignore */
   }
-  daemon.clearSwarmEvents()
-  daemon.setLastModels([])
-  daemon.setFlowCompleted(false)
-  daemon.setSolveLocked(false)
-  daemon.setSolveFlowBusy(false)
-  daemon.setSuppressSolveGate(false)
-  daemon.flagConfirm[1](null)
 }

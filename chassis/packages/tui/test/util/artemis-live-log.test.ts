@@ -3,14 +3,20 @@ import {
   coalesceEvents,
   dedupeEvents,
   dropPostSolveAgentChatter,
+  eventsFromLogLine,
   expandSummaryLine,
   hasAgentActivity,
+  hasCorrectSolveOutcome,
   hasTerminalSolveOutcome,
+  isFeedVisibleStatus,
   isGarbledModelText,
   isGlobalQuotaOutcome,
+  isSolverHoldActive,
   isTerminalSolveOutcome,
   parseArtemisEvents,
+  pendingOperatorQueue,
   stripLogPrefix,
+  type ArtemisEvent,
 } from "../../src/util/artemis-live-log"
 
 describe("parseArtemisEvents", () => {
@@ -130,6 +136,23 @@ describe("parseArtemisEvents", () => {
     ])
   })
 
+  test("expandSummaryLine shared fixtures match backend expand_summary_line", async () => {
+    const path = new URL("../../../../../tests/fixtures/summary_expand_cases.json", import.meta.url)
+    const cases = (await Bun.file(path).json()) as Array<{
+      id: string
+      input: string
+      expect_exact?: string[]
+      expect_contains?: string[]
+    }>
+    for (const c of cases) {
+      const pieces = expandSummaryLine(c.input)
+      if (c.expect_exact) expect(pieces).toEqual(c.expect_exact)
+      for (const needle of c.expect_contains ?? []) {
+        expect(pieces.some((p) => p.includes(needle))).toBe(true)
+      }
+    }
+  })
+
   test("expands What I tried / Why it worked section labels", () => {
     const pieces = expandSummaryLine(
       "Key insight: XOR key in the APK. What I tried: jadx on the wrapper. Why it worked: client-side PIN.",
@@ -192,6 +215,34 @@ describe("parseArtemisEvents", () => {
     expect(trimmed.some((e) => e.kind === "summary")).toBe(true)
   })
 
+  test("keeps Hold Q&A status replies after CORRECT (drops post-solve tools)", () => {
+    const events = parseArtemisEvents(
+      [
+        'CORRECT — accepted "flag{x}". Challenge complete for this run.',
+        "[composer-2.5 ai] late chatter before hold",
+        "[default bash] cat notes.txt",
+        "[default result] wizard_1 : b'[MAYA FOREST...'",
+        "[artemis] hold — ask follow-ups",
+        "[artemis] you (steer→default): คุณทำได้ยัง",
+        "[artemis] qa-wait · คุณทำได้ยัง",
+        "[artemis] qa →default: Yes — three flags are accepted.",
+      ].join("\n"),
+    )
+    const trimmed = dropPostSolveAgentChatter(events)
+    expect(trimmed.some((e) => e.kind === "ai" && /late chatter/.test(e.text))).toBe(false)
+    expect(trimmed.some((e) => e.kind === "bash" || e.kind === "result")).toBe(false)
+    expect(trimmed.some((e) => e.kind === "status" && /Q&A · Yes — three flags/.test(e.text))).toBe(
+      true,
+    )
+    expect(
+      trimmed.some(
+        (e) => e.kind === "status" && e.agent === "default" && /Q&A · Yes/.test(e.text),
+      ),
+    ).toBe(true)
+    expect(trimmed.some((e) => e.kind === "operator")).toBe(true)
+    expect(trimmed.some((e) => e.kind === "status" && /^Answering/.test(e.text))).toBe(true)
+  })
+
   test("drops token-streamed writeup deltas (summary owns the recap)", () => {
     expect(parseArtemisEvents("[chal/default writeup] How the flag")).toEqual([])
     expect(parseArtemisEvents("[chal/default writeup] was found")).toEqual([])
@@ -250,6 +301,21 @@ describe("parseArtemisEvents", () => {
     expect(events.filter((e) => e.kind === "outcome" && /^FLAG FOUND/i.test(e.text))).toHaveLength(0)
   })
 
+  test("dedupeEvents prior seed suppresses FLAG FOUND outside the merge window", () => {
+    const prior: ArtemisEvent[] = [
+      {
+        kind: "outcome",
+        level: "success",
+        text: 'CORRECT — accepted "flag{x}". Challenge complete for this run.',
+      },
+    ]
+    const tail = dedupeEvents(
+      [{ kind: "outcome", level: "success", text: "FLAG FOUND: flag{x}" }],
+      prior,
+    )
+    expect(tail).toHaveLength(0)
+  })
+
   test("coalesces fragmented think tokens into one block", () => {
     // Real SDK deltas include their own spaces — do not invent extras.
     const merged = coalesceEvents([
@@ -283,7 +349,7 @@ describe("parseArtemisEvents", () => {
     expect(stripLogPrefix("19:52:47 INFO [x] hi")).toBe("[x] hi")
   })
 
-  test("usage-limit outcome is terminal for single-agent; multi only if no agent activity", () => {
+  test("global Cursor usage-limit outcome is always terminal (single and multi)", () => {
     const events = parseArtemisEvents(
       "[artemis] outcome ERROR — Cursor usage limit reached — switch model or wait for reset (7/29/2026)",
     )
@@ -410,5 +476,226 @@ describe("parseArtemisEvents", () => {
     )
     expect(events.every((e) => !("text" in e && /وف/.test(String(e.text))))).toBe(true)
     expect(events.some((e) => e.kind === "status" && /Waiting for operator/.test(e.text))).toBe(true)
+  })
+
+  test("parses operator you (steer|queue) lines", () => {
+    const events = parseArtemisEvents(
+      ["[artemis] you (steer): try XSS", "[artemis] you (queue): later"].join("\n"),
+    )
+    expect(events).toContainEqual({ kind: "operator", text: "try XSS", delivery: "steer" })
+    expect(events).toContainEqual({ kind: "operator", text: "later", delivery: "queue" })
+    expect(hasAgentActivity(events)).toBe(true)
+  })
+
+  test("parses operator target scopes", () => {
+    const events = parseArtemisEvents(
+      [
+        "[artemis] you (steer→all): hi",
+        "[artemis] you (queue→default#2): only two",
+        "[artemis] solver ← operator (queue→default#2): only two",
+      ].join("\n"),
+    )
+    expect(events).toContainEqual({ kind: "operator", text: "hi", delivery: "steer" })
+    expect(events).toContainEqual({
+      kind: "operator",
+      text: "only two",
+      delivery: "queue",
+      target: "default#2",
+    })
+    expect(pendingOperatorQueue(events)).toEqual([])
+    expect(pendingOperatorQueue(events, "default#1")).toEqual([])
+  })
+
+  test("pendingOperatorQueue tracks queue until Solver read", () => {
+    const queued = parseArtemisEvents(
+      ["[artemis] you (queue): ทดสอบ", "[artemis] you (queue): ทดสอบ2"].join("\n"),
+    )
+    expect(pendingOperatorQueue(queued)).toEqual(["ทดสอบ", "ทดสอบ2"])
+    const afterSteer = parseArtemisEvents(
+      [
+        "[artemis] you (queue): ทดสอบ",
+        "[artemis] you (steer): interrupt",
+        "[artemis] solver ← operator (steer): interrupt",
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(afterSteer)).toEqual(["ทดสอบ"])
+    const sameTextSteer = parseArtemisEvents(
+      [
+        "[artemis] you (queue): สวัสดี",
+        "[artemis] you (steer): สวัสดี",
+        "[artemis] solver ← operator (steer): สวัสดี",
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(sameTextSteer)).toEqual(["สวัสดี"])
+    const drained = parseArtemisEvents(
+      [
+        "[artemis] you (queue): ทดสอบ",
+        "[artemis] you (queue): ทดสอบ2",
+        "[artemis] solver ← operator (queue): ทดสอบ",
+        "[artemis] solver ← operator (queue): ทดสอบ2",
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(drained)).toEqual([])
+  })
+
+  test("pendingOperatorQueue scopes by agent focus", () => {
+    const events = parseArtemisEvents(
+      [
+        "[artemis] you (queue→default#1): a",
+        "[artemis] you (queue→default#2): b",
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(events, "default#1")).toEqual(["a"])
+    expect(pendingOperatorQueue(events, "default#2")).toEqual(["b"])
+    expect(pendingOperatorQueue(events)).toEqual(["a", "b"])
+  })
+
+  test("pendingOperatorQueue matches base↔#N focus like backend targets_match", () => {
+    const events = parseArtemisEvents("[artemis] you (queue→opus): note for opus family")
+    expect(pendingOperatorQueue(events, "opus#1")).toEqual(["note for opus family"])
+    expect(pendingOperatorQueue(events, "composer#1")).toEqual([])
+  })
+
+  test("pendingOperatorQueue unscoped Solver read does not clear scoped note", () => {
+    const note = "x".repeat(40)
+    const events = parseArtemisEvents(
+      [
+        `[artemis] you (queue→opus#2): ${note}`,
+        `[artemis] solver ← operator (queue): ${note}`,
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(events)).toEqual([note])
+    expect(pendingOperatorQueue(events, "opus#2")).toEqual([note])
+  })
+
+  test("pendingOperatorQueue matches truncated Solver read prefix", () => {
+    const long = "x".repeat(800)
+    const events = parseArtemisEvents(
+      [`[artemis] you (queue): ${long}`, `[artemis] solver ← operator (queue): ${long.slice(0, 500)}`].join(
+        "\n",
+      ),
+    )
+    expect(pendingOperatorQueue(events)).toEqual([])
+  })
+
+  test("pendingOperatorQueue does not clear on short unrelated Solver read", () => {
+    const events = parseArtemisEvents(
+      [
+        "[artemis] you (queue): please check the /admin path carefully",
+        "[artemis] solver ← operator (queue): please",
+      ].join("\n"),
+    )
+    expect(pendingOperatorQueue(events)).toEqual(["please check the /admin path carefully"])
+  })
+
+  test("parses Claude Bash and Cursor host Shell without step", () => {
+    expect(
+      parseArtemisEvents('[chal/opus tool#3 → Bash] {"command": "ls /challenge"}'),
+    ).toContainEqual({
+      kind: "bash",
+      agent: "opus",
+      command: "ls /challenge",
+    })
+    expect(
+      parseArtemisEvents("[chal/default tool → Shell] ls -la /tmp"),
+    ).toContainEqual({
+      kind: "bash",
+      agent: "default",
+      command: "ls -la /tmp",
+    })
+    expect(
+      parseArtemisEvents("[chal/default tool ← Shell (completed)] ok done"),
+    ).toContainEqual({
+      kind: "result",
+      agent: "default",
+      text: "ok done",
+    })
+  })
+
+  test("qa-wait inserts qa_sep turn breaks between Hold replies", () => {
+    const events = parseArtemisEvents(
+      [
+        "[artemis] qa-wait · q1",
+        "[artemis] qa →default: first reply",
+        "[artemis] qa-done",
+        "[artemis] qa-wait · q2",
+        "[artemis] qa →default: second reply",
+        "[artemis] qa-done",
+      ].join("\n"),
+    )
+    expect(events.filter((e) => e.kind === "qa_sep")).toHaveLength(4)
+    const qa = events.filter((e) => e.kind === "status" && /^Q&A ·/.test(e.text))
+    expect(qa.map((e) => (e.kind === "status" ? e.text : ""))).toEqual([
+      "Q&A · first reply",
+      "Q&A · second reply",
+    ])
+  })
+
+  test("qa-done inserts qa_sep without a feed-visible status", () => {
+    const events = parseArtemisEvents("[artemis] qa-done")
+    expect(events.some((e) => e.kind === "qa_sep")).toBe(true)
+    expect(events.some((e) => e.kind === "status" && /^Q&A done/i.test(e.text))).toBe(false)
+  })
+
+  test("eventsFromLogLine mirrors parseArtemisEvents qa_sep for live ingest", () => {
+    const pieces = eventsFromLogLine("[artemis] qa-wait · next")
+    expect(pieces.some((e) => e.kind === "qa_sep")).toBe(true)
+    expect(pieces.some((e) => e.kind === "status" && /^Answering/.test(e.text))).toBe(true)
+  })
+
+  test("preserves Q&A body whitespace for markdown paragraphs", () => {
+    const events = parseArtemisEvents(
+      "[artemis] qa →default: line one\n[artemis] qa →default: \n[artemis] qa →default:   indented",
+    )
+    const qa = events.filter((e) => e.kind === "status" && /^Q&A/.test(e.text)) as Array<{
+      kind: "status"
+      text: string
+    }>
+    expect(qa.map((e) => e.text)).toEqual([
+      "Q&A · line one",
+      "Q&A · ",
+      "Q&A ·   indented",
+    ])
+  })
+
+  test("parses hold qa-wait and qa replies (Answering is footer-only, not feed)", () => {
+    const events = parseArtemisEvents(
+      [
+        "[artemis] qa-wait · คุณทำได้ยัง",
+        "[artemis] qa →default: Yes — three flags are accepted.",
+        "[artemis] qa legacy untagged reply",
+      ].join("\n"),
+    )
+    expect(events).toContainEqual({
+      kind: "status",
+      text: "Answering… · คุณทำได้ยัง",
+    })
+    expect(events).toContainEqual({
+      kind: "status",
+      text: "Q&A · Yes — three flags are accepted.",
+      agent: "default",
+    })
+    expect(events).toContainEqual({
+      kind: "status",
+      text: "Q&A · legacy untagged reply",
+    })
+    expect(isFeedVisibleStatus("Answering… · คุณทำได้ยัง")).toBe(false)
+    expect(isFeedVisibleStatus("Follow-up · interrupting default")).toBe(false)
+    expect(isFeedVisibleStatus("Solver read · hi")).toBe(false)
+    expect(isFeedVisibleStatus("Q&A · Yes — three flags are accepted.")).toBe(true)
+    expect(isFeedVisibleStatus("Hold — ask follow-ups")).toBe(true)
+  })
+
+  test("isSolverHoldActive tracks hold then release", () => {
+    const held = parseArtemisEvents(
+      "[artemis] outcome CORRECT — done\n[artemis] hold — ask follow-ups",
+    )
+    expect(isSolverHoldActive(held)).toBe(true)
+    expect(hasCorrectSolveOutcome(held)).toBe(true)
+    const released = parseArtemisEvents(
+      "[artemis] hold — ask follow-ups\n[artemis] hold released",
+    )
+    expect(isSolverHoldActive(released)).toBe(false)
+    expect(released.some((e) => e.kind === "status" && e.text === "Hold released")).toBe(true)
   })
 })

@@ -5,8 +5,8 @@ import { useBindings } from "../keymap"
 import { SplitBorder } from "../ui/border"
 import { daemon } from "../artemis/client"
 import { listSwarmAgents } from "../util/artemis-swarm-agents"
-import { hasAgentActivity, hasTerminalSolveOutcome } from "../util/artemis-live-log"
-import { formatDuration } from "../util/format"
+import { hasAgentActivity, hasCorrectSolveOutcome, hasTerminalSolveOutcome, isSolverHoldActive } from "../util/artemis-live-log"
+import { formatSwarmElapsed } from "../util/format"
 import { Spinner } from "./spinner"
 import { useToast } from "../ui/toast"
 import { useDialog } from "../ui/dialog"
@@ -20,7 +20,7 @@ type NavItem = { id: string | null; label: string }
  * Multi-agent: Claude-style page navigator under the status line.
  * Esc cascade (only bound when actionable — never steals session.interrupt):
  *   1) leave select mode → 2) back to main page → 3) stop while process alive
- * Chat only on main; agent pages always lock the prompt.
+ * Chat on main (all agents) and on agent pages (that agent only).
  */
 export function SwarmAgentFooter() {
   const { theme } = useTheme()
@@ -67,19 +67,53 @@ export function SwarmAgentFooter() {
     const id = setInterval(() => setNow(Date.now()), 1000)
     onCleanup(() => clearInterval(id))
   })
-  const elapsedLabel = createMemo(() => {
-    const started = startedAt()
-    if (started == null) return null
-    const end = canStop() ? now() : (endedAt() ?? now())
-    const secs = Math.max(0, Math.floor((end - started) / 1000))
-    if (secs < 60) return `${secs}s`
-    return formatDuration(secs) || `${secs}s`
+  const elapsedLabel = createMemo(() =>
+    formatSwarmElapsed(startedAt(), endedAt(), now(), solving()),
+  )
+  const holding = createMemo(
+    () => canStop() && terminalDone() && isSolverHoldActive(events()),
+  )
+  const answering = createMemo(() => {
+    if (!holding()) return false
+    // Spinner stays up for the whole Hold turn: Answering… until the next
+    // qa_sep (or Hold released). Multi-line Q&A must not clear it on chunk 1.
+    let lastAnswer = -1
+    let lastSep = -1
+    const list = events()
+    for (let i = 0; i < list.length; i++) {
+      const ev = list[i]!
+      if (ev.kind === "qa_sep") {
+        lastSep = i
+        continue
+      }
+      if (ev.kind !== "status") continue
+      const t = String(ev.text || "")
+      if (/^Hold released\b/i.test(t)) lastSep = i
+      if (/^Answering/i.test(t)) lastAnswer = i
+    }
+    return lastAnswer > lastSep
   })
   const statusLabel = createMemo(() => {
     if (solving()) return agentStarted() ? "Solving" : "Starting…"
+    if (holding()) return answering() ? "Hold · answering…" : "Hold · Q&A"
+    if (
+      canStop() &&
+      hasCorrectSolveOutcome(events()) &&
+      !events().some(
+        (ev) =>
+          ev.kind === "status" &&
+          /^Hold\b/i.test(String(ev.text || "")) &&
+          !/^Hold released\b/i.test(String(ev.text || "")),
+      )
+    ) {
+      return "Writeup…"
+    }
     if (canStop()) return "Stopping…"
     return "Solve"
   })
+  const spinStatus = createMemo(
+    () => solving() || answering() || statusLabel() === "Writeup…",
+  )
 
   const items = createMemo<NavItem[]>(() => [
     { id: null, label: "main" },
@@ -161,9 +195,24 @@ export function SwarmAgentFooter() {
   }
 
   // After a finished solve, if cleanup hangs: unlock chat, then abandon Stopping.
+  // Never force-stop after CORRECT — writeup (≤90s) and Q&A hold stay intentional.
   createEffect(() => {
     if (!(canStop() && terminalDone())) {
       clearStopForceTimer()
+      return
+    }
+    if (holding() || hasCorrectSolveOutcome(events())) {
+      clearStopForceTimer()
+      const runId = ++unlockRunId
+      // Unlock chat quickly so the operator can ask during writeup/hold.
+      stopForceTimer = setTimeout(() => {
+        unlockSwarmUiLocally(
+          "Ask follow-ups — Esc or /stop ends the session",
+          runId,
+          { clearRunning: false },
+        )
+      }, 1500)
+      onCleanup(() => clearStopForceTimer())
       return
     }
     clearStopForceTimer()
@@ -224,7 +273,7 @@ export function SwarmAgentFooter() {
       return forceStopWithoutConfirm() ? "esc → force stop" : "esc → confirm stop"
     }
     if (armed()) return "↑↓ select · enter open · esc leave select"
-    if (focus() != null) return "↑↓ select · enter · esc → main · chat locked"
+    if (focus() != null) return "↑↓ select · enter · esc → main"
     if (!canStop()) return "tab select · ↑↓ history"
     return forceStopWithoutConfirm()
       ? "tab select · ↑↓ history · esc → force stop"
@@ -315,7 +364,7 @@ export function SwarmAgentFooter() {
           <box flexDirection="row" justifyContent="space-between" gap={1}>
             <box flexDirection="row" gap={1}>
               <Show
-                when={solving()}
+                when={spinStatus()}
                 fallback={
                   <text fg={canStop() ? theme.warning : theme.textMuted} attributes={TextAttributes.BOLD}>
                     {statusLabel()}
