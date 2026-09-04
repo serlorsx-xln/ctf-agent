@@ -17,8 +17,10 @@ gf128-roots            GF(2^128) poly roots (NIST field used by AES-GCM)
                        gf128-roots --demo
                        gf128-roots --coeffs HEX0,HEX1,...,HEXd
 
-Extra category tools (steg, forensics, sage, RsaCtfTool, angr, …) load
-automatically when first used — re-read this file afterward.
+Extra category tools (steg, forensics, sage, RsaCtfTool, angr, jadx, …) load
+automatically when first used — re-read this file afterward. Just invoke the
+tool (or `ctf-ensure-pack <category>`). Do not `docker build` images yourself;
+the sandbox attaches tool packs from the host cache.
 
 == NETWORK / VPN ==
 On Mac, the harness calibrates routing: use DIRECT when the lab is reachable
@@ -39,6 +41,7 @@ abandoning the technique. For huge scans, narrow scope or use a faster tool.
 
 == NOTES ==
 Python packages belong to the interpreter you run (e.g. `python3` vs `sage`).
-If a needed command is missing, just run it — the sandbox may install it
-once and retry. Then re-read /tools.txt. Workspace is preserved.
+If a needed command is missing, just run it — Artemis auto-attaches the matching
+tool pack (or use `ctf-ensure-pack`) and retries. Then re-read /tools.txt.
+Do not `docker build` or invent new sandbox images. Workspace is preserved.
 `pip3 install …` works without flags (wrapper adds --break-system-packages).

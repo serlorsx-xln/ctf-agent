@@ -16,8 +16,11 @@ blutter              Dump Dart AOT objects/asm. Typical:
                      `tail`/`head` buffers output and hides live progress.
                      Meanwhile keep working: jadx/strings/assets in parallel.
                      blutter --help for usage. Wrapper validates inputs.
-                     Operator tip: `artemis setup` warms packs; first Flutter
-                     APK of a new Dart version still compiles once.
+                     Operator tip: `artemis setup` warms packs and, when a
+                     sample Flutter APK is available, prebuilds this Dart VM
+                     so the first solve skips the long ninja compile. Without
+                     that warm, the first APK of a new Dart version still
+                     compiles once (then reuses across sessions).
 reflutter            Flutter reverse helpers
 strings / objdump       Baseline string + disasm on libapp.so
 pyelftools           Parse ELF / Dart snapshot sections

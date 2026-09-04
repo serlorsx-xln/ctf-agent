@@ -2,8 +2,8 @@
 
 Does not solve challenges. Builds missing donor images and extracts pack trees
 into the host pack cache so the first real solve skips cold docker/materialize
-for common packs. Blutter Dart VMs still compile on first use of a Dart version
-(then shared across sessions via ``shared_state``).
+for common packs. When a sample Flutter APK is available, also prebuilds the
+blutter Dart VM into the shared pack-state cache.
 """
 
 from __future__ import annotations
@@ -343,16 +343,166 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
             await asyncio.to_thread(_release_pack_flock, fd)
 
 
-async def warm_shared_blutter_state() -> str:
-    """Ensure the shared blutter state dir exists and adopt any session leftovers."""
+def find_blutter_warm_apk() -> Path | None:
+    """Locate a Flutter APK to prebuild the shared blutter Dart VM.
+
+    Order: ``ARTEMIS_BLUTTER_WARM_APK``, repo ``challenges/**/*.apk``, then
+    ``~/.cache/artemis/challenges/**/*.apk``.
+    """
+    from backend.sandbox.donor_build import repo_root
+
+    env = (os.environ.get("ARTEMIS_BLUTTER_WARM_APK") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if p.is_file():
+            return p
+        # Explicit path that is missing — do not silently fall through.
+        return None
+
+    roots: list[Path] = []
+    try:
+        roots.append(repo_root() / "challenges")
+    except Exception:
+        pass
+    from backend.cache import cache_dir
+
+    roots.append(cache_dir() / "challenges")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        # Prefer known Flutter CTF names, then any apk.
+        preferred = sorted(root.rglob("*PWNKnight*.apk")) + sorted(
+            root.rglob("*pwnknight*.apk")
+        )
+        for apk in preferred:
+            if apk.is_file() and apk.stat().st_size > 1_000_000:
+                return apk
+        for apk in sorted(root.rglob("*.apk")):
+            if apk.is_file() and apk.stat().st_size > 500_000:
+                return apk
+    return None
+
+
+async def _compile_blutter_vm_from_apk(
+    apk: Path,
+    *,
+    on_progress: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
+    """Run blutter once in a short-lived mobile sandbox to populate shared cache."""
+    from backend.config import Settings
+    from backend.sandbox.container import DockerSandbox
+    from backend.sandbox.docker_client import _docker_cli
+    from backend.tool_router import PREFETCH_RUNTIME_IMAGES, _blutter_vm_present, pack_state_dir
+
+    def _emit(text: str) -> None:
+        if on_progress:
+            on_progress(text)
+
+    home = pack_state_dir("mobile", "/var/cache/ctf-blutter", session_id=None)
+    if _blutter_vm_present(home):
+        return True, f"Blutter Dart VM already cached at {home}"
+
+    image = PREFETCH_RUNTIME_IMAGES.get("mobile") or "ctf-sandbox-mobile"
+    tmp = Path(os.environ.get("TMPDIR") or "/tmp") / "artemis-blutter-warm"
+    tmp.mkdir(parents=True, exist_ok=True)
+    settings = Settings()
+    settings.force_packs = ["mobile"]
+    settings.sandbox_image = image
+    sb = DockerSandbox(
+        image=image,
+        challenge_dir=str(tmp),
+        settings=settings,
+        session_id="_blutter_warm",
+    )
+    try:
+        _emit(
+            f"Blutter Dart VM: warming from {apk.name} "
+            "(first compile can take 10–30+ min)…"
+        )
+        await sb.start()
+        await sb.ensure_pack("mobile", refresh_tools=False)
+        await sb.write_file("/challenge/workspace/warm_apk/.keep", b"")
+        cid = sb.container_id
+        if not cid:
+            return False, "Blutter warm: no container id"
+        rc, _, err = await _docker_cli(
+            "cp",
+            str(apk.resolve()),
+            f"{cid}:/challenge/workspace/warm_apk/app.apk",
+            timeout_s=120,
+        )
+        if rc != 0:
+            return False, f"Blutter warm: docker cp APK failed: {(err or '').strip()}"
+        extract = (
+            "mkdir -p /challenge/workspace/warm_libs /challenge/workspace/warm_out && "
+            "cd /challenge/workspace && "
+            "unzip -qo warm_apk/app.apk 'lib/arm64-v8a/*' -d warm_extract && "
+            "cp warm_extract/lib/arm64-v8a/libapp.so "
+            "warm_extract/lib/arm64-v8a/libflutter.so warm_libs/ && "
+            "ls -la warm_libs/"
+        )
+        res = await sb.exec(extract, timeout_s=120)
+        if res.exit_code != 0 or "libapp.so" not in (res.stdout or ""):
+            return (
+                False,
+                "Blutter warm: APK has no lib/arm64-v8a (need Flutter arm64 sample)",
+            )
+        _emit("Blutter Dart VM: compiling (ninja) — leave this running…")
+        dump = await sb.exec(
+            "blutter /challenge/workspace/warm_libs /challenge/workspace/warm_out",
+            timeout_s=1800,
+        )
+        if _blutter_vm_present(home):
+            return True, f"Blutter Dart VM warmed into {home}"
+        if dump.exit_code != 0:
+            return (
+                False,
+                f"Blutter warm compile failed (exit {dump.exit_code}): "
+                f"{(dump.stderr or dump.stdout or '')[:400]}",
+            )
+        return True, f"Blutter warm finished (cache at {home})"
+    except Exception as e:
+        logger.exception("blutter VM warm failed")
+        return False, f"Blutter warm failed: {e}"
+    finally:
+        try:
+            await sb.stop()
+        except Exception:
+            logger.debug("blutter warm stop failed", exc_info=True)
+
+
+async def warm_shared_blutter_state(
+    *,
+    skip_vm_compile: bool = False,
+    on_progress: Callable[[str], None] | None = None,
+) -> str:
+    """Ensure shared blutter cache exists; optionally precompile a Dart VM."""
     from backend.tool_router import _blutter_vm_present, pack_state_dir
 
     home = pack_state_dir("mobile", "/var/cache/ctf-blutter", session_id=None)
     if _blutter_vm_present(home):
-        return f"Blutter shared cache ready: {home}"
+        return f"Blutter shared cache ready (Dart VM present): {home}"
+
+    if skip_vm_compile:
+        return (
+            f"Blutter shared cache prepared at {home} "
+            "(Dart VM still builds on first Flutter APK for each Dart version, then reuses)"
+        )
+
+    apk = find_blutter_warm_apk()
+    if apk is None:
+        return (
+            f"Blutter shared cache prepared at {home} "
+            "(no sample APK for VM warm — set ARTEMIS_BLUTTER_WARM_APK or place an APK "
+            "under challenges/; first Flutter solve still compiles once)"
+        )
+
+    ok, msg = await _compile_blutter_vm_from_apk(apk, on_progress=on_progress)
+    if ok:
+        return msg
     return (
-        f"Blutter shared cache prepared at {home} "
-        "(Dart VM still builds on first Flutter APK for each Dart version, then reuses)"
+        f"Blutter shared cache at {home} — VM warm skipped: {msg}. "
+        "First Flutter solve may still compile the Dart VM once."
     )
 
 
@@ -361,9 +511,10 @@ async def run_setup(
     packs: list[str] | None = None,
     skip_core: bool = False,
     skip_warm_runtime: bool = False,
+    skip_blutter_vm: bool = False,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Warm L0 + selected packs (+ optional committed warm runtimes).
+    """Warm L0 + selected packs (+ optional committed warm runtimes / blutter VM).
 
     Host cache materialize first; then ``ctf-sandbox-warm-<pack>`` commits so
     the first real solve skips cold apt/pip bootstrap for those packs.
@@ -398,7 +549,14 @@ async def run_setup(
         lines.append(line)
         _emit(line)
 
-    blutter = await warm_shared_blutter_state()
+    # Blutter VM warm needs the mobile pack tree; skip when mobile was not baked.
+    want_blutter = (packs is None or "mobile" in chosen) and not skip_blutter_vm
+    _emit("Blutter shared cache…")
+    blutter = await warm_shared_blutter_state(
+        skip_vm_compile=not want_blutter,
+        on_progress=on_progress,
+    )
+    # Soft failure still leaves usable cache dir.
     line = "OK  " + blutter
     lines.append(line)
     _emit(line)

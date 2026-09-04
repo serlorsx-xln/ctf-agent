@@ -91,29 +91,24 @@ def is_warm_runtime_image(image: str | None) -> bool:
 
 
 def _image_exists_sync(tag: str) -> bool:
-    """Best-effort sync ``docker image inspect`` (launch assess / probes)."""
-    import subprocess
+    """Same existence check as the TUI setup gate (inspect + ``images -q``)."""
+    from backend.sandbox.setup_ready import _docker_image_exists
 
-    try:
-        from backend.subprocess_platform import resolve_docker_exe
-
-        exe = resolve_docker_exe()
-        r = subprocess.run(
-            [exe, "image", "inspect", tag],
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    return _docker_image_exists(tag)
 
 
 async def _image_exists(tag: str) -> bool:
     from backend.sandbox.docker_client import _docker_cli
+    from backend.sandbox.setup_ready import _image_refs
 
-    rc, _, _ = await _docker_cli("image", "inspect", tag, timeout_s=30)
-    return rc == 0
+    for ref in _image_refs(tag):
+        rc, _, _ = await _docker_cli("image", "inspect", ref, timeout_s=30)
+        if rc == 0:
+            return True
+        rc, out, _ = await _docker_cli("images", "-q", ref, timeout_s=30)
+        if rc == 0 and (out or "").strip():
+            return True
+    return False
 
 
 async def warm_pack_runtime(pack_id: str) -> tuple[bool, str]:

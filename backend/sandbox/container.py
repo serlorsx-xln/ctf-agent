@@ -1304,26 +1304,34 @@ class DockerSandbox:
                     )
 
     async def exec(self, command: str, timeout_s: int = 300) -> ExecResult:
+        """Run a command in the sandbox.
+
+        The lifecycle lock is held only while ensuring/recreating the container.
+        Long-running bash (blutter/ninja, sleep, etc.) must not serialize other
+        parallel tool calls — otherwise a 900s compile makes ``sleep 30`` appear
+        hung for many minutes.
+        """
         if not self.workspace_dir:
             raise RuntimeError("Sandbox not started")
 
         async with self._lock:
             await self._ensure_container_unlocked()
-            try:
-                return await self._exec_inner(command, timeout_s, via_host_proxy=True)
-            except aiodocker.exceptions.DockerError as e:
-                if self._is_container_gone_error(e):
-                    logger.warning("exec hit gone container — recreating and retrying once")
+        try:
+            return await self._exec_inner(command, timeout_s, via_host_proxy=True)
+        except aiodocker.exceptions.DockerError as e:
+            if self._is_container_gone_error(e):
+                logger.warning("exec hit gone container — recreating and retrying once")
+                async with self._lock:
                     await self._recreate_container_unlocked()
-                    try:
-                        return await self._exec_inner(command, timeout_s, via_host_proxy=True)
-                    except Exception as e2:
-                        return ExecResult(
-                            exit_code=-1,
-                            stdout="",
-                            stderr=f"Container recreate failed: {e2}",
-                        )
-                return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
+                try:
+                    return await self._exec_inner(command, timeout_s, via_host_proxy=True)
+                except Exception as e2:
+                    return ExecResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"Container recreate failed: {e2}",
+                    )
+            return ExecResult(exit_code=-1, stdout="", stderr=f"Docker error: {e}")
 
     async def _exec_inner(
         self,
@@ -1407,6 +1415,7 @@ class DockerSandbox:
                 await stream.close()
             except Exception:
                 pass
+            await self._reap_timed_out_compilers()
             return ExecResult(
                 exit_code=-1,
                 stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
@@ -1422,6 +1431,31 @@ class DockerSandbox:
             stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
         )
 
+    async def _reap_timed_out_compilers(self) -> None:
+        """Best-effort kill leftover ninja/c++ from a timed-out blutter/build.
+
+        ``timeout(1)`` SIGTERM can leave zombies and busy compilers that starve
+        later ``docker exec`` calls. Do not hold the lifecycle lock here.
+        """
+        if not self._container:
+            return
+        reap = (
+            "for p in $(pgrep -f "
+            "'ninja|/usr/bin/c\\+\\+|cc1plus|dartvm_fetch_build|blutter\\.py' "
+            "2>/dev/null || true); do "
+            "kill -TERM \"$p\" 2>/dev/null || true; done; "
+            "sleep 0.5; "
+            "for p in $(pgrep -f "
+            "'ninja|/usr/bin/c\\+\\+|cc1plus|dartvm_fetch_build' "
+            "2>/dev/null || true); do "
+            "kill -KILL \"$p\" 2>/dev/null || true; done; "
+            "true"
+        )
+        try:
+            await self._exec_inner(reap, timeout_s=20, via_host_proxy=False)
+        except Exception:
+            logger.debug("reap timed-out compilers failed", exc_info=True)
+
     async def read_file(self, path: str) -> str | bytes:
         """Read a file from the container. Returns str for text, bytes for binary."""
         if not self.workspace_dir:
@@ -1429,14 +1463,15 @@ class DockerSandbox:
 
         async with self._lock:
             await self._ensure_container_unlocked()
-            try:
-                return await self._read_file_inner(path)
-            except Exception as e:
-                if self._is_container_gone_error(e):
-                    logger.warning("read_file hit gone container — recreating and retrying once")
+        try:
+            return await self._read_file_inner(path)
+        except Exception as e:
+            if self._is_container_gone_error(e):
+                logger.warning("read_file hit gone container — recreating and retrying once")
+                async with self._lock:
                     await self._recreate_container_unlocked()
-                    return await self._read_file_inner(path)
-                raise
+                return await self._read_file_inner(path)
+            raise
 
     async def _read_file_inner(self, path: str) -> str | bytes:
         assert self._container is not None
@@ -1477,15 +1512,16 @@ class DockerSandbox:
 
         async with self._lock:
             await self._ensure_container_unlocked()
-            try:
-                await self._write_file_inner(path, content)
-            except Exception as e:
-                if self._is_container_gone_error(e):
-                    logger.warning("write_file hit gone container — recreating and retrying once")
+        try:
+            await self._write_file_inner(path, content)
+        except Exception as e:
+            if self._is_container_gone_error(e):
+                logger.warning("write_file hit gone container — recreating and retrying once")
+                async with self._lock:
                     await self._recreate_container_unlocked()
-                    await self._write_file_inner(path, content)
-                    return
-                raise
+                await self._write_file_inner(path, content)
+                return
+            raise
 
     async def _write_file_inner(self, path: str, content: bytes) -> None:
         assert self._container is not None

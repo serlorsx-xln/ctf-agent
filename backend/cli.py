@@ -634,9 +634,18 @@ async def _run_coordinator(
     is_flag=True,
     help="Skip committing ctf-sandbox-warm-* images (host cache only)",
 )
+@click.option(
+    "--skip-blutter-vm",
+    is_flag=True,
+    help="Skip prebuilding the blutter Dart VM (needs a sample Flutter APK)",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def setup_cmd(
-    packs: tuple[str, ...], skip_core: bool, skip_warm_runtime: bool, verbose: bool
+    packs: tuple[str, ...],
+    skip_core: bool,
+    skip_warm_runtime: bool,
+    skip_blutter_vm: bool,
+    verbose: bool,
 ) -> None:
     """Phase 3: warm L0 + common tool packs on this machine (once).
 
@@ -645,8 +654,9 @@ def setup_cmd(
       artemis setup --pack mobile --pack pwn
 
     Extracts donor trees into ~/.cache/ctf-agent/packs and commits warm L0
-    runtimes so the first solve skips cold apt/pip. Blutter Dart VMs still
-    compile once per Dart version, then are shared across sessions.
+    runtimes so the first solve skips cold apt/pip. When a sample Flutter APK
+    is available (``ARTEMIS_BLUTTER_WARM_APK`` or under challenges/), also
+    prebuilds the shared blutter Dart VM so the first Flutter solve is fast.
     """
     _setup_logging(verbose)
     from backend.sandbox.setup_bake import run_setup
@@ -656,6 +666,7 @@ def setup_cmd(
             packs=list(packs) or None,
             skip_core=skip_core,
             skip_warm_runtime=skip_warm_runtime,
+            skip_blutter_vm=skip_blutter_vm,
         )
     )
     failed = False

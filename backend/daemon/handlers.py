@@ -224,6 +224,13 @@ class Handlers:
                 "session_state": self.state.get_session(session),
             }
         status = probe_setup_status()
+        if not status.ready and status.docker_ok and not status.core_image:
+            # Docker Engine 29 can miss ``ctf-sandbox-core`` on one inspect
+            # right after warm-runtime commits — re-probe once.
+            import asyncio
+
+            await asyncio.sleep(0.6)
+            status = probe_setup_status()
         if not status.ready:
             return {
                 "text": f"ERROR: sandbox not installed — {status.message}",

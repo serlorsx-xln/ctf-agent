@@ -39,41 +39,77 @@ class SetupStatus:
         }
 
 
-def _docker_image_exists(tag: str) -> bool:
+def _image_refs(tag: str) -> tuple[str, ...]:
+    """Docker 29+ often fails ``inspect name`` unless ``name:latest`` is explicit."""
+    t = (tag or "").strip()
+    if not t:
+        return ()
+    last = t.rsplit("/", 1)[-1]
+    if ":" in last or "@" in t:
+        return (t,)
+    return (f"{t}:latest", t)
+
+
+def _docker_run(args: list[str], *, timeout_s: float):
+    """Run host ``docker``. Returns None on timeout / missing binary."""
     import subprocess
 
     try:
         from backend.subprocess_platform import resolve_docker_exe
 
         exe = resolve_docker_exe()
-        proc = subprocess.run(
-            [exe, "image", "inspect", tag],
+        return subprocess.run(
+            [exe, *args],
             capture_output=True,
-            timeout=5,
+            timeout=timeout_s,
             check=False,
         )
-        return proc.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _docker_image_exists(tag: str) -> bool:
+    """True when the image is listed or inspectable.
+
+    After a long ``docker commit`` (warm runtimes), Engine 29 can return
+    ``No such image`` for an untagged inspect even though ``docker images``
+    already shows ``ctf-sandbox-core:latest``. A 5s timeout also false-misses
+    while Docker Desktop is busy — that showed up in the TUI as
+    ``sandbox not installed``.
+    """
+    import time
+
+    refs = _image_refs(tag)
+    if not refs:
         return False
+    for attempt in range(2):
+        busy = False
+        for ref in refs:
+            listed = _docker_run(["images", "-q", ref], timeout_s=15)
+            if listed is None or listed.returncode != 0:
+                busy = True
+            elif listed.stdout.strip():
+                return True
+            else:
+                inspected = _docker_run(["image", "inspect", ref], timeout_s=15)
+                if inspected is None:
+                    busy = True
+                elif inspected.returncode == 0:
+                    return True
+        if not busy:
+            return False
+        if attempt == 0:
+            time.sleep(0.5)
+    return False
 
 
 def _docker_ok() -> bool:
-    import subprocess
-
-    try:
-        from backend.subprocess_platform import resolve_docker_exe
-
-        exe = resolve_docker_exe()
-        # Short timeout — gate UI must not stall waiting on a wedged daemon.
-        proc = subprocess.run(
-            [exe, "info"],
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-        return proc.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    # Post-setup Docker Desktop can stall ``info`` well past 3s.
+    for _ in range(2):
+        proc = _docker_run(["info"], timeout_s=15)
+        if proc is not None and proc.returncode == 0:
+            return True
+    return False
 
 
 def _path_hint() -> tuple[str, str]:
@@ -155,18 +191,21 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
 async def run_gate_install(
     *,
     skip_warm_runtime: bool = True,
+    skip_blutter_vm: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Build L0 + materialize default packs (first-run TUI gate).
 
-    Warm runtime commits are optional here — they can take a long time; operators
-    can run ``artemis setup`` later for max speed. Gate defaults to skip warm so
-    Install finishes sooner; full warm remains ``artemis setup``.
+    Warm runtime commits and blutter Dart VM prebuild are optional here — they
+    can take a long time; operators can run ``artemis setup`` later for max
+    speed. Gate defaults to skip both so Install finishes sooner; full warm
+    remains ``artemis setup``.
     """
     from backend.sandbox.setup_bake import run_setup
 
     return await run_setup(
         skip_core=False,
         skip_warm_runtime=skip_warm_runtime,
+        skip_blutter_vm=skip_blutter_vm,
         on_progress=on_progress,
     )

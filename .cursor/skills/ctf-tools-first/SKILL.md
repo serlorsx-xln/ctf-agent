@@ -10,7 +10,8 @@ description: >-
 1. `cat /challenge/TOOLS.txt` — see what is installed.
 2. List `/challenge/distfiles`; work in `/challenge/workspace`.
 3. Prefer sandbox tools over guessing. If a tool is missing, run it anyway —
-   the sandbox may install it once and retry.
+   Artemis auto-attaches the matching pack (or `ctf-ensure-pack`) and retries.
+   Do not `docker build` sandbox images.
 4. Packages are per interpreter (`python3` ≠ `sage`). Use each tool under the
    interpreter listed in `/challenge/TOOLS.txt` — do not assume imports cross.
 5. If a command exits 137 (OOM) or 124 (timeout), stop retrying the same heavy

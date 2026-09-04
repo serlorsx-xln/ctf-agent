@@ -5,7 +5,7 @@ Locked UX for the OpenCode-based Artemis product shell in this repo
 `~/Documents/artemis` (sync fixes into this tree).
 
 **Not** the older Agent-chat-first notes in Documents `FUTURE-CLI.md`.
-This product is **Race/solve first**: Solving stays visible; main chat broadcasts during a run (**Enter** opens Send now / Queue; **`/queue …`** pre-selects Queue; empty Enter / Esc stops). **Send now** = force-followup interrupt on **all** providers (Cursor: cancel run + same-session `send`; Claude: `client.interrupt()`; Codex: `turn/interrupt`; Gemini: cancel in-flight generate). **Queue** = until idle (Cursor: idle turn; soft: next turn boundary). Agent pages stay chatable (target that agent).
+This product is **Race/solve first**: Solving stays visible; main chat broadcasts during a run (**Enter** opens Send now / Queue; **`/queue …`** pre-selects Queue; empty Enter / Esc stops). **Send now** = force-followup interrupt on **all** providers (Cursor: cancel run + same-session `send`; Claude: `client.interrupt()`; Codex: `turn/interrupt`; Gemini: cancel in-flight generate) — work may restart. **Queue** = until idle (Cursor: idle turn; soft: next turn boundary); does **not** interrupt long builds/tools (blutter/ninja, scans). Agent pages stay chatable (target that agent).
 
 ## Flow
 

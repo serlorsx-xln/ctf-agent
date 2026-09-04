@@ -92,6 +92,7 @@ uv sync
 # Prefer: build L0 + pack caches via Artemis (scrubbed build context — safe on ExFAT/USB)
 # uv run artemis setup
 # uv run artemis setup --skip-warm-runtime   # host cache only (faster setup, slower first solve)
+# uv run artemis setup --skip-blutter-vm     # skip Dart VM prebuild (needs sample Flutter APK)
 #
 # Manual docker builds (APFS clone recommended; ExFAT ``._*`` sidecars break BuildKit):
 # docker build -f sandbox/Dockerfile.core -t ctf-sandbox-core sandbox

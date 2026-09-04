@@ -136,9 +136,71 @@ def is_fragmented_prose(text: str) -> bool:
 
 _CJK_THAI_RE = re.compile(r"[\u0E00-\u0E7F\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]")
 
+# Latin function words that must stay space-separated even when short.
+_LATIN_SHORT_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "go",
+        "if",
+        "in",
+        "is",
+        "it",
+        "me",
+        "my",
+        "no",
+        "of",
+        "on",
+        "or",
+        "so",
+        "to",
+        "up",
+        "us",
+        "we",
+        "the",
+        "and",
+        "for",
+        "not",
+        "but",
+        "are",
+        "was",
+        "were",
+        "with",
+        "from",
+        "this",
+        "that",
+        "then",
+        "than",
+        "into",
+        "onto",
+        "over",
+        "under",
+        "via",
+        "per",
+    }
+)
+
+
+def _trailing_latin_run(text: str) -> str:
+    """ASCII alphabetic suffix of ``text`` (subword BPE / mid-token joins)."""
+    i = len(text)
+    while i > 0 and text[i - 1].isascii() and text[i - 1].isalpha():
+        i -= 1
+    return text[i:]
+
 
 def _join_tiny_stream_chunks(chunks: list[str]) -> str:
-    """Space-join Latin word tokens; concatenate Thai/CJK and identifier pieces."""
+    """Space-join Latin word tokens; concatenate Thai/CJK and mid-word splits.
+
+    Cursor/Gemini often stream subword pieces (``bl`` + ``utter`` → blutter).
+    Inserting a space between lowercase continuations produced ``bl utter`` /
+    ``jad x`` / ``CT F`` in Hold Q&A. Keep spaces only between real words.
+    """
     out = ""
     for chunk in chunks:
         if not out:
@@ -156,6 +218,33 @@ def _join_tiny_stream_chunks(chunks: list[str]) -> str:
             out += chunk
             continue
         if left in "([{/" or right in ".,!?;:)]}'\"%":
+            out += chunk
+            continue
+        # Mid-word BPE: "...bl" + "utter" / "CT" + "F" (also after Thai/CJK).
+        latin_tail = _trailing_latin_run(out)
+        if (
+            left.islower()
+            and right.islower()
+            and len(latin_tail) <= 3
+            and latin_tail.lower() not in _LATIN_SHORT_WORDS
+        ):
+            out += chunk
+            continue
+        if (
+            left.isupper()
+            and right.isupper()
+            and latin_tail.isalpha()
+            and latin_tail.isupper()
+            and len(latin_tail) <= 3
+            and len(chunk) <= 3
+            and chunk.isalpha()
+        ):
+            out += chunk
+            continue
+        if left.isalpha() and right.isdigit():
+            out += chunk
+            continue
+        if left.isdigit() and right.isalpha() and right.islower():
             out += chunk
             continue
         out += " " + chunk

@@ -261,5 +261,9 @@ def build_prompt(
         ),
         "",
         "Work in `/challenge/workspace`. Installed tools: `cat /challenge/TOOLS.txt`.",
+        (
+            "If a tool is missing, run it — Artemis auto-attaches the matching pack "
+            "(or `ctf-ensure-pack`). Do not `docker build` sandbox images."
+        ),
     ]
     return "\n".join(lines)

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from backend.sandbox.setup_bake import (
     DEFAULT_BAKE_PACKS,
     dockerfile_digest,
@@ -90,3 +92,50 @@ def test_ready_marker_digest_roundtrip(tmp_path: Path, monkeypatch):
         lambda pack_id: digest,
     )
     assert pack_cache_stale("mobile") is True
+
+
+def test_find_blutter_warm_apk_env_and_size(tmp_path: Path, monkeypatch):
+    from backend.sandbox import setup_bake
+
+    missing = tmp_path / "missing.apk"
+    monkeypatch.setenv("ARTEMIS_BLUTTER_WARM_APK", str(missing))
+    assert setup_bake.find_blutter_warm_apk() is None
+
+    sample = tmp_path / "PWNKnight.apk"
+    sample.write_bytes(b"x" * 1_000_001)
+    monkeypatch.setenv("ARTEMIS_BLUTTER_WARM_APK", str(sample))
+    assert setup_bake.find_blutter_warm_apk() == sample
+
+    monkeypatch.delenv("ARTEMIS_BLUTTER_WARM_APK", raising=False)
+    challenges = tmp_path / "challenges" / "mobile"
+    challenges.mkdir(parents=True)
+    apk = challenges / "demo.apk"
+    apk.write_bytes(b"y" * 600_000)
+    monkeypatch.setattr(
+        "backend.sandbox.donor_build.repo_root",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "backend.cache.cache_dir",
+        lambda: tmp_path / "cache-empty",
+    )
+    assert setup_bake.find_blutter_warm_apk() == apk
+
+
+@pytest.mark.asyncio
+async def test_warm_shared_blutter_skip_vm_compile(monkeypatch, tmp_path: Path):
+    from backend.sandbox import setup_bake
+
+    home = tmp_path / "blutter-home"
+    home.mkdir()
+    monkeypatch.setattr(
+        "backend.tool_router.pack_state_dir",
+        lambda *a, **k: home,
+    )
+    monkeypatch.setattr(
+        "backend.tool_router._blutter_vm_present",
+        lambda p: False,
+    )
+    msg = await setup_bake.warm_shared_blutter_state(skip_vm_compile=True)
+    assert "prepared" in msg.lower() or "still builds" in msg.lower()
+    assert "ARTEMIS_BLUTTER_WARM_APK" not in msg  # skip path does not hunt APK

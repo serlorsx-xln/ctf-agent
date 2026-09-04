@@ -156,8 +156,9 @@ Available tools:
 Paths:
 - Challenge: /challenge/distfiles (read-only), /challenge/workspace (writable)
 - Tool inventory: /challenge/TOOLS.txt (same as /tools.txt) — read this early
-- If a tool is missing, just run it — the sandbox may install it and retry.
-  Then re-read /tools.txt.
+- If a tool is missing, just run it — Artemis auto-attaches the matching pack
+  (or `ctf-ensure-pack <category>`) and retries. Then re-read /tools.txt.
+  Do not `docker build` sandbox images; packs come from the host cache.
 
 Start order: if the prompt requires connecting to a live service first, do that;
 otherwise `cat /challenge/TOOLS.txt`, then inspect challenge files and solve.
@@ -270,8 +271,9 @@ class CursorSolver:
             "# CTF Solver Workspace\n\n"
             "Use only the custom sandbox tools. Do not use host Shell/Read/Write.\n\n"
             "Start with: bash `cat /challenge/TOOLS.txt`\n"
-            "If a tool is missing, run it anyway — the sandbox may install it "
-            "automatically. Then re-read /tools.txt.\n"
+            "If a tool is missing, run it anyway — Artemis auto-attaches the "
+            "matching pack (or ctf-ensure-pack). Do not docker build images. "
+            "Then re-read /tools.txt.\n"
         )
         if skill_body:
             agents_md += "\n" + skill_body + "\n"

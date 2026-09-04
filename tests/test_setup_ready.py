@@ -91,3 +91,65 @@ def test_probe_not_ready_when_pack_paths_missing(monkeypatch, tmp_path: Path):
     st = probe_setup_status(required_packs=["pwn"])
     assert st.ready is False
     assert st.packs_missing == ["pwn"]
+
+
+class _Proc:
+    def __init__(self, rc: int = 0, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = rc
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_image_refs_add_latest_when_untagged():
+    from backend.sandbox.setup_ready import _image_refs
+
+    assert _image_refs("ctf-sandbox-core") == (
+        "ctf-sandbox-core:latest",
+        "ctf-sandbox-core",
+    )
+    assert _image_refs("ctf-sandbox-core:latest") == ("ctf-sandbox-core:latest",)
+
+
+def test_docker_image_exists_via_images_q_when_inspect_misses(monkeypatch):
+    """Engine 29: untagged inspect fails; ``docker images -q`` still sees :latest."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    def fake(args, *, timeout_s):  # noqa: ARG001
+        if args[:2] == ["images", "-q"]:
+            return _Proc(0, b"20fb29c7431d\n")
+        return _Proc(1, b"", b"Error response from daemon: No such image: ctf-sandbox-core\n")
+
+    monkeypatch.setattr("backend.sandbox.setup_ready._docker_run", fake)
+    from backend.sandbox.setup_ready import _docker_image_exists
+
+    assert _docker_image_exists("ctf-sandbox-core") is True
+
+
+def test_docker_image_exists_false_when_absent(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    def fake(args, *, timeout_s):  # noqa: ARG001
+        return _Proc(1, b"", b"No such image")
+
+    monkeypatch.setattr("backend.sandbox.setup_ready._docker_run", fake)
+    from backend.sandbox.setup_ready import _docker_image_exists
+
+    assert _docker_image_exists("no-such-image") is False
+
+
+def test_docker_image_exists_retries_timeout_then_lists(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    n = {"i": 0}
+
+    def fake(args, *, timeout_s):  # noqa: ARG001
+        n["i"] += 1
+        if n["i"] < 3:
+            return None
+        if args[:2] == ["images", "-q"]:
+            return _Proc(0, b"abc\n")
+        return _Proc(1)
+
+    monkeypatch.setattr("backend.sandbox.setup_ready._docker_run", fake)
+    from backend.sandbox.setup_ready import _docker_image_exists
+
+    assert _docker_image_exists("ctf-sandbox-core") is True

@@ -45,8 +45,8 @@ export const DialogOperatorDelivery = {
                 title: "Send now",
                 description:
                   who === "all agents"
-                    ? "Force-followup on every running agent (interrupt each turn, same session)."
-                    : `Force-followup on ${who} only (interrupt that turn, same session).`,
+                    ? "Interrupts every running agent’s current turn (work may restart; same session). Use when you need an immediate course change."
+                    : `Interrupts ${who}’s current turn (work may restart; same session). Use when you need an immediate course change.`,
                 onSelect: () => finish("steer"),
               },
               {
@@ -54,11 +54,11 @@ export const DialogOperatorDelivery = {
                 title: "Queue until idle",
                 description: soft
                   ? who === "all agents"
-                    ? "Does not interrupt. Each soft solver picks this up at the next turn boundary."
-                    : `Does not interrupt. ${who} picks this up at the next turn boundary.`
+                    ? "Waits — does not interrupt long builds/tools. Each soft solver picks this up at the next turn boundary."
+                    : `Waits — does not interrupt long builds/tools. ${who} picks this up at the next turn boundary.`
                   : who === "all agents"
-                    ? "Does not interrupt. Each agent picks this up when its turn goes idle."
-                    : `Does not interrupt. ${who} picks this up when its turn goes idle.`,
+                    ? "Waits — does not interrupt long builds/tools. Each agent picks this up when its turn goes idle."
+                    : `Waits — does not interrupt long builds/tools. ${who} picks this up when its turn goes idle.`,
                 onSelect: () => finish("queue"),
               },
             ]}

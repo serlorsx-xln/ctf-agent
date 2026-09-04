@@ -380,7 +380,8 @@ CTF_PACK_PREFETCH=1
    ไม่แยกตาม `ses_…`) bind RW เข้า container ทุกตัว จึงคอมไพล์ครั้งเดียวต่อ Dart version
    หลาย agent ที่รันพร้อมกัน share cache นี้ จึง serialize ด้วย `flock` ใน wrapper กัน build ชนกัน
    ลบ cache ก้อนนี้ = กลับไปคอมไพล์ใหม่ (ตั้ง `CTF_PACK_STATE` เพื่อย้ายที่เก็บ)
-   Warm packs ล่วงหน้า: `artemis setup` (Phase 3)
+   Warm packs ล่วงหน้า: `artemis setup` (Phase 3) — เมื่อมี sample Flutter APK
+   (`ARTEMIS_BLUTTER_WARM_APK` หรือใต้ `challenges/`) จะ prebuild Dart VM ด้วย
 
 ---
 

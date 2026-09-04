@@ -344,6 +344,19 @@ def test_join_streamed_parts_keeps_thai_and_identifiers_intact():
     assert "รับครบ" in ident
 
 
+def test_join_tiny_no_midword_spaces_for_tools():
+    """Hold Q&A / live feed must not split blutter / jadx / CTF mid-token."""
+    from backend.writeup import _join_tiny_stream_chunks
+
+    assert _join_tiny_stream_chunks(["bl", "utter"]) == "blutter"
+    assert _join_tiny_stream_chunks(["jad", "x"]) == "jadx"
+    assert _join_tiny_stream_chunks(["CT", "F"]) == "CTF"
+    assert "bl utter" not in _join_tiny_stream_chunks(["ใช้", "bl", "utter", "กับ", "jad", "x"])
+    spaced = _join_tiny_stream_chunks(["A", "Windows", "reverse", "challenge"])
+    assert "Windows" in spaced
+    assert "A Windows" in spaced or spaced.startswith("A Windows")
+
+
 def test_fragmented_accept_spam_still_rejected():
     from backend.writeup import is_usable_narrative
 

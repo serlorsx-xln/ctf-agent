@@ -179,7 +179,8 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
         Docker L0 image + pack bake are required before solving. You cannot load a
         challenge until Install finishes. Prefer answering Yes to the terminal
         setup prompt when launching `artemis` (before this UI). For maximum solve
-        speed later, run `artemis setup` once (adds warm runtime images).
+        speed later, run `artemis setup` once (adds warm runtime images and can
+        prebuild the blutter Dart VM when a sample Flutter APK is available).
       </text>
       <Show when={message()}>
         <text fg={theme.warning} wrapMode="word">
