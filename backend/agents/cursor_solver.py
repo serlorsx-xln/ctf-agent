@@ -66,6 +66,7 @@ from backend.solver_base import (
     SolverResult,
 )
 from backend.tools.core import (
+    VIEW_IMAGE_INPUT_SCHEMA,
     VISION_BASH_FALLBACK,
     do_bash,
     do_list_files,
@@ -75,6 +76,7 @@ from backend.tools.core import (
     do_webhook_create,
     do_webhook_get_requests,
     do_write_file,
+    view_image_arg,
 )
 from backend.tracing import SolverTracer
 
@@ -87,6 +89,10 @@ def _tool_args_preview(name: str, args: Mapping[str, Any]) -> str:
         cmd = args.get("command")
         if isinstance(cmd, str) and cmd.strip():
             return cmd.strip()
+    if name == "view_image":
+        image = view_image_arg(args)
+        if image:
+            return image
     if name in ("read_file", "write_file", "list_files"):
         path = args.get("path")
         if path:
@@ -150,7 +156,7 @@ Available tools:
 - submit_flag — submit a recovered flag (operator confirms; CORRECT = done)
 - web_fetch — fetch a URL from the host network
 - webhook_create / webhook_get_requests — out-of-band HTTP callbacks
-- view_image — inspect an image file in the sandbox
+- view_image — inspect an image file in the sandbox (filename or path)
 - notify_coordinator — send a strategic note to the coordinator
 
 Paths:
@@ -393,7 +399,7 @@ class CursorSolver:
                         text = _image_tool_result(
                             image_bytes,
                             mime_type,
-                            label=f"view_image {args.get('filename', '')}".strip(),
+                            label=f"view_image {view_image_arg(args)}".strip(),
                         )
                         preview = f"image:{mime_type}:{len(image_bytes)}b"
                     except Exception as img_err:
@@ -631,7 +637,7 @@ class CursorSolver:
                 "view_image",
                 args,
                 lambda: do_view_image(
-                    self.sandbox, args.get("filename", ""), use_vision=self.use_vision
+                    self.sandbox, view_image_arg(args), use_vision=self.use_vision
                 ),
             )
 
@@ -742,11 +748,7 @@ class CursorSolver:
             ),
             "view_image": CustomTool(
                 description="View an image file from the sandbox for visual/steg analysis.",
-                input_schema={
-                    "type": "object",
-                    "properties": {"filename": {"type": "string"}},
-                    "required": ["filename"],
-                },
+                input_schema=VIEW_IMAGE_INPUT_SCHEMA,
                 execute=view_image,
             ),
             "notify_coordinator": CustomTool(

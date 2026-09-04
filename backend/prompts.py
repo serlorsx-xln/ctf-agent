@@ -97,8 +97,13 @@ def has_binary_distfiles(names: list[str]) -> bool:
     return False
 
 
+#: Tags / suffixes that justify naming heavy crypto binaries (sage, RsaCtfTool).
+_CRYPTO_HINT_TAGS = frozenset({"crypto", "cryptography", "rsa", "ecc"})
+_CRYPTO_HINT_SUFFIXES = frozenset({".sage", ".pem", ".der"})
+
+
 def parse_tag_labels(description: str) -> list[str]:
-    """Lift a ``Tags:`` / ``Category:`` line for the header only — never gates hints."""
+    """Lift a ``Tags:`` / ``Category:`` line for the header and crypto-tool gating."""
     tags: list[str] = []
     for match in _TAG_LINE.finditer(description or ""):
         for raw in re.split(r"[,/|]", match.group(1)):
@@ -106,6 +111,23 @@ def parse_tag_labels(description: str) -> list[str]:
             if tag and tag not in tags:
                 tags.append(tag)
     return tags
+
+
+def wants_crypto_tool_names(
+    description: str = "",
+    distfile_names: list[str] | None = None,
+) -> bool:
+    """True when the prompt may name sage / RsaCtfTool / cado-nfs.
+
+    File-only forensics/rev/misc must not advertise those binaries — first use
+    rematerializes the crypto pack and can stall a solve that never needed it.
+    """
+    tags = set(parse_tag_labels(description or ""))
+    if tags & _CRYPTO_HINT_TAGS:
+        return True
+    return any(
+        Path(name).suffix.lower() in _CRYPTO_HINT_SUFFIXES for name in distfile_names or []
+    )
 
 
 def list_distfiles(challenge_dir: str) -> list[str]:
@@ -270,6 +292,8 @@ def build_prompt(
         (
             "   - Crypto: identify algorithm, weak keys, nonce reuse, padding oracles. "
             "For RSA: use `RsaCtfTool`, sage ECM, or `cado-nfs`."
+            if wants_crypto_tool_names(meta.description or "", distfile_names)
+            else "   - Crypto: identify algorithm, weak keys, nonce reuse, padding oracles."
         ),
         "   - Pwn: `stty raw -echo` before launching vulnerable binaries over nc.",
         "4. **Ignore placeholder flags** — `CTF{flag}`, `CTF{placeholder}` are not real flags.",

@@ -39,7 +39,8 @@ FULL_BAKE_PACKS: tuple[str, ...] = (
     "linux",
 )
 
-# TUI Install / launch gate waits for Docker + L0 + this pack set.
+# Status inventory on setup_status (on-demand attach). Does **not** block TUI
+# load — ready is Docker + L0 only. ``artemis setup`` still bakes this set.
 GATE_REQUIRED_PACKS: tuple[str, ...] = FULL_BAKE_PACKS
 
 # Alias kept for older imports / docs; default bake is the full set.
@@ -78,6 +79,40 @@ def pack_cache_incomplete(pack_id: str) -> bool:
         return False
     cache = pack_cache_dir(pack_id)
     return any(not (cache / rel).exists() for rel in sentinels)
+
+
+def pack_cache_trees_present(pack_id: str) -> bool:
+    """True when donor extract trees look usable (sentinels + PackSpec paths)."""
+    from backend.tool_router import PACK_SPECS, pack_cache_dir
+
+    spec = PACK_SPECS.get(pack_id)
+    if not spec:
+        return False
+    cache = pack_cache_dir(pack_id)
+    if not cache.is_dir():
+        return False
+    if pack_cache_incomplete(pack_id):
+        return False
+    return all((cache / p.lstrip("/")).exists() for p in spec.paths)
+
+
+def restamp_pack_ready_if_complete(pack_id: str) -> bool:
+    """Rewrite ``.ready`` when trees are complete but ``pack_source_digest`` moved.
+
+    Avoids rematerialize / donor rebuild just because a Dockerfile comment or
+    recipe fingerprint changed. Returns True when the cache is usable.
+    """
+    from backend.tool_router import pack_cache_dir
+
+    cache = pack_cache_dir(pack_id)
+    if not (cache / ".ready").is_file():
+        return False
+    if not pack_cache_trees_present(pack_id):
+        return False
+    if pack_cache_stale(pack_id):
+        write_pack_ready_marker(cache, pack_id)
+        logger.info("Pack %s: restamped .ready (complete trees, digest moved)", pack_id)
+    return True
 
 
 def invalidate_pack_cache(pack_id: str) -> None:
@@ -288,6 +323,7 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
     if pack_id not in PACK_SPECS:
         return False, f"Unknown pack: {pack_id}"
     cache = pack_cache_dir(pack_id)
+    restamp_pack_ready_if_complete(pack_id)
     if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):
         if pack_cache_incomplete(pack_id):
             logger.warning(
@@ -327,6 +363,7 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
     try:
         # Cross-process: two `artemis setup` runs bake the same pack serially.
         fd = await asyncio.to_thread(_acquire_pack_flock, pack_id)
+        restamp_pack_ready_if_complete(pack_id)
         if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):
             if pack_cache_incomplete(pack_id):
                 logger.warning(

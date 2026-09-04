@@ -35,17 +35,24 @@ def test_binary_detection():
     assert not has_binary_distfiles(["capture.pcapng"])
 
 
-def test_tag_labels_are_display_only():
+def test_tag_labels_are_display_only_except_rsa_tools():
     assert parse_tag_labels("Tags: crypto") == ["crypto"]
     assert parse_tag_labels("Category: Reverse\nTags: rev,pwn") == ["reverse", "rev", "pwn"]
-    # Same files, opposite tags — tutoring list must stay identical (minus header).
+    # Image/web/pwn tutoring stays; sage/RsaCtfTool only when crypto is signaled.
     a = prompt(["chall.py"], desc="Tags: crypto")
     b = prompt(["chall.py"], desc="Tags: rev,pwn")
     assert GHIDRA not in a and GHIDRA not in b
     assert VIEW_IMAGE in a and VIEW_IMAGE in b
     assert WEB in a and WEB in b
-    assert CRYPTO in a and CRYPTO in b
+    assert CRYPTO in a and CRYPTO not in b
     assert PWN in a and PWN in b
+
+
+def test_rsa_tools_absent_without_crypto_signal():
+    assert CRYPTO not in prompt(["notes.txt"], desc="Look at the dump.")
+    assert CRYPTO not in prompt(["pic.png"], desc="Tags: forensics")
+    assert CRYPTO in prompt(["rsa.sage"], desc="factor me")
+    assert CRYPTO in prompt(["out.txt"], desc="Tags: cryptography")
 
 
 def test_script_only_challenge_skips_ghidra_but_keeps_veria_tutoring():

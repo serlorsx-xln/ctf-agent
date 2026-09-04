@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -447,6 +448,35 @@ VISION_BASH_FALLBACK = (
     "Use bash tools on the file instead: steghide, zsteg, exiftool, strings, xxd, binwalk."
 )
 
+# Cursor/Codex models often pass `path` (same as read_file/list_files) instead of
+# `filename`. Accept either so view_image does not fail on a valid JPEG.
+VIEW_IMAGE_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "filename": {
+            "type": "string",
+            "description": "Image name or absolute sandbox path",
+        },
+        "path": {
+            "type": "string",
+            "description": "Same as filename; models often pass path like other file tools",
+        },
+    },
+}
+
+
+def view_image_arg(args: Mapping[str, Any] | None, filename: str = "") -> str:
+    """Resolve view_image input from filename, path, or a raw string."""
+    if isinstance(filename, str) and filename.strip():
+        return filename.strip()
+    if not args:
+        return ""
+    for key in ("filename", "path", "file", "image"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
 
 def _has_valid_magic(data: bytes, mime_type: str) -> bool:
     magic = IMAGE_MAGIC.get(mime_type)
@@ -463,6 +493,9 @@ async def do_view_image(sandbox, filename: str, use_vision: bool = True) -> tupl
     ``VISION_BASH_FALLBACK`` rather than blocking on a model allowlist.
     """
     _ = use_vision  # no allowlist gate — try deliver, else bash tools
+    filename = (filename or "").strip()
+    if not filename:
+        return "view_image needs filename or path (e.g. /challenge/distfiles/photo.jpg)"
     # Strip leading path if model passes full container path
     basename = Path(filename).name
     ext = Path(basename).suffix.lower()

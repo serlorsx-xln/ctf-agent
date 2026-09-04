@@ -1,8 +1,8 @@
 """Pre-TUI launch setup gate — terminal prompt + live logs, never opens the TUI.
 
-Called by ``chassis/bin/artemis`` before Bun/TUI starts. If Docker, L0, or
-the default Jeopardy pack set is missing, asks whether to run full setup.
-Declining continues with whatever is installed (TUI Install may still block).
+Called by ``chassis/bin/artemis`` before Bun/TUI starts. If Docker or L0 is
+missing, asks whether to run full setup. Pack caches attach on demand and
+do not block the gate. Declining continues with whatever is installed.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import TextIO
 
 @dataclass
 class LaunchSetupReport:
-    """What is missing before the first-run gate (full pack set + optional warm)."""
+    """What is missing before the first-run gate (Docker + L0; packs optional)."""
 
     gate_ready: bool
     docker_ok: bool
@@ -34,7 +34,10 @@ class LaunchSetupReport:
         lines.append(f"  Docker: {'ok' if self.docker_ok else 'not reachable'}")
         lines.append(f"  L0 core (ctf-sandbox-core): {'ok' if self.core_image else 'missing'}")
         if self.packs_missing:
-            lines.append(f"  Pack caches (required): {', '.join(self.packs_missing)}")
+            lines.append(
+                f"  Pack caches (on demand): {', '.join(self.packs_missing)} "
+                "— first use of those tools may extract/bake"
+            )
         else:
             lines.append("  Pack caches: ok")
         if self.warm_missing:

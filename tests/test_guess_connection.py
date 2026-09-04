@@ -41,3 +41,20 @@ def test_real_http_endpoint() -> None:
         "https://chal.example.com:8443/login"
     )
 
+
+def test_skips_nc_on_ctftime() -> None:
+    assert guess_connection("see writeup then nc ctftime.org 443") == ""
+
+
+def test_doc_nc_does_not_beat_lab_url() -> None:
+    assert guess_connection(
+        "https://lab.example:1337 and nc archive.ooo 9999"
+    ) == "https://lab.example:1337"
+
+
+def test_prefers_real_nc_over_doc_nc() -> None:
+    assert (
+        guess_connection("nc ctftime.org 443 then nc chall.example.com 31337")
+        == "nc chall.example.com 31337"
+    )
+

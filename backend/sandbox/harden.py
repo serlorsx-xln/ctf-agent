@@ -134,9 +134,13 @@ def filter_lab_probe_hosts(hosts: list[str], text: str = "") -> list[str]:
     Always keep ``*.htb`` / ``*.thm`` / ``*.lab`` and hosts from ``nc host port``.
     Other RFC1918 addresses require ``CTF_ALLOW_LAB_PROBE=1`` or ``CTF_LAB_HOSTS``.
     """
+    from backend.challenge import is_doc_host
+
     nc_hosts: set[str] = set()
     for m in re.finditer(r"\bnc\s+([A-Za-z0-9._-]+)\s+(\d{2,5})\b", text or "", flags=re.I):
-        nc_hosts.add(m.group(1).strip().rstrip(".").lower())
+        host = m.group(1).strip().rstrip(".").lower()
+        if not is_doc_host(host):
+            nc_hosts.add(host)
     allow = _lab_hosts_allowlist()
     allow_rfc = _allow_raw_rfc1918_probe()
     out: list[str] = []
@@ -153,7 +157,7 @@ def filter_lab_probe_hosts(hosts: list[str], text: str = "") -> list[str]:
         elif _is_rfc1918_host(key):
             keep = allow_rfc
         else:
-            keep = True
+            keep = not is_doc_host(key)
         if keep:
             seen.add(key)
             out.append(host)

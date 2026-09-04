@@ -21,7 +21,7 @@ def _materialize_pack_cache(root: Path, pack_id: str) -> None:
             dest.write_text("sentinel\n", encoding="utf-8")
 
 
-def test_probe_default_gate_requires_full_packs(monkeypatch):
+def test_probe_ready_with_l0_even_if_packs_missing(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
     monkeypatch.setattr("backend.sandbox.setup_ready._docker_ok", lambda: True)
     monkeypatch.setattr(
@@ -31,11 +31,12 @@ def test_probe_default_gate_requires_full_packs(monkeypatch):
     monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
     monkeypatch.setattr("backend.sandbox.packs._pack_cache_is_ready", lambda pack_id: False)
     st = probe_setup_status()
-    assert st.ready is False
+    assert st.ready is True
     assert st.core_image is True
     assert "pwn" in st.packs_missing
     assert "crypto" in st.packs_missing
-    assert "Pack caches not baked" in st.message
+    assert "on demand" in st.message
+    assert "Pack caches not baked" not in st.message
 
 
 def test_probe_reports_missing_without_docker(monkeypatch, tmp_path: Path):
@@ -108,8 +109,9 @@ def test_probe_not_ready_when_pack_paths_missing(monkeypatch, tmp_path: Path):
     (d / ".ready").write_text("ok\n", encoding="utf-8")
     monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
     st = probe_setup_status(required_packs=["pwn"])
-    assert st.ready is False
+    assert st.ready is True
     assert st.packs_missing == ["pwn"]
+    assert "on demand" in st.message
 
 
 class _Proc:

@@ -31,6 +31,7 @@ from backend.output_types import solver_output_json_schema
 from backend.prompts import ChallengeMeta, build_prompt
 from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tools.core import (
+    VIEW_IMAGE_INPUT_SCHEMA,
     do_bash,
     do_list_files,
     do_read_file,
@@ -39,6 +40,7 @@ from backend.tools.core import (
     do_webhook_create,
     do_webhook_get_requests,
     do_write_file,
+    view_image_arg,
 )
 from backend.tracing import SolverTracer
 
@@ -136,11 +138,7 @@ SANDBOX_TOOLS = [
     {
         "name": "view_image",
         "description": "View an image file from the sandbox for visual/steg analysis.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"filename": {"type": "string"}},
-            "required": ["filename"],
-        },
+        "inputSchema": VIEW_IMAGE_INPUT_SCHEMA,
     },
     {
         "name": "notify_coordinator",
@@ -619,7 +617,7 @@ class CodexSolver:
             return await do_webhook_get_requests(args.get("uuid", ""))
         elif name == "view_image":
             return await do_view_image(
-                self.sandbox, args.get("filename", ""), use_vision=self.use_vision
+                self.sandbox, view_image_arg(args), use_vision=self.use_vision
             )
         elif name == "notify_coordinator":
             if self.notify_coordinator:

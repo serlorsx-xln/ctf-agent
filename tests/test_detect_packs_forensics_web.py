@@ -73,7 +73,8 @@ def test_wasm_prefetch_web(tmp_path: Path):
     assert "web" in detect_packs(tmp_path)
 
 
-def test_jpg_prefetch_steg_even_with_crypto_tag(tmp_path: Path):
+def test_jpg_does_not_prefetch_steg(tmp_path: Path):
+    """A JPEG is not enough — strings/exif live on L0; steg attaches on demand."""
     dist = tmp_path / "distfiles"
     dist.mkdir()
     (dist / "SecretOrSeeReal.jpg").write_bytes(b"\xff\xd8\xff\xd9")
@@ -82,8 +83,19 @@ def test_jpg_prefetch_steg_even_with_crypto_tag(tmp_path: Path):
         encoding="utf-8",
     )
     packs = detect_packs(tmp_path)
-    assert "steg" in packs
+    assert "steg" not in packs
     assert "crypto" in packs
+
+
+def test_tags_stego_still_prefetch_steg(tmp_path: Path):
+    dist = tmp_path / "distfiles"
+    dist.mkdir()
+    (dist / "hidden.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "challenge.txt").write_text(
+        "Hidden\n\nTags: stego\n\nRecover the flag.\n",
+        encoding="utf-8",
+    )
+    assert "steg" in detect_packs(tmp_path)
 
 
 def test_xlsm_prefetch_forensics(tmp_path: Path):

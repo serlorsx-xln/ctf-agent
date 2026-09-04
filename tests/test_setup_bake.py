@@ -12,7 +12,9 @@ from backend.sandbox.setup_bake import (
     dockerfile_digest,
     pack_cache_incomplete,
     pack_cache_stale,
+    pack_cache_trees_present,
     probe_docker_env,
+    restamp_pack_ready_if_complete,
     write_pack_ready_marker,
 )
 
@@ -95,13 +97,76 @@ def test_ready_marker_digest_roundtrip(tmp_path: Path, monkeypatch):
     )
     assert pack_cache_stale("mobile") is True
 
-    # Legacy bare ``ok`` must rematerialize once a digest exists.
+    # Legacy bare ``ok`` is stale until restamp (when trees are complete).
     (cache / ".ready").write_text("ok\n", encoding="utf-8")
     monkeypatch.setattr(
         "backend.sandbox.setup_bake.pack_source_digest",
         lambda pack_id: digest,
     )
     assert pack_cache_stale("mobile") is True
+
+
+def _pwn_trees(cache: Path) -> None:
+    for rel in ("root/.gdbinit-gef.py", "root/.gdbinit"):
+        dest = cache / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("x\n", encoding="utf-8")
+
+
+def test_restamp_complete_stale_pack(monkeypatch, tmp_path: Path):
+    cache = tmp_path / "pwn" / "arm64"
+    cache.mkdir(parents=True)
+    _pwn_trees(cache)
+    (cache / ".ready").write_text("ok olddigestolddige\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.tool_router.pack_cache_dir",
+        lambda pack_id: cache,
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.setup_bake.pack_source_digest",
+        lambda pack_id: "newdigestnewdige",
+    )
+    assert pack_cache_trees_present("pwn") is True
+    assert pack_cache_stale("pwn") is True
+    assert restamp_pack_ready_if_complete("pwn") is True
+    assert pack_cache_stale("pwn") is False
+    assert (cache / ".ready").read_text(encoding="utf-8").strip() == "ok newdigestnewdige"
+
+
+def test_restamp_refuses_incomplete_trees(monkeypatch, tmp_path: Path):
+    cache = tmp_path / "pwn" / "arm64"
+    cache.mkdir(parents=True)
+    (cache / ".ready").write_text("ok olddigestolddige\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.tool_router.pack_cache_dir",
+        lambda pack_id: cache,
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.setup_bake.pack_source_digest",
+        lambda pack_id: "newdigestnewdige",
+    )
+    assert pack_cache_trees_present("pwn") is False
+    assert restamp_pack_ready_if_complete("pwn") is False
+    assert (cache / ".ready").read_text(encoding="utf-8").strip() == "ok olddigestolddige"
+
+
+def test_pack_cache_is_ready_restamps_stale(monkeypatch, tmp_path: Path):
+    from backend.sandbox.packs import _pack_cache_is_ready
+
+    cache = tmp_path / "pwn" / "arm64"
+    cache.mkdir(parents=True)
+    _pwn_trees(cache)
+    (cache / ".ready").write_text("ok olddigestolddige\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.tool_router.pack_cache_dir",
+        lambda pack_id: cache,
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.setup_bake.pack_source_digest",
+        lambda pack_id: "newdigestnewdige",
+    )
+    assert _pack_cache_is_ready("pwn") is True
+    assert (cache / ".ready").read_text(encoding="utf-8").strip() == "ok newdigestnewdige"
 
 
 def test_find_blutter_warm_apk_env_and_size(tmp_path: Path, monkeypatch):

@@ -1,0 +1,3 @@
+Warmup encoding challenge.
+
+cipher.txt is a single line of standard base64. Decode it.

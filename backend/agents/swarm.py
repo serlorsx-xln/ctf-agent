@@ -1175,6 +1175,20 @@ class ChallengeSwarm:
         ):
             self.hold_active = False
             return
+        # Unattended eval / CI: writeup already emitted — do not wait for Esc.
+        settings = self.settings
+        eval_out = getattr(settings, "eval_out", None)
+        if isinstance(eval_out, str) and eval_out.strip():
+            self.hold_active = False
+            return
+        wall = getattr(settings, "eval_max_wall_s", None)
+        usd = getattr(settings, "eval_max_usd", None)
+        if isinstance(wall, (int, float)) and not isinstance(wall, bool) and float(wall) > 0:
+            self.hold_active = False
+            return
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and float(usd) > 0:
+            self.hold_active = False
+            return
         from backend.agents.live_log import emit_line
         from backend.models import agent_display_key
         from backend.operator_inbox import drain_operator_notes_to_bus
@@ -1204,6 +1218,17 @@ class ChallengeSwarm:
                 winner_key = str(runner_id).rsplit("/", 1)[-1] or None
         try:
             while not self.release_event.is_set():
+                ev = getattr(self, "_eval", None)
+                if ev is not None:
+                    cost_now = (
+                        _tracker_cost_usd(self.cost_tracker)
+                        if self.cost_tracker is not None
+                        else None
+                    )
+                    if ev.budget_exceeded(self.settings, cost_now):
+                        emit_line("[artemis] hold — eval budget reached, releasing")
+                        self.release_event.set()
+                        break
                 try:
                     # Never claim with claimer=None on a multi-agent hold — that
                     # would vacuum sibling-scoped queue leftovers.

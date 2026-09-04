@@ -506,17 +506,8 @@ _FORENSICS_NAMES = {"memory.dmp", "memdump.raw", "core.dump"}
 # Intentionally omit .js alone (Node/misc challenges) to avoid noisy web prefetch;
 # .wasm is a strong signal for browser/WASM challenges (needs nodejs/wabt).
 _WEB_SUFFIXES = {".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".wasm"}
-# Image handouts usually mean stego / OCR — prefetch even if Tags: say crypto.
-_STEG_SUFFIXES = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".webp",
-    ".tiff",
-    ".tif",
-}
+# Images are not a steg prefetch signal — strings/exif on a JPEG is L0.
+# Attach the steg pack on Tags: steg/stego/steganography or first tool use.
 _DOTNET_HINT_SUFFIXES = {".runtimeconfig.json", ".deps.json"}
 _ML_SUFFIXES = {".pt", ".pth", ".onnx", ".h5", ".keras", ".safetensors"}
 _CONTAINER_NAMES = {
@@ -1099,9 +1090,6 @@ def detect_packs(challenge_dir: str | Path) -> list[str]:
 
         if suffix in _WEB_SUFFIXES:
             packs.add("web")
-
-        if suffix in _STEG_SUFFIXES:
-            packs.add("steg")
 
         if any(name.endswith(s) for s in _DOTNET_HINT_SUFFIXES) or (
             suffix in {".dll", ".exe"} and _looks_like_dotnet(path)

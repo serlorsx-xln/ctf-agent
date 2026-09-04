@@ -108,12 +108,20 @@ def test_lab_probe_keeps_nc_rfc1918(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "10.129.1.5" in filtered
 
 
-def test_eval_usd_unknown_fails_closed() -> None:
+def test_lab_probe_drops_writeup_nc_hosts() -> None:
+    text = "nc ctftime.org 443\nhttps://lab.example:1337\n"
+    hosts, _ports = parse_challenge_network_hints(text)
+    filtered = filter_lab_probe_hosts(hosts, text)
+    assert "ctftime.org" not in {h.lower() for h in filtered}
+
+
+def test_eval_usd_unknown_fails_open() -> None:
     state = EvalRunState()
     s = Settings()
     s.eval_max_usd = 1.5
-    assert state.budget_exceeded(s, None) == EVAL_BUDGET
+    assert state.budget_exceeded(s, None) is None
     assert state.budget_exceeded(s, 0.5) is None
+    assert state.budget_exceeded(s, 1.5) == EVAL_BUDGET
 
 
 def test_coordinator_resolves_runner_id() -> None:

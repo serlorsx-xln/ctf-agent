@@ -1,0 +1,1 @@
+cipher.hex is hex-encoded ciphertext. XOR every byte with 0x37. No remote service.

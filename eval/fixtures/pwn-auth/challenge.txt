@@ -1,0 +1,1 @@
+Local binary only. Overflow the name buffer so the adjacent auth word is non-zero. The program prints the flag.

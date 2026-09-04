@@ -155,25 +155,34 @@ def _is_doc_url(url: str) -> bool:
     return any(h in low for h in _DOC_HOST_FRAGMENTS)
 
 
+def is_doc_host(host: str) -> bool:
+    """True when a hostname looks like a writeup/archive site, not the lab."""
+    low = (host or "").strip().rstrip(".").lower()
+    if not low:
+        return False
+    return any(h in low for h in _DOC_HOST_FRAGMENTS)
+
+
 def guess_connection(text: str) -> str:
     """Extract an endpoint mention from pasted text — no site-specific assumptions."""
     if not text:
         return ""
     # Prefer explicit connect/nc/ssh lines over incidental Source:/writeup URLs.
-    m = _NC_LINE.search(text)
-    if m:
-        return f"nc {m.group(1)} {m.group(2)}"
-    m = _SSH_LINE.search(text)
-    if m:
+    # Writeup ``nc ctftime.org 443`` examples must not become FIRST ACTION.
+    for m in _NC_LINE.finditer(text):
+        if not is_doc_host(m.group(1)):
+            return f"nc {m.group(1)} {m.group(2)}"
+    for m in _SSH_LINE.finditer(text):
+        if is_doc_host(m.group(2)):
+            continue
         user, host, port = m.group(1), m.group(2), m.group(3)
         target = f"{user}@{host}" if user else host
         if port:
             return f"ssh {target} -p{port}"
         return f"ssh {target}"
-    m = _CONNECT_AT.search(text)
-    if m:
-        # Protocol undecided — agent chooses from context.
-        return f"{m.group(1)}:{m.group(2)}"
+    for m in _CONNECT_AT.finditer(text):
+        if not is_doc_host(m.group(1)):
+            return f"{m.group(1)}:{m.group(2)}"
     for m in _HTTP_URL.finditer(text):
         url = m.group(0).rstrip(".,;)")
         # Scope lines like https://lab.example/* → base URL

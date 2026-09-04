@@ -1,0 +1,1 @@
+A memory-ish dump is attached. The interesting string is printable ASCII.

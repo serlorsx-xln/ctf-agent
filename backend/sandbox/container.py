@@ -112,6 +112,8 @@ class DockerSandbox:
     _challenge_ports: list[int] = field(default_factory=list, repr=False)
     # Host temp dirs to delete on stop (e.g. empty distfiles bind).
     _temp_dirs: list[str] = field(default_factory=list, repr=False)
+    # Monotonic clock at start() — eval wall must apply during pack bootstrap.
+    _started_monotonic: float = field(default=0.0, repr=False)
 
     @property
     def container_id(self) -> str:
@@ -229,9 +231,42 @@ class DockerSandbox:
             "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}],
         }
 
+    def _eval_wall_exceeded(self) -> bool:
+        """True when ``settings.eval_max_wall_s`` has elapsed since ``start()``."""
+        settings = self.settings
+        if settings is None:
+            return False
+        max_wall = getattr(settings, "eval_max_wall_s", None)
+        if max_wall is None:
+            return False
+        try:
+            limit = float(max_wall)
+        except (TypeError, ValueError):
+            return False
+        if limit <= 0 or self._started_monotonic <= 0:
+            return False
+        return (time.monotonic() - self._started_monotonic) >= limit
+
+    def _skip_cold_prefetch_for_eval(self, pack: str) -> bool:
+        """Eval must not spend the wall on cold apt/pip (steg/web/ghidra).
+
+        Warm/donor L0 already has those tools — finalize only. Otherwise attach
+        on first use so the solver still has time to work on L0 (strings, etc.).
+        """
+        settings = self.settings
+        if settings is None:
+            return False
+        wall = getattr(settings, "eval_max_wall_s", None)
+        if not isinstance(wall, (int, float)) or isinstance(wall, bool) or float(wall) <= 0:
+            return False
+        from backend.tool_router import l0_already_provides_pack
+
+        return not l0_already_provides_pack(self.image, pack)
+
     async def start(self) -> None:
         sem = ensure_start_semaphore()
         async with sem:
+            self._started_monotonic = time.monotonic()
             self._docker = _docker_client()
 
             from backend.platform_paths import docker_volume_path, ensure_docker_bind_dir
@@ -403,6 +438,19 @@ class DockerSandbox:
                 # Refresh /tools.txt once after all packs (not per-pack).
                 if prefetch:
                     async def _prefetch_one(pack: str) -> None:
+                        if self._eval_wall_exceeded():
+                            logger.warning(
+                                "Skipping prefetch pack %s — eval wall reached",
+                                pack,
+                            )
+                            return
+                        if self._skip_cold_prefetch_for_eval(pack):
+                            logger.warning(
+                                "Skipping cold prefetch pack %s — eval wall set; "
+                                "attach on first use",
+                                pack,
+                            )
+                            return
                         pack_t0 = time.monotonic()
                         from backend.tool_router import l0_already_provides_pack
 
@@ -423,15 +471,26 @@ class DockerSandbox:
                             (time.monotonic() - pack_t0) * 1000,
                         )
 
-                    results = await asyncio.gather(
-                        *[_prefetch_one(p) for p in prefetch],
-                        return_exceptions=True,
-                    )
-                    for item in results:
-                        if isinstance(item, BaseException):
-                            logger.warning("Pack prefetch failed: %s", item)
-                            if strict:
-                                raise item
+                    wall_cap = bool(getattr(self.settings, "eval_max_wall_s", None))
+                    if wall_cap:
+                        # Sequential so a long apt cannot start after the wall.
+                        for pack in prefetch:
+                            try:
+                                await _prefetch_one(pack)
+                            except Exception as exc:
+                                logger.warning("Pack prefetch failed: %s", exc)
+                                if strict:
+                                    raise
+                    else:
+                        results = await asyncio.gather(
+                            *[_prefetch_one(p) for p in prefetch],
+                            return_exceptions=True,
+                        )
+                        for item in results:
+                            if isinstance(item, BaseException):
+                                logger.warning("Pack prefetch failed: %s", item)
+                                if strict:
+                                    raise item
                     await self.refresh_tools_doc()
             except Exception:
                 if self._host_proxy_port is not None:
@@ -812,6 +871,16 @@ class DockerSandbox:
             return "Nothing to install."
         if pack_id not in PACK_SPECS:
             return "Those tools are not available in this environment."
+        if self._eval_wall_exceeded():
+            return (
+                "Eval wall reached — not attaching more tool packs. "
+                "Use tools already in the sandbox."
+            )
+        if self._skip_cold_prefetch_for_eval(pack_id):
+            return (
+                "Eval will not cold-install extra tool packs. "
+                "Use tools already in the sandbox (strings, file, python3)."
+            )
 
         # Fast path + decide whether long host-side work is needed — under lock.
         needs_cache = False
@@ -834,10 +903,17 @@ class DockerSandbox:
         # Donor build + host-cache extract can take many minutes — do them
         # outside the sandbox lock so bash/read/write stay responsive.
         from backend.sandbox.donor_build import DONOR_BUILD_SPECS, ensure_donor_image
+        from backend.sandbox.setup_bake import (
+            pack_cache_trees_present,
+            restamp_pack_ready_if_complete,
+        )
         from backend.tool_router import l0_already_provides_pack
 
         if pack_id in DONOR_BUILD_SPECS and not l0_already_provides_pack(self.image, pack_id):
-            await ensure_donor_image(pack_id)
+            if pack_cache_trees_present(pack_id):
+                restamp_pack_ready_if_complete(pack_id)
+            else:
+                await ensure_donor_image(pack_id)
         if needs_cache:
             try:
                 await self._materialize_pack_cache(pack_id)

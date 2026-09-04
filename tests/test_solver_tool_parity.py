@@ -47,3 +47,13 @@ def test_preamble_documents_every_tool_it_binds():
     """A bound-but-undocumented tool goes unused; a documented-but-unbound one errors."""
     for name in _cursor_tool_names():
         assert name in SOLVER_PREAMBLE, f"{name} missing from the Cursor preamble"
+
+
+def test_cursor_view_image_schema_accepts_path():
+    solver = CursorSolver.__new__(CursorSolver)
+    solver.sandbox = None
+    solver.use_vision = True
+    solver.notify_coordinator = None
+    schema = solver._build_custom_tools()["view_image"].input_schema
+    assert "path" in schema["properties"]
+    assert "filename" in schema["properties"]

@@ -1,0 +1,59 @@
+{
+  "misc-b64": {
+    "flag": "flag{owned_misc_b64}",
+    "prefetch": [],
+    "needs_elf": null,
+    "wall_s": 120.0,
+    "title": "Owned misc \u2014 base64"
+  },
+  "forensics-dump": {
+    "flag": "flag{owned_forensics_dump}",
+    "prefetch": [],
+    "needs_elf": null,
+    "wall_s": 120.0,
+    "title": "Owned forensics \u2014 strings in a dump"
+  },
+  "steg-append": {
+    "flag": "flag{owned_steg_tail}",
+    "prefetch": [
+      "steg"
+    ],
+    "needs_elf": null,
+    "wall_s": 180.0,
+    "title": "Owned steg \u2014 trailing bytes"
+  },
+  "crypto-xor": {
+    "flag": "flag{owned_crypto_xor}",
+    "prefetch": [],
+    "needs_elf": null,
+    "wall_s": 120.0,
+    "title": "Owned crypto \u2014 single-byte XOR"
+  },
+  "rev-crackme": {
+    "flag": "flag{owned_rev_rodata}",
+    "prefetch": [
+      "pwn"
+    ],
+    "needs_elf": "crackme",
+    "wall_s": 180.0,
+    "title": "Owned rev \u2014 password binary"
+  },
+  "pwn-auth": {
+    "flag": "flag{owned_pwn_auth}",
+    "prefetch": [
+      "pwn"
+    ],
+    "needs_elf": "vuln",
+    "wall_s": 180.0,
+    "title": "Owned pwn \u2014 adjacent overflow"
+  },
+  "web-html": {
+    "flag": "flag{owned_web_html}",
+    "prefetch": [
+      "web"
+    ],
+    "needs_elf": null,
+    "wall_s": 180.0,
+    "title": "Owned web \u2014 HTML comment"
+  }
+}

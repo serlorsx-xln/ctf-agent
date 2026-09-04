@@ -38,5 +38,16 @@ def test_image_and_binary_hints():
     )
     assert "view_image" in text
     assert "pyghidra** is available" in text or "**pyghidra** is available" in text
-    assert "cado-nfs" in text
+    assert "cado-nfs" not in text
+    assert "RsaCtfTool" not in text
     assert "Binary Analysis" in text
+
+
+def test_crypto_tag_keeps_rsa_tools():
+    text = build_prompt(
+        ChallengeMeta(name="rsa", description="Tags: crypto\n\nFactor n."),
+        distfile_names=["output.txt"],
+        has_named_tools=True,
+    )
+    assert "cado-nfs" in text
+    assert "RsaCtfTool" in text

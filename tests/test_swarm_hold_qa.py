@@ -25,6 +25,7 @@ def _bare_swarm(tmp_path) -> ChallengeSwarm:
     swarm.release_event = asyncio.Event()
     swarm.hold_active = False
     swarm.message_bus = ChallengeMessageBus()
+    swarm._eval = None
     return swarm
 
 
@@ -84,6 +85,22 @@ async def test_hold_releases_during_slow_qa_turn(tmp_path, monkeypatch):
     assert started.is_set()
     assert "hold released" in out
     assert "(hold released)" in out
+    assert swarm.hold_active is False
+
+
+@pytest.mark.asyncio
+async def test_hold_skipped_when_eval_out(tmp_path, monkeypatch):
+    monkeypatch.delenv("ARTEMIS_SKIP_SOLVER_HOLD", raising=False)
+    swarm = _bare_swarm(tmp_path)
+    swarm.settings = SimpleNamespace(eval_out="/tmp/eval.json", eval_max_wall_s=None, eval_max_usd=None)
+    called = {"qa": 0}
+
+    async def qa(_q: str) -> str:
+        called["qa"] += 1
+        return "nope"
+
+    await swarm._winner_qa_hold(SimpleNamespace(qa_turn=qa), "cursor/default")
+    assert called["qa"] == 0
     assert swarm.hold_active is False
 
 

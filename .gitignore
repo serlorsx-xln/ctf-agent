@@ -55,5 +55,9 @@ challenges/*/Dockerfile.local
 # Human-only expected flags (never mount / never prompt)
 eval/sealed/
 
+# Linux ELFs compiled into owned fixtures (host clang is Mach-O)
+eval/fixtures/rev-crackme/distfiles/crackme
+eval/fixtures/pwn-auth/distfiles/vuln
+
 # OpenCode TUI build stub (scripts/build-tui.sh)
 chassis/.github/TEAM_MEMBERS

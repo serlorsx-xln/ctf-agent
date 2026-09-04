@@ -1,7 +1,7 @@
-"""Sandbox setup readiness — Docker + L0 + default Jeopardy pack caches.
+"""Sandbox setup readiness — Docker + L0 (packs attach on demand).
 
 Used by the daemon/TUI first-run gate so operators cannot solve until
-the core image and required pack caches exist.
+the core image exists. Pack caches are reported but do not block load.
 """
 
 from __future__ import annotations
@@ -189,15 +189,19 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
             missing.append(pack_id)
 
     cli, hint = _path_hint()
-    ready = bool(docker_ok and core and not missing)
+    ready = bool(docker_ok and core)
     if ready:
-        parts = ["Sandbox ready (Docker + L0 + pack caches)."]
+        if missing:
+            parts = [
+                "Sandbox ready (Docker + L0). "
+                f"Packs attach on demand: {', '.join(missing[:6])}."
+            ]
+        else:
+            parts = ["Sandbox ready (Docker + L0 + pack caches)."]
     elif not docker_ok:
         parts = ["Docker is not reachable. Start Docker Desktop / Colima, then Install."]
-    elif not core:
-        parts = ["Missing ctf-sandbox-core image. Install builds it."]
     else:
-        parts = [f"Pack caches not baked yet: {', '.join(missing[:6])}"]
+        parts = ["Missing ctf-sandbox-core image. Install builds it."]
     dns_ok = _container_dns_ok() if docker_ok and core else None
     if dns_ok is False:
         parts.append(

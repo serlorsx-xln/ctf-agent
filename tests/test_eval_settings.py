@@ -110,7 +110,7 @@ def test_eval_budget_usd() -> None:
     s.eval_max_usd = 1.5
     assert state.budget_exceeded(s, 2.0) == EVAL_BUDGET
     assert state.budget_exceeded(s, 0.5) is None
-    assert state.budget_exceeded(s, None) == EVAL_BUDGET
+    assert state.budget_exceeded(s, None) is None
 
 
 def test_agent_failed_excludes_infra() -> None:
@@ -236,3 +236,44 @@ def test_swarm_eval_budget_cancels() -> None:
     result, _ = asyncio.run(swarm._run_solver_loop(_SlowSolver(), "cursor/x", "cursor/x"))
     assert result.status == EVAL_BUDGET
     assert swarm.cancel_event.is_set()
+
+
+def test_sandbox_eval_wall_applies_before_pack_attach() -> None:
+    """Pack bootstrap must see the same wall as the swarm loop (no Docker)."""
+    from backend.sandbox.container import DockerSandbox
+
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp", settings=Settings())
+    assert sb._eval_wall_exceeded() is False
+    sb.settings = Settings()
+    sb.settings.eval_max_wall_s = 0.01
+    sb._started_monotonic = 0.0
+    assert sb._eval_wall_exceeded() is False
+    sb._started_monotonic = __import__("time").monotonic() - 1.0
+    assert sb._eval_wall_exceeded() is True
+
+
+def test_eval_skips_cold_pack_prefetch() -> None:
+    """Tagged steg/web must not burn an eval wall on apt when L0 is core."""
+    from backend.sandbox.container import DockerSandbox
+
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp", settings=Settings())
+    sb.settings.eval_max_wall_s = 180
+    assert sb._skip_cold_prefetch_for_eval("steg") is True
+    assert sb._skip_cold_prefetch_for_eval("web") is True
+    sb.image = "ctf-sandbox-warm-steg"
+    assert sb._skip_cold_prefetch_for_eval("steg") is False
+    sb.image = "ctf-sandbox-pwn"
+    assert sb._skip_cold_prefetch_for_eval("pwn") is False
+    sb.image = "ctf-sandbox-core"
+    sb.settings.eval_max_wall_s = None
+    assert sb._skip_cold_prefetch_for_eval("steg") is False
+
+
+def test_eval_ensure_pack_does_not_start_donor_build() -> None:
+    """Eval wall on core must not start a missing-donor docker build."""
+    from backend.sandbox.container import DockerSandbox
+
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp", settings=Settings())
+    sb.settings.eval_max_wall_s = 180
+    msg = asyncio.run(sb.ensure_pack("ghidra"))
+    assert "cold-install" in msg
