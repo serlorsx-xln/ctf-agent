@@ -1,4 +1,4 @@
 {
-  "path_re": "(/(?:Users|home|var|tmp|opt|Volumes)/[^\\s\"']+|~/(?:[^\\s\"']+)|\\./challenges/[^\\s\"']+|challenges/[^\\s\"']+|[A-Za-z]:(?:\\\\|/)[^\\s\"']+)",
+  "path_re": "(/(?:Users|home|var|tmp|opt|Volumes|mnt|media|data|private/tmp)/[^\\s\"']+|~/(?:[^\\s\"']+)|\\./[^\\s\"']+|(?:Downloads|Desktop|Documents|challenges)/[^\\s\"']+|[A-Za-z]:(?:\\\\[^\\\\]|/[^/])[^\\s\"']*)",
   "greetings": "^(hi|hello|hey|yo|test|testing|ping|สวัสดี|หวัดดี|ทดสอบ|เทส)+[!?.]*$"
 }

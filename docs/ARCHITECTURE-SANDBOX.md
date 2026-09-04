@@ -259,12 +259,13 @@ Prefetch สำคัญมาก — ไม่งั้นโจทย์แร
 ```text
 [1] ตรวจ Docker / Colima
 [2] pull / bake L0 + donor images ที่โปรไฟล์เลือก (ครั้งเดียวตอนติดตั้ง)
-[3] (optional) prefetch packs ยอดนิยมเข้า host cache: pwn, web, …
-[4] พร้อมรัน artemis swarm
+[3] bake full Jeopardy pack caches (`artemis setup`) — pre-TUI prompt if missing
+[4] พร้อมรัน artemis / artemis swarm
 ```
 
-ลูกค้า**ไม่** bake ตอนเปิด challenge — bake/pull อยู่ในขั้นติดตั้งเท่านั้น  
-(ใช้ ``uv run artemis setup`` หรือ `docker build` ตาม README เป็น fallback)
+ลูกค้า**ไม่** bake ตอนเปิด challenge — bake/pull อยู่ในขั้นติดตั้ง / pre-TUI prompt  
+(ใช้ ``uv run artemis setup`` หรือ `docker build` ตาม README เป็น fallback)  
+Warm runtimes (`ctf-sandbox-warm-*`) ยัง optional; pack caches ไม่ใช่ optional สำหรับ prompt ก่อน TUI
 
 แผน UX ระยะถัดไปเดิม (interactive shell) **shipped แล้ว** เป็น Artemis TUI —
 ดู `README.md` / `chassis/AGENTS.md`
@@ -475,7 +476,8 @@ Agent logic เดิม (บาง)
 | Sandbox package | `backend/sandbox/` — `container` / `packs` / `proxy` / `harden` / `governor` / `docker_client`; public facade `from backend.sandbox import DockerSandbox` |
 | Pack preflight | `backend/pack_preflight.py` — `force_packs` CLI `--pack` wins; else `detected_packs` / `detect_packs`; timings `preflight_ms`; `--eval-strict-packs` fail-closed |
 | Resource governor | `backend/sandbox/governor.py` — memory floors via `recommended_memory_limit`; live `docker update`; CPU `NanoCpus` default 2e9 override `CTF_SANDBOX_NANO_CPUS` |
-| Eval harness | `backend/eval_run.py` + CLI `--eval-out` / `--eval-max-wall-s` / `--eval-max-usd`; JSON `agent_failed` excludes infra-only deaths |
+| Eval harness | `backend/eval_run.py` + CLI `--eval-out` / `--eval-max-wall-s` / `--eval-max-usd`; wall also caps in-flight sandbox `bash`; JSON `agent_failed` excludes infra-only deaths |
+| Challenge load | Any operator path (Downloads/Desktop/`/Volumes`) except system/secret trees; launch inventory in `backend/launch_setup.py` + `guest_libs.py` |
 | Fat / sage alias | **Removed** — use core + packs only |
 | Cache | `~/.cache/ctf-agent/packs` + `CTF_PACK_CACHE_MAX_GB` (default 25) LRU eviction; `scripts/evict_pack_cache.py`, `scripts/prune_docker.sh` |
 | Host VPN (Mac) | `backend/host_proxy.py` — auto SOCKS5 + proxychains in sandbox (`CTF_HOST_PROXY=auto`) so lab VPNs work without pf/routes |

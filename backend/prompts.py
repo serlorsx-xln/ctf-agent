@@ -296,7 +296,8 @@ def build_prompt(
             else "   - Crypto: identify algorithm, weak keys, nonce reuse, padding oracles."
         ),
         "   - Pwn: `stty raw -echo` before launching vulnerable binaries over nc.",
-        "4. **Ignore placeholder flags** — `CTF{flag}`, `CTF{placeholder}` are not real flags.",
+        "4. **Ignore placeholder flags** — `CTF{flag}`, `CTF{}`, `CTF{...}`, "
+        "`TRYHARDER`, `your_flag_here`, `not_the_flag` are not real flags.",
         f"5. {submit_hint}",
         "6. Once CORRECT: output `FLAG: <value>` on its own line.",
         "7. Do not guess. Do not answer decoy questions. Cover the highest-value surfaces, then drop a dead technique.",

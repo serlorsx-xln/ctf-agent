@@ -131,7 +131,11 @@ def main(ctx: click.Context, verbose: bool) -> None:
     multiple=True,
     help="Model specs (repeatable). Shorthand: cursor/grok-4.5*3",
 )
-@click.option("--challenge", default=None, help="Solve a single challenge directory")
+@click.option(
+    "--challenge",
+    default=None,
+    help="Solve a single challenge (directory or file; same as TUI load)",
+)
 @click.option("--challenges-dir", default="challenges", help="Directory for challenge files")
 @click.option(
     "--coordinator-model",
@@ -166,7 +170,10 @@ def main(ctx: click.Context, verbose: bool) -> None:
     "--eval-max-wall-s",
     default=None,
     type=float,
-    help="Cancel single-challenge run after this many wall-clock seconds",
+    help=(
+        "Cancel a single-challenge run after this many wall-clock seconds. "
+        "Also caps in-flight sandbox bash (angr, scans, brute) to the time left."
+    ),
 )
 @click.option(
     "--eval-max-usd",
@@ -238,7 +245,14 @@ def swarm_cmd(
     if image:
         console.print(f"  Image: {settings.sandbox_image} (forced via --image)")
     elif challenge:
+        from backend.challenge import resolve_load_target
         from backend.tool_router import resolve_sandbox_image
+
+        try:
+            challenge = str(resolve_load_target(path=challenge))
+        except (FileNotFoundError, PermissionError, ValueError, OSError) as e:
+            console.print(f"[red]Failed to load challenge: {e}[/red]")
+            sys.exit(1)
 
         auto_image, detected = resolve_sandbox_image(
             challenge,
@@ -511,7 +525,7 @@ async def _run_single(
     """Run a single challenge with a swarm."""
     _harden_supervised_swarm()
     from backend.agents.swarm import ChallengeSwarm
-    from backend.challenge import load_challenge
+    from backend.challenge import load_challenge, resolve_load_target
     from backend.cost_tracker import CostTracker
     from backend.flags import normalize_flags_required
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
@@ -520,14 +534,10 @@ async def _run_single(
     configure_semaphore(max_containers)
     await cleanup_orphan_containers()
 
-    challenge_path = Path(challenge_dir)
-    if not challenge_path.is_dir():
-        console.print(f"[red]Not a directory: {challenge_dir}[/red]")
-        sys.exit(1)
-
     try:
+        challenge_path = resolve_load_target(path=challenge_dir)
         meta = load_challenge(challenge_path)
-    except Exception as e:
+    except (FileNotFoundError, PermissionError, ValueError, OSError) as e:
         console.print(f"[red]Failed to load challenge: {e}[/red]")
         sys.exit(1)
 

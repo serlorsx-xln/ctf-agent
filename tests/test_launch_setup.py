@@ -31,6 +31,7 @@ def test_assess_reports_warm_missing(monkeypatch):
         "backend.sandbox.warm_runtime.read_warm_runtime",
         lambda pack_id, **kwargs: None,
     )
+    monkeypatch.setattr("backend.sandbox.guest_libs.probe_donor_guest_libs", lambda: {})
     report = assess_launch_setup()
     assert report.gate_ready is True
     assert report.needs_prompt is False
@@ -57,8 +58,55 @@ def test_assess_no_prompt_when_fully_warm(monkeypatch):
         "backend.sandbox.warm_runtime.read_warm_runtime",
         lambda pack_id, **kwargs: f"ctf-sandbox-warm-{pack_id}",
     )
+    monkeypatch.setattr("backend.sandbox.guest_libs.probe_donor_guest_libs", lambda: {})
     report = assess_launch_setup()
     assert report.needs_prompt is False
+
+
+def test_assess_prompts_when_packs_or_guest_libs_missing(monkeypatch):
+    monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
+    monkeypatch.setattr(
+        "backend.sandbox.setup_ready.probe_setup_status",
+        lambda: type(
+            "S",
+            (),
+            {
+                "ready": True,
+                "docker_ok": True,
+                "core_image": True,
+                "packs_missing": ["crypto"],
+                "message": "ok",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.warm_runtime.read_warm_runtime",
+        lambda pack_id, **kwargs: f"ctf-sandbox-warm-{pack_id}",
+    )
+    monkeypatch.setattr("backend.sandbox.guest_libs.probe_donor_guest_libs", lambda: {})
+    assert assess_launch_setup().needs_prompt is True
+
+    monkeypatch.setattr(
+        "backend.sandbox.setup_ready.probe_setup_status",
+        lambda: type(
+            "S",
+            (),
+            {
+                "ready": True,
+                "docker_ok": True,
+                "core_image": True,
+                "packs_missing": [],
+                "message": "ok",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "backend.sandbox.guest_libs.probe_donor_guest_libs",
+        lambda: {"mobile": ["/usr/x86_64-linux-gnu/lib/libstdc++.so.6"]},
+    )
+    report = assess_launch_setup()
+    assert report.needs_prompt is True
+    assert any(x.startswith("mobile:") for x in report.guest_libs_missing)
 
 
 def test_skip_env_bypasses_prompt(monkeypatch):
@@ -68,10 +116,10 @@ def test_skip_env_bypasses_prompt(monkeypatch):
     assert stderr.getvalue() == ""
 
 
-def test_decline_continues(monkeypatch):
+def test_auto_zero_skips(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_LAUNCH_SETUP", raising=False)
     monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
-    monkeypatch.delenv("ARTEMIS_SETUP_AUTO", raising=False)
+    monkeypatch.setenv("ARTEMIS_SETUP_AUTO", "0")
     monkeypatch.setattr(
         "backend.launch_setup.assess_launch_setup",
         lambda: LaunchSetupReport(
@@ -83,7 +131,6 @@ def test_decline_continues(monkeypatch):
             message="Missing core",
         ),
     )
-    stdin = io.StringIO("n\n")
     stderr = io.StringIO()
     called = {"setup": False}
 
@@ -92,15 +139,42 @@ def test_decline_continues(monkeypatch):
         return []
 
     monkeypatch.setattr("backend.launch_setup._run_full_setup", _fake)
-    assert run_launch_setup_gate(stdin=stdin, stderr=stderr, interactive=True) == 0
+    assert run_launch_setup_gate(stdin=io.StringIO(), stderr=stderr, interactive=True) == 0
     assert called["setup"] is False
+    assert "ARTEMIS_SETUP_AUTO=0" in stderr.getvalue()
     assert "continuing with what is installed" in stderr.getvalue()
 
 
-def test_yes_runs_setup(monkeypatch):
+def test_complete_inventory_is_noop(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_LAUNCH_SETUP", raising=False)
     monkeypatch.delenv("ARTEMIS_SETUP_AUTO", raising=False)
-    stdin = io.StringIO("y\n")
+    monkeypatch.setattr(
+        "backend.launch_setup.assess_launch_setup",
+        lambda: LaunchSetupReport(
+            gate_ready=True,
+            docker_ok=True,
+            core_image=True,
+            packs_missing=[],
+            warm_missing=["ghidra"],
+            message="ok",
+        ),
+    )
+    called = {"setup": False}
+
+    async def _fake(*, stderr):  # noqa: ANN001
+        called["setup"] = True
+        return []
+
+    monkeypatch.setattr("backend.launch_setup._run_full_setup", _fake)
+    stderr = io.StringIO()
+    assert run_launch_setup_gate(stdin=io.StringIO(), stderr=stderr, interactive=True) == 0
+    assert called["setup"] is False
+    assert stderr.getvalue() == ""
+
+
+def test_default_runs_setup(monkeypatch):
+    monkeypatch.delenv("ARTEMIS_SKIP_LAUNCH_SETUP", raising=False)
+    monkeypatch.delenv("ARTEMIS_SETUP_AUTO", raising=False)
     stderr = io.StringIO()
 
     async def _fake(*, stderr):  # noqa: ANN001
@@ -131,13 +205,14 @@ def test_yes_runs_setup(monkeypatch):
         )
 
     monkeypatch.setattr("backend.launch_setup.assess_launch_setup", _assess)
-    assert run_launch_setup_gate(stdin=stdin, stderr=stderr, interactive=True) == 0
+    assert run_launch_setup_gate(stdin=io.StringIO(), stderr=stderr, interactive=True) == 0
     out = stderr.getvalue()
+    assert "inventory incomplete" in out
     assert "Building" in out
     assert "setup complete" in out
 
 
-def test_non_interactive_skips(monkeypatch):
+def test_non_interactive_runs_setup(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_LAUNCH_SETUP", raising=False)
     monkeypatch.delenv("ARTEMIS_SETUP_AUTO", raising=False)
     monkeypatch.setattr(
@@ -151,9 +226,20 @@ def test_non_interactive_skips(monkeypatch):
             message="Docker down",
         ),
     )
+
+    called = {"setup": False}
+
+    async def _fake(*, stderr):  # noqa: ANN001
+        called["setup"] = True
+        return ["OK  Built L0 image: ctf-sandbox-core"]
+
+    monkeypatch.setattr("backend.launch_setup._run_full_setup", _fake)
     stderr = io.StringIO()
     assert run_launch_setup_gate(stdin=io.StringIO(), stderr=stderr, interactive=False) == 0
-    assert "non-interactive" in stderr.getvalue()
+    out = stderr.getvalue()
+    assert called["setup"] is True
+    assert "inventory incomplete" in out
+    assert "non-interactive" not in out
 
 
 def test_auto_yes_runs_without_tty(monkeypatch):

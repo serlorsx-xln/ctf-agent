@@ -75,3 +75,13 @@ def test_extract_windows_drive_path():
 def test_extract_windows_drive_path_forward_slash():
     paths = extract_challenge_paths("C:/Users/me/challenges/glass please solve")
     assert paths == ["C:/Users/me/challenges/glass"]
+
+
+def test_extract_downloads_and_relative_user_paths():
+    assert extract_challenge_paths("/Users/me/Downloads/gctf-zip") == [
+        "/Users/me/Downloads/gctf-zip"
+    ]
+    assert extract_challenge_paths("~/Downloads/chal please") == ["~/Downloads/chal"]
+    assert extract_challenge_paths("Downloads/handout.bin solve") == ["Downloads/handout.bin"]
+    assert extract_challenge_paths("./Desktop/rev") == ["./Desktop/rev"]
+    assert extract_challenge_paths("https://example.com/guide") == []

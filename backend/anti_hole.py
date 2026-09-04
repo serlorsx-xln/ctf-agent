@@ -17,14 +17,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Families that are never "going deeper on the challenge" — they are off the flag.
-OFF_TARGET = frozenset({"writeup_search", "fs_tourism", "decoy_answer"})
+OFF_TARGET = frozenset({"writeup_search", "fs_tourism", "decoy_answer", "decoy_flag"})
 
 _WRITEUP = re.compile(
     r"write[-_ ]?up|ctftime|picoctf\s+solution|htb\s+write|"
     r"tryhackme\s+write|github\.com/\S*write|"
+    r"(?:youtube|youtu\.be|medium\.com)/\S*.{0,80}(?:writeup|solution|walkthrough)|"
     r"(?:google|bing|duckduckgo)\.[^\s\"']+/.{0,80}(?:writeup|solution|walkthrough)",
     re.I,
 )
+
+_SUBMIT_FLAG_TOKEN = re.compile(r"submit_flag\s+['\"]?(\S+)", re.I)
 
 _HOST_TOURISM = re.compile(
     r"(?:^|[\n;&|])\s*(?:sudo\s+)?(?:ls|find|cat|less|more|head|tail|file|xxd|strings)"
@@ -87,6 +90,9 @@ FLAG_ONLY_RULES = (
     "the same command.",
     "- Do not search writeups or the challenge name. Do not tour the sandbox OS "
     "(`/etc`, `/proc`, `/home`). Do not write explanations.",
+    "- Do not submit instructional / placeholder flags (`CTF{flag}`, `CTF{}`, "
+    "`CTF{...}`, `TRYHARDER`, `your_flag_here`, `f4ke_fl4g`). Those are rejected "
+    "automatically — recover the value from challenge logic.",
     "- Sibling `[DEAD-END]` notes are binding unless you have evidence they lacked.",
 )
 
@@ -106,14 +112,14 @@ HOLE_BREAK = (
 
 OFF_TARGET_WARN = (
     "**Anti-hole:** that action is off the flag (writeup search, host-OS "
-    "tourism, or answering a decoy question). Convert it into one experiment "
-    "on `/challenge` or the live service, or drop it."
+    "tourism, answering a decoy question, or submitting a placeholder flag). "
+    "Convert it into one experiment on `/challenge` or the live service, or drop it."
 )
 
 OFF_TARGET_BREAK = (
     "**DEAD-END:** off-target path `{family}` is blocked. Do not answer the "
-    "decoy and do not search writeups. Resume on challenge files or the "
-    "service and aim at `submit_flag`."
+    "decoy, do not submit placeholder flags, and do not search writeups. "
+    "Resume on challenge files or the service and aim at a real `submit_flag`."
 )
 
 
@@ -182,6 +188,28 @@ def is_submit_tool(tool_name: str, args: Mapping[str, object] | str | None = Non
     return bool(re.search(r"(?:^|[\n;&|])\s*submit_flag\b", blob))
 
 
+def submitted_flag_value(args: Mapping[str, object] | str | None) -> str:
+    """Flag string from submit_flag args or a ``submit_flag TOKEN`` bash line."""
+    if isinstance(args, Mapping):
+        raw = str(args.get("flag") or "").strip()
+        if raw:
+            return raw
+        blob = " ".join(str(args.get(k) or "") for k in ("command", "content", "query"))
+    elif args is None:
+        return ""
+    else:
+        blob = str(args)
+    m = _SUBMIT_FLAG_TOKEN.search(blob)
+    return (m.group(1) if m else "").strip().strip("'\"")
+
+
+def is_decoy_submit(args: Mapping[str, object] | str | None) -> bool:
+    from backend.flags import is_decoy_flag
+
+    token = submitted_flag_value(args)
+    return bool(token) and is_decoy_flag(token)
+
+
 @dataclass
 class HoleDetector:
     """Track technique-family depth and off-target drift."""
@@ -215,6 +243,16 @@ class HoleDetector:
         """Return None, ``warn``, ``break``, ``off_warn``, or ``off_break``."""
         self.last_status = None
         if is_submit_tool(tool_name, args):
+            if is_decoy_submit(args):
+                family = "decoy_flag"
+                self.last_family = family
+                n = self._off_counts.get(family, 0) + 1
+                self._off_counts[family] = n
+                if n >= self.off_target_break:
+                    self.last_status = "off_break"
+                    return "off_break"
+                self.last_status = "off_warn"
+                return "off_warn"
             self._family = None
             self._streak = 0
             return None

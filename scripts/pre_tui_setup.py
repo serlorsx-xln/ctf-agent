@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launcher entry: pre-TUI setup prompt (see backend.launch_setup)."""
+"""Launcher entry: pre-TUI auto full setup when inventory is incomplete."""
 
 from __future__ import annotations
 

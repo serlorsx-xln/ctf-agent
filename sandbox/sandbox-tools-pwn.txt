@@ -3,8 +3,9 @@ uname -m                 Container arch. Challenge bins are usually x86_64.
 qemu-x86_64-static       Run x86_64 ELF on aarch64. Alias: q64
 qemu-i386-static         Run i386 ELF. Alias: q32
                          Wrappers auto-add -L /usr/x86_64-linux-gnu (or i686)
-                         so guest libc from libc6-*-cross is found. Override
-                         with QEMU_LD_PREFIX=... or pass your own -L.
+                         so guest libc / libstdc++ from *-cross packages are
+                         found. Override with QEMU_LD_PREFIX=... or pass -L.
+                         Prefer `q64 ./chal` over raw qemu-x86_64-static.
 file ./chal              Identify arch/ABI before running.
 objdump                  On aarch64 hosts, `objdump` is wired to
                          x86_64-linux-gnu-objdump (native arm objdump cannot

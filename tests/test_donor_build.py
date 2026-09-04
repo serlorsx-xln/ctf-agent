@@ -99,3 +99,32 @@ async def test_ensure_donor_builds_when_missing(monkeypatch, tmp_path):
     assert ok is True
     assert "Built donor" in msg
     assert any(c[0] == "build" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_ensure_mobile_rebuilds_when_guest_libs_fail(monkeypatch, tmp_path):
+    calls: list[tuple] = []
+
+    async def fake_cli(*args, timeout_s=30):
+        calls.append(args)
+        if args[:2] == ("image", "inspect"):
+            return 0, "", ""
+        if args[:2] == ("rmi", "-f"):
+            return 0, "", ""
+        if args[:3] == ("run", "--rm", "--entrypoint"):
+            return 1, "", "missing libstdc++"
+        if args[0] == "build":
+            return 0, "ok", ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr("backend.sandbox.docker_client._docker_cli", fake_cli)
+    monkeypatch.setattr(donor_build, "repo_root", lambda: tmp_path)
+    dockerfile = tmp_path / "sandbox" / "Dockerfile.mobile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    donor_build._donor_functional_cache.clear()
+    ok, msg = await donor_build.ensure_donor_image("mobile")
+    assert ok is True
+    assert "Built donor" in msg
+    assert any(c[:2] == ("rmi", "-f") for c in calls)
+    assert any(c[0] == "build" for c in calls)

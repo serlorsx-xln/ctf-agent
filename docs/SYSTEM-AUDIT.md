@@ -123,7 +123,7 @@ Operator TUI (OpenCode)
 - ที่อยู่: `backend/challenge.py:242`
 - หลักฐาน: `resolve_load_target` + `_copy_attachments` ตาม symlink แล้วก็อปเข้า `distfiles` แล้ว bind เข้า Docker
 - ผลกระทบ: โมเดลที่เรียก `artemis_load_challenge` ด้วย `path=/etc/…` ดึงไฟล์ที่อ่านได้บนโฮสต์เข้า workspace ได้
-- แก้: allowlist ราก; ปฏิเสธ symlink ที่หนีออกนอกต้นทาง; ให้ operator ยืนยัน path นอก CWD
+- แก้: ปฏิเสธต้นไม้ระบบและโฟลเดอร์ลับ (`.ssh`, `/etc`, …); โหลดโจทย์จาก path ผู้ใช้ได้รวม Downloads; symlink ที่ resolve เข้าโซนต้องห้ามยังโดนบล็อก
 
 #### H6 — `write_file` ไม่จำกัด path
 
@@ -217,6 +217,13 @@ Operator TUI (OpenCode)
 - หลักฐาน: `has_named_tools=False`; swarm ผสมให้ Gemini พื้นผิวแคบกว่าพี่น้อง
 - ผลกระทบ: แข่งไม่แฟร์; แชร์ findings กลางทางไม่ได้
 - แก้: เพิ่มเครื่องมือที่ขาด หรือเอกสารว่าตั้งใจให้เป็น subset
+
+#### M9 — `--eval-max-wall-s` ไม่ฆ่า `bash` ที่กำลังรัน
+
+- ที่อยู่: `backend/sandbox/container.py` (`exec` / `_exec_inner`); เดิมเช็คแค่ใน `swarm._run_solver_loop` ระหว่างรอบ
+- หลักฐาน: GCTF ZIP `bkcrack` / NotObfuscated `angr.explore` วิ่งเกิน wall เพราะ `timeout` ของคำสั่งไม่ดูเวลาที่เหลือ
+- พฤติกรรมปัจจุบัน: `exec` จำกัด timeout ตามเวลาที่เหลือของ wall; ถ้าหมดแล้วไม่เริ่มคำสั่งใหม่ (exit 124)
+- ผลกระทบเดิม: unattended eval ไม่มี hard stop จริงตอนโมเดลเปิดงานเงียบยาว
 
 ### Low
 
@@ -348,10 +355,11 @@ Operator TUI (OpenCode)
 | M4 | แก้แล้ว | `getent hosts pypi.org` เป็น advisory (`dns_ok`) ไม่บล็อก ready |
 | H2 | แก้แล้ว | `ARTEMIS_DAEMON_TOKEN` + ไฟล์ `0o600`; swarm/usage ไม่สลับ session ต่อข้อความ |
 | M1 | แก้แล้ว | coordinator หาด้วย `runner_id` แล้วค่อย `model_spec` ที่ไม่คลุมเครือ |
-| H5 | แก้แล้ว | allowlist CWD / cache / `challenges/` / temp / `ARTEMIS_LOAD_ROOTS` |
+| H5 | แก้แล้ว | โหลดโจทย์ได้ทุก path ของผู้ใช้ (รวม Downloads); ยังกัน `/etc` / `.ssh` / ต้นไม้ระบบ |
 | H6 | แก้แล้ว | `write_file` จำกัดที่ `/challenge/workspace` |
 | H10 | แก้แล้ว | RFC1918 จากข้อความต้อง `CTF_ALLOW_LAB_PROBE=1` หรือ `CTF_LAB_HOSTS`; `*.htb`/`nc` ผ่าน |
 | M2 | แก้แล้ว | USD นับเฉพาะ cost ที่รายงาน; `None` fail-open เฉพาะเมื่อมี wall คู่กัน |
+| M9 | แก้แล้ว | wall จำกัดและหยุด sandbox `bash` ที่กำลังรัน ไม่ใช่แค่ระหว่างรอบ solver |
 | M5 | แก้แล้ว | `install.sh` เขียน `~/.local/bin` ลง `.zprofile` / `.zshrc` |
 | M6 | แก้แล้ว | plugin ถอยไป bridge เฉพาะ `ARTEMIS_UNSAFE_BRIDGE=1` |
 | M7 | แก้แล้ว | `/msg` ตรวจ token เมื่อตั้ง `ARTEMIS_MSG_TOKEN` |

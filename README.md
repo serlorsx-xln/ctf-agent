@@ -50,14 +50,16 @@ bash Artemis-Install.sh                              # macOS / Linux / WSL2
 # After install: open a NEW terminal, then run:  artemis
 ```
 
-After install: open a **new** terminal → `artemis`. If Docker or L0 is missing,
-the launcher asks **in the terminal** (before TUI) whether to run full setup
-and prints live logs; answer `n` to continue with what you have. Packs attach
-on demand and do not block the gate. `ARTEMIS_SETUP_AUTO=1` forces setup;
-`ARTEMIS_SKIP_LAUNCH_SETUP=1` skips the prompt. Rebuild the fast TUI binary
+After install: open a **new** terminal → `artemis`. The launcher runs a
+**detailed** inventory (Docker, L0, full Jeopardy pack caches, qemu guest
+`libstdc++` / `libgcc_s` on pwn+mobile). Missing L0, pack caches, or guest
+libs **automatically runs full setup** (live logs; TUI stays closed until
+done). Already-complete inventory is a no-op. Warm images stay optional.
+`ARTEMIS_SKIP_LAUNCH_SETUP=1` skips the gate; `ARTEMIS_SETUP_AUTO=0` skips
+setup (CI / non-interactive opt-out). Rebuild the fast TUI binary
 with `bash scripts/build-tui.sh` after chassis changes. The in-TUI **Install**
 screen still blocks solving if Docker/L0 is missing (L0 only; packs attach
-on demand).
+on demand). Full bake / guest-lib rebuild: `artemis setup` or relaunch.
 
 
 **Verify / full install test:**

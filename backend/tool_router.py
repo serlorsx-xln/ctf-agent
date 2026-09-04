@@ -117,6 +117,11 @@ PACK_SPECS: dict[str, PackSpec] = {
             "cmake",
             "ninja-build",
             "pkg-config",
+            "qemu-user-static",
+            "libc6-amd64-cross",
+            "libc6-i386-cross",
+            "libstdc++6-amd64-cross",
+            "libstdc++6-i386-cross",
         ),
         pip=("androguard", "frida-tools", "reflutter"),
         symlinks=(
@@ -138,6 +143,10 @@ PACK_SPECS: dict[str, PackSpec] = {
             "binfmt-support",
             "libc6-amd64-cross",
             "libc6-i386-cross",
+            # C++ guest bins (GCTF crackmes, etc.) need libstdc++ in the qemu -L
+            # sysroot. libc6-*-cross alone leaves q64 failing on libstdc++.so.6.
+            "libstdc++6-amd64-cross",
+            "libstdc++6-i386-cross",
             # On aarch64 hosts, native objdump cannot disassemble x86_64 ELFs
             # ("architecture UNKNOWN"). Cross-binutils fixes `objdump -d`.
             "binutils-x86-64-linux-gnu",
@@ -148,6 +157,9 @@ PACK_SPECS: dict[str, PackSpec] = {
             # Cross-arch debug under qemu (native gdb on aarch64 cannot target amd64).
             "gdb-multiarch",
             "radare2",
+            # Match Dockerfile.pwn so L0+ensure has the same assembler / dbg libc.
+            "nasm",
+            "libc6-dbg",
         ),
         pip=(
             "pwntools",
@@ -283,6 +295,7 @@ PACK_SPECS: dict[str, PackSpec] = {
             # Run armhf device binaries from firmware images (static/dynamic).
             "qemu-user-static",
             "libc6-armhf-cross",
+            "libstdc++6-armhf-cross",
         ),
         # Upgrade capstone: apt binwalk expects CS_ARCH_ARM64; an older pip
         # capstone (often pulled by pwntools) breaks `import binwalk`.
@@ -1413,6 +1426,11 @@ def bootstrap_script(pack_id: str, *, packages: bool = True) -> str:
             "printf '%s\\n' '#!/bin/bash' 'exec qemu-arm-static \"$@\"' > /usr/local/bin/qarm",
             "printf '%s\\n' '#!/bin/bash' 'exec qemu-arm-static \"$@\"' > /usr/local/bin/qemu-arm",
             "chmod +x /usr/local/bin/qemu-arm-static /usr/local/bin/qarm /usr/local/bin/qemu-arm",
+            "if [ -e /usr/arm-linux-gnueabihf/lib/libstdc++.so.6 ]; then",
+            "  mkdir -p /lib/arm-linux-gnueabihf",
+            "  ln -sfn /usr/arm-linux-gnueabihf/lib/libstdc++.so.6 "
+            "/lib/arm-linux-gnueabihf/libstdc++.so.6 || true",
+            "fi",
         ]
     if pack_id == "pwn":
         lines += [
@@ -1433,6 +1451,13 @@ def bootstrap_script(pack_id: str, *, packages: bool = True) -> str:
             "    mkdir -p /lib/x86_64-linux-gnu",
             "    ln -sfn /usr/x86_64-linux-gnu/lib/libc.so.6 "
             "/lib/x86_64-linux-gnu/libc.so.6 || true",
+            "  fi",
+            "  # Same path agents guess for libstdc++ when qemu -L is skipped.",
+            "  if [ -e /usr/x86_64-linux-gnu/lib/libstdc++.so.6 ] "
+            "&& [ ! -e /lib/x86_64-linux-gnu/libstdc++.so.6 ]; then",
+            "    mkdir -p /lib/x86_64-linux-gnu",
+            "    ln -sfn /usr/x86_64-linux-gnu/lib/libstdc++.so.6 "
+            "/lib/x86_64-linux-gnu/libstdc++.so.6 || true",
             "  fi",
             "  ;;",
             "esac",

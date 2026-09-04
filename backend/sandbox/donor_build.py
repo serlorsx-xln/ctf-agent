@@ -81,15 +81,9 @@ def _release_donor_flock(fd: int) -> None:
     _file_lock_release(fd)
 
 
-async def _donor_image_functional(pack_id: str, image: str) -> bool:
-    """True when a runtime-capable donor image has the baked tools we expect."""
-    if pack_id != "pwn":
-        return True
-    cache_key = f"{pack_id}:{image}"
-    cached = _donor_functional_cache.get(cache_key)
-    if cached is not None:
-        return cached
+async def _donor_guest_libs_ok(image: str) -> bool:
     from backend.sandbox.docker_client import _docker_cli
+    from backend.sandbox.guest_libs import GUEST_LIB_PATHS
 
     rc, _, _ = await _docker_cli(
         "run",
@@ -98,10 +92,39 @@ async def _donor_image_functional(pack_id: str, image: str) -> bool:
         "python3",
         image,
         "-c",
-        "import pwn, keystone, capstone",
-        timeout_s=120,
+        "import os,sys; need="
+        + repr(list(GUEST_LIB_PATHS))
+        + "; sys.exit(0 if all(os.path.exists(p) for p in need) else 1)",
+        timeout_s=60,
     )
-    ok = rc == 0
+    return rc == 0
+
+
+async def _donor_image_functional(pack_id: str, image: str) -> bool:
+    """True when a runtime-capable donor image has the baked tools we expect."""
+    if pack_id not in ("pwn", "mobile"):
+        return True
+    cache_key = f"{pack_id}:{image}"
+    cached = _donor_functional_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    from backend.sandbox.docker_client import _docker_cli
+
+    ok = True
+    if pack_id == "pwn":
+        rc, _, _ = await _docker_cli(
+            "run",
+            "--rm",
+            "--entrypoint",
+            "python3",
+            image,
+            "-c",
+            "import pwn, keystone, capstone",
+            timeout_s=120,
+        )
+        ok = rc == 0
+    if ok:
+        ok = await _donor_guest_libs_ok(image)
     _donor_functional_cache[cache_key] = ok
     return ok
 
@@ -138,7 +161,7 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
         if await _donor_image_functional(pack_id, image):
             return True, f"donor {image} already present"
         logger.info(
-            "Donor %s exists but lacks baked pwn runtime — rebuilding",
+            "Donor %s exists but lacks baked runtime / guest libs — rebuilding",
             image,
         )
         await _docker_cli("rmi", "-f", image, timeout_s=120)
@@ -152,7 +175,7 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
                 if await _donor_image_functional(pack_id, image):
                     return True, f"donor {image} already present"
                 logger.info(
-                    "Donor %s exists but lacks baked pwn runtime — rebuilding",
+                    "Donor %s exists but lacks baked runtime / guest libs — rebuilding",
                     image,
                 )
                 await _docker_cli("rmi", "-f", image, timeout_s=120)

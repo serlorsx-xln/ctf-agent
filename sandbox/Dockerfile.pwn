@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     patchelf \
     qemu-user-static binfmt-support \
     libc6-amd64-cross libc6-i386-cross \
+    libstdc++6-amd64-cross libstdc++6-i386-cross \
     binutils-x86-64-linux-gnu \
     gdb-multiarch \
     radare2 \

@@ -73,6 +73,41 @@ def test_load_rejects_symlink_escape(tmp_path: Path) -> None:
         )
 
 
+def test_load_allows_downloads_under_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "Users" / "me"
+    chal = home / "Downloads" / "gctf-zip"
+    chal.mkdir(parents=True)
+    blob = chal / "handout.bin"
+    blob.write_bytes(b"PK")
+    monkeypatch.setattr("backend.challenge._home_dir", lambda: home.resolve())
+    dest = materialize_challenge(
+        description="From Downloads",
+        attachments=[str(blob)],
+        cache_root=tmp_path / "cache",
+    )
+    assert (dest / "distfiles" / "handout.bin").is_file()
+    assert_allowed_load_path(blob)
+    assert_allowed_load_path(chal)
+    loaded = resolve_load_target(path=str(chal))
+    assert loaded == chal.resolve()
+    loaded_file = resolve_load_target(path=str(blob), description="handout only")
+    assert (loaded_file / "distfiles" / "handout.bin").is_file()
+
+
+def test_load_rejects_ssh_under_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "Users" / "me"
+    key = home / ".ssh" / "id_rsa"
+    key.parent.mkdir(parents=True)
+    key.write_text("secret\n", encoding="utf-8")
+    monkeypatch.setattr("backend.challenge._home_dir", lambda: home.resolve())
+    with pytest.raises(PermissionError):
+        materialize_challenge(
+            description="no",
+            attachments=[str(key)],
+            cache_root=tmp_path / "cache",
+        )
+
+
 def test_load_allows_tmp(tmp_path: Path) -> None:
     blob = tmp_path / "chal.bin"
     blob.write_bytes(b"MZ")

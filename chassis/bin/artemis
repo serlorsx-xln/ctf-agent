@@ -108,8 +108,8 @@ if [[ -f "$REPO/.env" ]]; then
 fi
 unset CURSOR_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY 2>/dev/null || true
 
-# Pre-TUI setup gate: ask in the terminal (never open TUI during setup).
-# Skip with ARTEMIS_SKIP_LAUNCH_SETUP=1 or ARTEMIS_SETUP_AUTO=0/1.
+# Pre-TUI setup gate: auto full setup when inventory is incomplete (never open TUI during setup).
+# Skip with ARTEMIS_SKIP_LAUNCH_SETUP=1 or ARTEMIS_SETUP_AUTO=0.
 run_python "$REPO/scripts/pre_tui_setup.py" || true
 
 # Inject keys + start daemon/stub in background (no blocking waits).

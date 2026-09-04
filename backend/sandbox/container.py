@@ -70,6 +70,10 @@ def allowed_sandbox_write_path(path: str) -> str:
     return norm
 
 
+# GNU `timeout` uses 124; reuse it so solvers treat wall-stop like a tool timeout.
+EVAL_WALL_EXEC_SKIP = "Eval wall reached — command not started."
+
+
 @dataclass
 class ExecResult:
     exit_code: int
@@ -231,21 +235,45 @@ class DockerSandbox:
             "Ulimits": [{"Name": "core", "Soft": 0, "Hard": 0}],
         }
 
-    def _eval_wall_exceeded(self) -> bool:
-        """True when ``settings.eval_max_wall_s`` has elapsed since ``start()``."""
+    def _eval_wall_remaining_s(self) -> float | None:
+        """Seconds left on ``eval_max_wall_s``, or None if no wall is set."""
         settings = self.settings
         if settings is None:
-            return False
+            return None
         max_wall = getattr(settings, "eval_max_wall_s", None)
         if max_wall is None:
-            return False
+            return None
         try:
             limit = float(max_wall)
         except (TypeError, ValueError):
-            return False
+            return None
         if limit <= 0 or self._started_monotonic <= 0:
-            return False
-        return (time.monotonic() - self._started_monotonic) >= limit
+            return None
+        return limit - (time.monotonic() - self._started_monotonic)
+
+    def _eval_wall_exceeded(self) -> bool:
+        """True when ``settings.eval_max_wall_s`` has elapsed since ``start()``."""
+        left = self._eval_wall_remaining_s()
+        return left is not None and left <= 0
+
+    def _clamp_exec_timeout_s(self, timeout_s: int) -> int | None:
+        """Timeout for this exec, or None if the eval wall already elapsed.
+
+        Long ``bash`` (angr, bkcrack, scans) used to ignore ``--eval-max-wall-s``
+        because the swarm only checked the wall *between* solver turns.
+        """
+        try:
+            requested = int(timeout_s)
+        except (TypeError, ValueError):
+            requested = 300
+        if requested < 1:
+            requested = 1
+        left = self._eval_wall_remaining_s()
+        if left is None:
+            return requested
+        if left <= 0:
+            return None
+        return max(1, min(requested, int(left)))
 
     def _skip_cold_prefetch_for_eval(self, pack: str) -> bool:
         """Eval must not spend the wall on cold apt/pip (steg/web/ghidra).
@@ -1408,6 +1436,10 @@ class DockerSandbox:
         """
         if not self.workspace_dir:
             raise RuntimeError("Sandbox not started")
+        clamped = self._clamp_exec_timeout_s(timeout_s)
+        if clamped is None:
+            return ExecResult(exit_code=124, stdout="", stderr=EVAL_WALL_EXEC_SKIP)
+        timeout_s = clamped
 
         async with self._lock:
             await self._ensure_container_unlocked()
@@ -1459,6 +1491,10 @@ class DockerSandbox:
                 timeout_s,
             )
             timeout_s = 900
+        clamped = self._clamp_exec_timeout_s(timeout_s)
+        if clamped is None:
+            return ExecResult(exit_code=124, stdout="", stderr=EVAL_WALL_EXEC_SKIP)
+        timeout_s = clamped
         path_prefix = ""
         if self.extra_path_dirs:
             joined = ":".join(self.extra_path_dirs)

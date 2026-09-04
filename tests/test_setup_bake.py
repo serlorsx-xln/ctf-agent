@@ -72,6 +72,50 @@ def test_pack_cache_incomplete_ignores_apt_only_packs():
     assert pack_cache_incomplete("web") is False
 
 
+def test_pack_cache_incomplete_linux_needs_bin_sentinels(monkeypatch, tmp_path: Path):
+    """Top-level opt/linux-tools is not enough — ffuf + linpeas.sh must exist."""
+    from backend.tool_router import pack_cache_dir
+
+    cache = pack_cache_dir("linux")
+    monkeypatch.setattr(
+        "backend.tool_router.pack_cache_dir",
+        lambda pack_id: tmp_path / pack_id / "arm64" if pack_id == "linux" else cache,
+    )
+    c = tmp_path / "linux" / "arm64"
+    (c / "opt" / "linux-tools").mkdir(parents=True)
+    (c / ".ready").write_text("ok\n", encoding="utf-8")
+    assert pack_cache_incomplete("linux") is True
+    bin_dir = c / "opt" / "linux-tools" / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ffuf").write_text("", encoding="utf-8")
+    assert pack_cache_incomplete("linux") is True
+    (bin_dir / "linpeas.sh").write_text("", encoding="utf-8")
+    assert pack_cache_incomplete("linux") is False
+
+
+def test_pack_cache_incomplete_crypto_tools_needs_flatter_and_cado(
+    monkeypatch, tmp_path: Path
+):
+    """RsaCtfTool alone is not enough — flatter + cado-nfs bins must exist."""
+    from backend.tool_router import pack_cache_dir
+
+    cache = pack_cache_dir("crypto-tools")
+    monkeypatch.setattr(
+        "backend.tool_router.pack_cache_dir",
+        lambda pack_id: tmp_path / pack_id / "arm64" if pack_id == "crypto-tools" else cache,
+    )
+    c = tmp_path / "crypto-tools" / "arm64"
+    (c / "opt" / "RsaCtfTool").mkdir(parents=True)
+    (c / ".ready").write_text("ok\n", encoding="utf-8")
+    assert pack_cache_incomplete("crypto-tools") is True
+    (c / "opt" / "flatter" / "bin").mkdir(parents=True)
+    (c / "opt" / "flatter" / "bin" / "flatter").write_text("", encoding="utf-8")
+    assert pack_cache_incomplete("crypto-tools") is True
+    (c / "opt" / "cado-nfs" / "bin").mkdir(parents=True)
+    (c / "opt" / "cado-nfs" / "bin" / "cado-nfs").write_text("", encoding="utf-8")
+    assert pack_cache_incomplete("crypto-tools") is False
+
+
 def test_ready_marker_digest_roundtrip(tmp_path: Path, monkeypatch):
     dockerfile = tmp_path / "Dockerfile.mobile"
     dockerfile.write_text("FROM scratch\n", encoding="utf-8")
@@ -216,3 +260,17 @@ async def test_warm_shared_blutter_skip_vm_compile(monkeypatch, tmp_path: Path):
     msg = await setup_bake.warm_shared_blutter_state(skip_vm_compile=True)
     assert "prepared" in msg.lower() or "still builds" in msg.lower()
     assert "ARTEMIS_BLUTTER_WARM_APK" not in msg  # skip path does not hunt APK
+
+
+@pytest.mark.asyncio
+async def test_materialize_pack_repairs_runtime_donor(monkeypatch):
+    from backend.sandbox.setup_bake import materialize_pack
+
+    async def fake_ensure(pack_id: str):
+        assert pack_id == "mobile"
+        return False, "guest libs missing"
+
+    monkeypatch.setattr("backend.sandbox.donor_build.ensure_donor_image", fake_ensure)
+    ok, msg = await materialize_pack("mobile")
+    assert ok is False
+    assert "guest libs" in msg

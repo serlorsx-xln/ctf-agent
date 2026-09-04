@@ -61,8 +61,16 @@ def test_submit_resets_streak():
     hole.observe("bash", {"command": "strings a"})
     hole.observe("bash", {"command": "strings b"})
     assert hole.last_status == "warn"
-    assert hole.observe("submit_flag", {"flag": "CTF{x}"}) is None
+    assert hole.observe("submit_flag", {"flag": "CTF{hello_world_ok}"}) is None
     assert hole.observe("bash", {"command": "strings c"}) is None
+
+
+def test_decoy_submit_is_off_target():
+    hole = HoleDetector()
+    assert hole.observe("submit_flag", {"flag": "CTF{flag}"}) == "off_warn"
+    assert hole.last_family == "decoy_flag"
+    assert hole.observe("submit_flag", {"flag": "CTF{...}"}) == "off_break"
+    assert hole.observe("bash", {"command": "submit_flag 'TRYHARDER'"}) == "off_break"
 
 
 def test_off_target_breaks_on_second_hit():

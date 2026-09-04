@@ -247,6 +247,35 @@ def test_swarm_eval_budget_cancels() -> None:
     assert swarm.cancel_event.is_set()
 
 
+def test_eval_wall_clamps_and_skips_sandbox_exec(monkeypatch) -> None:
+    """In-flight bash must not outlive --eval-max-wall-s (ZIP/angr hole)."""
+    from backend.sandbox.container import EVAL_WALL_EXEC_SKIP, DockerSandbox
+
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp", settings=Settings())
+    sb.workspace_dir = "/tmp/ws"
+    sb._started_monotonic = 1000.0
+    monkeypatch.setattr("backend.sandbox.container.time.monotonic", lambda: 1000.0)
+    assert sb._clamp_exec_timeout_s(300) == 300
+
+    sb.settings.eval_max_wall_s = 10
+    monkeypatch.setattr("backend.sandbox.container.time.monotonic", lambda: 1007.2)
+    assert sb._clamp_exec_timeout_s(300) == 2
+    assert sb._clamp_exec_timeout_s(900) == 2
+
+    monkeypatch.setattr("backend.sandbox.container.time.monotonic", lambda: 1020.0)
+    assert sb._clamp_exec_timeout_s(300) is None
+    assert sb._eval_wall_exceeded() is True
+
+    async def boom(*_a, **_k):
+        raise AssertionError("exec must not start after the eval wall")
+
+    sb._ensure_container_unlocked = boom  # type: ignore[method-assign]
+    sb._exec_inner = boom  # type: ignore[method-assign]
+    result = asyncio.run(sb.exec("python3 -c 'import angr'", timeout_s=300))
+    assert result.exit_code == 124
+    assert EVAL_WALL_EXEC_SKIP in result.stderr
+
+
 def test_sandbox_eval_wall_applies_before_pack_attach() -> None:
     """Pack bootstrap must see the same wall as the swarm loop (no Docker)."""
     from backend.sandbox.container import DockerSandbox

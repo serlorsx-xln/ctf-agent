@@ -117,6 +117,7 @@ def test_forensics_firmware_tools_mapped():
     assert "sqlite3" in PACK_SPECS["forensics"].apt
     assert "qemu-user-static" in PACK_SPECS["forensics"].apt
     assert "libc6-armhf-cross" in PACK_SPECS["forensics"].apt
+    assert "libstdc++6-armhf-cross" in PACK_SPECS["forensics"].apt
     assert TOOL_TO_PACK["unsquashfs"] == "forensics"
     assert TOOL_TO_PACK["sqlite3"] == "forensics"
     assert TOOL_TO_PACK["qemu-arm-static"] == "forensics"
@@ -150,6 +151,10 @@ def test_tool_routing_new_binaries():
 def test_pwn_pack_includes_x86_cross_binutils():
     assert "binutils-x86-64-linux-gnu" in PACK_SPECS["pwn"].apt
     assert "gdb-multiarch" in PACK_SPECS["pwn"].apt
+    assert "libstdc++6-amd64-cross" in PACK_SPECS["pwn"].apt
+    assert "libstdc++6-i386-cross" in PACK_SPECS["pwn"].apt
+    assert "nasm" in PACK_SPECS["pwn"].apt
+    assert "libc6-dbg" in PACK_SPECS["pwn"].apt
     from backend.tool_router import TOOL_TO_PACK, bootstrap_script, infer_pack_from_command
 
     boot = bootstrap_script("pwn")
@@ -159,8 +164,19 @@ def test_pwn_pack_includes_x86_cross_binutils():
     assert "/usr/local/bin/objdump" in boot
     assert "gdb-multiarch" in boot
     assert "/lib/x86_64-linux-gnu/libc.so.6" in boot
+    assert "/lib/x86_64-linux-gnu/libstdc++.so.6" in boot
     assert TOOL_TO_PACK["gdb-multiarch"] == "pwn"
     assert infer_pack_from_command("gdb-multiarch -q ./chal") == "pwn"
+    root = Path(__file__).resolve().parents[1]
+    pwn_df = (root / "sandbox" / "Dockerfile.pwn").read_text(encoding="utf-8")
+    mobile_df = (root / "sandbox" / "Dockerfile.mobile").read_text(encoding="utf-8")
+    assert "libstdc++6-amd64-cross" in pwn_df
+    assert "libstdc++6-i386-cross" in pwn_df
+    assert "nasm" in pwn_df
+    assert "libc6-dbg" in pwn_df
+    assert "libstdc++6-amd64-cross" in mobile_df
+    assert "libstdc++6-amd64-cross" in PACK_SPECS["mobile"].apt
+    assert "libstdc++6-i386-cross" in PACK_SPECS["mobile"].apt
 
 
 def test_pack_specs_include_new_packages():

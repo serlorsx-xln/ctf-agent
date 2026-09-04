@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -207,8 +208,56 @@ def challenges_cache_root() -> Path:
     return cache_dir() / "challenges"
 
 
+def _home_dir() -> Path:
+    return Path.home().expanduser().resolve()
+
+
+# System trees and well-known secret dirs — not challenge attachments.
+_DENIED_PREFIXES: tuple[str, ...] = (
+    "/etc",
+    "/private/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/System",
+    "/Library",
+    "/private/var/root",
+    "/var/root",
+    "/root",
+    "/proc",
+    "/dev",
+    "/sys",
+)
+_DENIED_HOME_FIRST: frozenset[str] = frozenset(
+    {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".netrc"}
+)
+
+
+def _posix_denied_prefix(resolved: Path) -> bool:
+    posix = resolved.as_posix()
+    if os.name == "nt":
+        low = posix.lower()
+        return low.startswith("c:/windows") or low.startswith("c:/program files")
+    for prefix in _DENIED_PREFIXES:
+        if posix == prefix or posix.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _is_denied_load_path(resolved: Path) -> bool:
+    if _posix_denied_prefix(resolved):
+        return True
+    try:
+        rel = resolved.relative_to(_home_dir())
+    except ValueError:
+        return False
+    if not rel.parts:
+        return False
+    return rel.parts[0] in _DENIED_HOME_FIRST
+
+
 def load_allowlist_roots() -> list[Path]:
-    """Host paths that may be copied into a challenge workspace."""
+    """Host paths that may be copied into a challenge workspace (plus home)."""
     roots: list[Path] = []
 
     def _add(raw: Path | str) -> None:
@@ -220,12 +269,18 @@ def load_allowlist_roots() -> list[Path]:
             roots.append(resolved)
 
     _add(Path.cwd())
+    try:
+        _add(_home_dir())
+    except OSError:
+        pass
     _add(challenges_cache_root())
     _add(Path(__file__).resolve().parents[1] / "challenges")
     try:
         _add(tempfile.gettempdir())
     except OSError:
         pass
+    if sys.platform == "darwin":
+        _add("/Volumes")
     for part in (os.environ.get("ARTEMIS_LOAD_ROOTS") or "").split(os.pathsep):
         if part.strip():
             _add(part.strip())
@@ -233,26 +288,25 @@ def load_allowlist_roots() -> list[Path]:
 
 
 def is_allowed_load_path(path: Path | str) -> bool:
-    """True when ``path`` (after symlink resolve) stays under an allowlisted root."""
+    """True when ``path`` is a user challenge path (any folder, including Downloads).
+
+    Denies system trees and secret dirs under the home folder (``.ssh``, …).
+    After resolve, any other existing path the operator pastes is allowed.
+    """
     try:
         resolved = Path(path).expanduser().resolve()
     except OSError:
         return False
-    for root in load_allowlist_roots():
-        try:
-            resolved.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
+    if _is_denied_load_path(resolved):
+        return False
+    return True
 
 
 def assert_allowed_load_path(path: Path | str) -> Path:
     resolved = Path(path).expanduser().resolve()
     if not is_allowed_load_path(resolved):
         raise PermissionError(
-            f"load path outside allowlist (cwd, cache, repo challenges/, "
-            f"temp, ARTEMIS_LOAD_ROOTS): {resolved}"
+            f"load path denied (system or secret dir, not a challenge path): {resolved}"
         )
     return resolved
 

@@ -23,13 +23,39 @@ from pathlib import Path
 
 _DECOY_MARKERS = (
     "fake_flag",
+    "fake-flag",
+    "fakeflag",
     "placeholder",
     "tryharder",
+    "try_harder",
+    "try-harder",
     "ctf{flag}",
     "flag{flag}",
     "default_flag",
     # leakme-style local decoy file body (typo intentional)
     "thie_is_test",
+    "your_flag_here",
+    "insert_flag",
+    "put_flag_here",
+    "flag_goes_here",
+    "flag_here",
+    "not_the_flag",
+    "nottheflag",
+    "wrong_flag",
+    "dummy_flag",
+    "dummyflag",
+    "this_is_a_flag",
+    "thisisaflag",
+    "todo_flag",
+    "lorem_ipsum",
+    "loremipsum",
+    "replace_me",
+    "put_your_flag",
+    "insert_your_flag",
+    "redacted",
+    "censored",
+    "coming_soon",
+    "changeme",
 )
 # Whole-string / body-only decoys (avoid substring hits on real flags)
 _DECOY_EXACT = frozenset(
@@ -42,8 +68,54 @@ _DECOY_EXACT = frozenset(
         "sample_flag",
         "flag",
         "the_flag",
+        "test",
+        "todo",
+        "tbd",
+        "wip",
+        "xxx",
+        "...",
+        "…",
+        "???",
+        "***",
+        "your_flag",
+        "not_a_flag",
+        "notflag",
+        "dummy",
+        "sample",
+        "example",
+        "foo",
+        "bar",
+        "baz",
+        "hello",
+        "hello_world",
+        "password",
+        "admin",
+        "secret",
+        "none",
+        "null",
+        "undefined",
+        "n/a",
+        "na",
+        "true",
+        "false",
+        "yes",
+        "no",
+        "success",
+        "correct",
+        "winner",
+        "you_win",
+        "congratulations",
+        "decoy",
+        "1234",
+        "12345",
+        "123456",
+        "password123",
     }
 )
+# 4→a 0→o etc. Applied to the brace body only (never as a substring of a long flag).
+_LEET_TABLE = str.maketrans("043571!@$", "oaestliaa")
+_PUNCT_BODY = re.compile(r"^[.?!*_\-–—•·x\s]{1,16}$", re.IGNORECASE)
+_REPEAT_BODY = re.compile(r"^(.)\1+$")
 
 # Formatless secret token (no whitespace)
 _FLAG_TOKEN = re.compile(r"^[A-Za-z0-9_+\/=-]{16,200}$")
@@ -166,14 +238,41 @@ def is_rewrap_of_tried(flag: str, tried: Sequence[str]) -> str | None:
     return None
 
 
+def _leet_plain(text: str) -> str:
+    return (text or "").lower().replace("-", "_").translate(_LEET_TABLE)
+
+
+def _structural_decoy_body(body: str) -> bool:
+    """Empty / punctuation / single-char / repeated-char brace bodies (CTF{}, CTF{...})."""
+    b = (body or "").strip()
+    if not b or len(b) == 1:
+        return True
+    if _PUNCT_BODY.fullmatch(b):
+        return True
+    return bool(_REPEAT_BODY.fullmatch(b))
+
+
 def is_decoy_flag(flag: str) -> bool:
-    f = (flag or "").strip().lower()
-    if not f:
+    raw = (flag or "").strip()
+    if not raw:
+        return True
+    f = raw.lower()
+    body = _flag_body(f)
+    if _structural_decoy_body(body):
         return True
     if any(m in f for m in _DECOY_MARKERS):
         return True
-    body = _flag_body(f)
-    return f in _DECOY_EXACT or body in _DECOY_EXACT
+    compact = f.replace("-", "_")
+    body_compact = body.replace("-", "_")
+    leet_body = _leet_plain(body)
+    if f in _DECOY_EXACT or body in _DECOY_EXACT:
+        return True
+    if compact in _DECOY_EXACT or body_compact in _DECOY_EXACT:
+        return True
+    if leet_body in _DECOY_EXACT:
+        return True
+    # Leetspeak of instructional markers (f4ke_fl4g → fake_flag), body-only.
+    return any(m == leet_body or m in leet_body for m in _DECOY_MARKERS)
 
 
 def is_filename_like_flag_token(flag: str) -> bool:

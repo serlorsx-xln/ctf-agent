@@ -18,7 +18,7 @@ const placeholder = {
   normal: [
     "Paste a challenge, path, or @files",
     "Artemis loads first, then asks flags / mode / models",
-    "/Users/me/challenges/foo",
+    "/Users/me/Downloads/chal  or  ~/Desktop/foo",
   ],
   // Host shell mode disabled under ARTEMIS=1; keep empty so prompts stay chat-first.
   shell: [] as string[],

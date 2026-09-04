@@ -65,11 +65,15 @@ EXTRACT_ONLY_DONOR_IMAGES: tuple[str, ...] = (
 _PACK_CACHE_SENTINELS: dict[str, tuple[str, ...]] = {
     "mobile": ("opt/jadx/bin/jadx",),
     "crypto": ("opt/sagemath/bin/sage", "opt/sagemath/bin/python3"),
-    "crypto-tools": ("opt/RsaCtfTool",),
+    "crypto-tools": (
+        "opt/RsaCtfTool",
+        "opt/flatter/bin/flatter",
+        "opt/cado-nfs/bin/cado-nfs",
+    ),
     "ghidra": ("opt/ghidra/support/analyzeHeadless",),
     "steg": ("opt/stegseek/bin/stegseek",),
     "pwn": ("root/.gdbinit-gef.py",),
-    "linux": ("opt/linux-tools",),
+    "linux": ("opt/linux-tools/bin/ffuf", "opt/linux-tools/bin/linpeas.sh"),
 }
 
 
@@ -325,6 +329,14 @@ async def materialize_pack(pack_id: str) -> tuple[bool, str]:
 
     if pack_id not in PACK_SPECS:
         return False, f"Unknown pack: {pack_id}"
+    from backend.sandbox.guest_libs import DONOR_GUEST_LIB_IMAGES
+
+    if pack_id in DONOR_GUEST_LIB_IMAGES:
+        from backend.sandbox.donor_build import ensure_donor_image
+
+        ok, msg = await ensure_donor_image(pack_id)
+        if not ok:
+            return False, msg
     cache = pack_cache_dir(pack_id)
     restamp_pack_ready_if_complete(pack_id)
     if (cache / ".ready").is_file() and not pack_cache_stale(pack_id):

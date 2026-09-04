@@ -115,6 +115,30 @@ def test_reject_leakme_local_decoy_body() -> None:
     assert msg.startswith("REJECTED")
 
 
+def test_reject_instructional_and_structural_decoys() -> None:
+    for token in (
+        "CTF{}",
+        "CTF{...}",
+        "CTF{xxx}",
+        "CTF{x}",
+        "HTB{placeholder}",
+        "flag{test}",
+        "CTF{your_flag_here}",
+        "CTF{not_the_flag}",
+        "TRYHARDER",
+        "try_harder",
+        "f4ke_fl4g",
+        "CTF{f4ke_fl4g}",
+        "CTF{redacted}",
+        "CTF{changeme}",
+        "flag{decoy}",
+    ):
+        assert is_decoy_flag(token), token
+        msg, done = accept_flag(token)
+        assert not done, token
+        assert msg.startswith("REJECTED"), token
+
+
 def test_reject_decoy_body_wrap() -> None:
     msg, done = accept_flag("v1t{fake_flag}")
     assert not done

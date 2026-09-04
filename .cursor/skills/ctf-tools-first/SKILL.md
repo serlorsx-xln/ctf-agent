@@ -21,7 +21,7 @@ description: >-
 ## Flags
 
 - Submit only a flag recovered from challenge logic.
-- Ignore decoys: `*fake_flag*`, `CTF{flag}`, `CTF{placeholder}`, `TRYHARDER`.
+- Ignore decoys: `*fake_flag*`, `CTF{flag}`, `CTF{}`, `CTF{...}`, `CTF{placeholder}`, `TRYHARDER`, `your_flag_here`.
 - `submit_flag` → `ACCEPTED (n/m)` until all required flags are in → `CORRECT`.
   (Required count comes from `flags_required: N` in challenge text; default 1.)
 

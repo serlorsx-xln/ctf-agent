@@ -82,6 +82,19 @@ describe("extractChallengePaths / loadArgsFromPrompt", () => {
       "C:/Users/me/challenges/glass",
     ])
   })
+
+  test("Downloads / Desktop / relative paths", () => {
+    expect(extractChallengePaths("/Users/me/Downloads/gctf-zip")).toEqual([
+      "/Users/me/Downloads/gctf-zip",
+    ])
+    expect(extractChallengePaths("~/Downloads/chal please")).toEqual(["~/Downloads/chal"])
+    expect(extractChallengePaths("Downloads/handout.bin solve")).toEqual(["Downloads/handout.bin"])
+    expect(extractChallengePaths("./Desktop/rev")).toEqual(["./Desktop/rev"])
+    expect(loadArgsFromPrompt("/Users/me/Downloads/gctf-zip")).toEqual({
+      mode: "artemis",
+      path: "/Users/me/Downloads/gctf-zip",
+    })
+  })
 })
 
 describe("file chips", () => {
