@@ -5,6 +5,7 @@ from __future__ import annotations
 from backend.sandbox.container import DockerSandbox
 from backend.sandbox.docker_client import cleanup_orphan_containers, configure_semaphore
 from backend.sandbox.harden import (
+    filter_lab_probe_hosts,
     harden_hosts_edit_command,
     harden_nmap_command,
     parse_challenge_network_hints,
@@ -20,6 +21,7 @@ __all__ = [
     "DockerSandbox",
     "cleanup_orphan_containers",
     "configure_semaphore",
+    "filter_lab_probe_hosts",
     "harden_hosts_edit_command",
     "harden_nmap_command",
     "parse_challenge_network_hints",

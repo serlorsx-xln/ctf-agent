@@ -7,7 +7,8 @@ import { daemon } from "../artemis/client"
 
 /**
  * First-run sandbox install gate. Blocks challenge load/solve until Docker L0
- * + pack caches exist. Esc does nothing while installing; after ready, closes.
+ * exists. Packs attach on demand. Esc does nothing while installing; after
+ * ready, closes.
  */
 function DialogSetupInstall(props: { onReady?: () => void }) {
   const dialog = useDialog()
@@ -176,11 +177,10 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
         </Show>
       </box>
       <text fg={theme.textMuted} wrapMode="word">
-        Docker L0 image + pack bake are required before solving. You cannot load a
-        challenge until Install finishes. Prefer answering Yes to the terminal
-        setup prompt when launching `artemis` (before this UI). For maximum solve
-        speed later, run `artemis setup` once (adds warm runtime images and can
-        prebuild the blutter Dart VM when a sample Flutter APK is available).
+        Docker L0 (`ctf-sandbox-core`) is required before solving. Packs attach
+        on demand after Install. Prefer answering Yes to the terminal setup
+        prompt when launching `artemis` (before this UI). For faster first-pack
+        attaches later, run `artemis setup` (lite) or `artemis setup --full`.
       </text>
       <Show when={message()}>
         <text fg={theme.warning} wrapMode="word">

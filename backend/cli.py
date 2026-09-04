@@ -90,7 +90,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
     API keys: /connect in the TUI — do not edit .env by hand.
 
     \b
-      artemis setup            Warm L0 + common packs once (Phase 3 bake)
+      artemis setup            Warm L0 + lite packs (web/steg/forensics)
+      artemis setup --full     Bake the full Jeopardy pack set (Sage, pwn, …)
     """
     _setup_logging(verbose)
     ctx.ensure_object(dict)
@@ -345,6 +346,7 @@ def _ask_flags_via_daemon(challenge_name: str) -> int | None:
     import time
     import uuid
 
+    from backend.daemon.auth import with_hello_token
     from backend.daemon.transport import daemon_configured_in_env, sync_connect
     from backend.flags import normalize_flags_required
 
@@ -365,7 +367,11 @@ def _ask_flags_via_daemon(challenge_name: str) -> int | None:
 
     try:
         s.sendall(
-            _json.dumps({"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}).encode()
+            _json.dumps(
+                with_hello_token(
+                    {"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}
+                )
+            ).encode()
             + b"\n"
         )
         s.sendall(
@@ -626,7 +632,13 @@ async def _run_coordinator(
     "--pack",
     "packs",
     multiple=True,
-    help="Pack id to bake (repeatable). Default: common Jeopardy set.",
+    help="Pack id to bake (repeatable). Default: lite set (web, steg, forensics).",
+)
+@click.option(
+    "--full",
+    "full",
+    is_flag=True,
+    help="Bake the full Jeopardy set (Sage, pwn, mobile, ghidra, linux, …).",
 )
 @click.option("--skip-core", is_flag=True, help="Do not build/check L0 core image")
 @click.option(
@@ -642,16 +654,18 @@ async def _run_coordinator(
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def setup_cmd(
     packs: tuple[str, ...],
+    full: bool,
     skip_core: bool,
     skip_warm_runtime: bool,
     skip_blutter_vm: bool,
     verbose: bool,
 ) -> None:
-    """Phase 3: warm L0 + common tool packs on this machine (once).
+    """Phase 3: warm L0 + selected tool packs on this machine (once).
 
     \b
-      artemis setup
-      artemis setup --pack mobile --pack pwn
+      artemis setup              lite packs (web, steg, forensics)
+      artemis setup --full       full Jeopardy set
+      artemis setup --pack pwn --pack crypto
 
     Extracts donor trees into ~/.cache/ctf-agent/packs and commits warm L0
     runtimes so the first solve skips cold apt/pip. When a sample Flutter APK
@@ -659,11 +673,18 @@ def setup_cmd(
     prebuilds the shared blutter Dart VM so the first Flutter solve is fast.
     """
     _setup_logging(verbose)
-    from backend.sandbox.setup_bake import run_setup
+    from backend.sandbox.setup_bake import FULL_BAKE_PACKS, run_setup
+
+    if packs:
+        chosen: list[str] | None = list(packs)
+    elif full:
+        chosen = list(FULL_BAKE_PACKS)
+    else:
+        chosen = None
 
     lines = asyncio.run(
         run_setup(
-            packs=list(packs) or None,
+            packs=chosen,
             skip_core=skip_core,
             skip_warm_runtime=skip_warm_runtime,
             skip_blutter_vm=skip_blutter_vm,
@@ -699,11 +720,15 @@ def msg(message: str, port: int, host: str) -> None:
     import json
     import urllib.request
 
+    headers = {"Content-Type": "application/json"}
+    tok = (os.environ.get("ARTEMIS_MSG_TOKEN") or "").strip()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
     body = json.dumps({"message": message}).encode()
     req = urllib.request.Request(
         f"http://{host}:{port}/msg",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

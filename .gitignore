@@ -54,3 +54,6 @@ challenges/*/Dockerfile.local
 
 # Human-only expected flags (never mount / never prompt)
 eval/sealed/
+
+# OpenCode TUI build stub (scripts/build-tui.sh)
+chassis/.github/TEAM_MEMBERS

@@ -58,7 +58,6 @@ def _make_solver(monkeypatch: pytest.MonkeyPatch) -> ClaudeSolver:
     settings.anthropic_model_id = "bigmodel/glm-5.2"
     settings.auto_confirm_flags = False
 
-    monkeypatch.setattr("backend.agents.claude_solver.DockerSandbox", lambda **kw: MagicMock())
     monkeypatch.setattr("backend.agents.claude_solver.SolverTracer", lambda *a, **kw: MagicMock())
 
     solver = ClaudeSolver(

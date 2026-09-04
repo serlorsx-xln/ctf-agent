@@ -156,7 +156,6 @@ PACK_SPECS: dict[str, PackSpec] = {
             "unicorn",
             "keystone-engine",
             "pyelftools",
-            "angr",
         ),
         gems=("one_gadget", "seccomp-tools"),
     ),
@@ -180,10 +179,10 @@ PACK_SPECS: dict[str, PackSpec] = {
             "/usr/local/bin/sage-python",
         ),
         bind_paths=("/opt/sagemath",),
-        # Keep bootstrap light: core image already has pycryptodome + sympy.
+        # Core already has pycryptodome + sympy. z3/numpy moved here from L0.
         # Do NOT pip-install galois here — it pulls numba and OOMs (exit 137)
         # inside typical Desktop RAM. Agents can `pip3 install galois` if needed.
-        pip=(),
+        pip=("z3-solver", "numpy"),
         path_dirs=(),
     ),
     "crypto-tools": PackSpec(
@@ -556,6 +555,7 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "unicorn": "pwn",
     "pyghidra": "ghidra",
     "dnfile": "ghidra",
+    "z3": "crypto",
     "galois": "crypto",
     "gmpy2": "crypto-tools",
     "fpylll": "crypto-tools",
@@ -578,6 +578,14 @@ _IMPORT_TO_PACK: dict[str, str] = {
     "imageio": "ml",
     "impacket": "linux",
     "bloodhound": "linux",
+}
+
+# Import name → pip package installed after the mapped pack is already ensured
+# (or when no pack is needed). Avoids looping ``ensure_pack`` forever.
+LAZY_PIP: dict[str, str] = {
+    "angr": "angr",
+    "z3": "z3-solver",
+    "numpy": "numpy",
 }
 
 
@@ -1633,6 +1641,17 @@ def infer_pack_from_command(command: str) -> str | None:
         return "ml"
     if "podman" in low_cmd or "buildah" in low_cmd:
         return "containers"
+    return None
+
+
+def infer_lazy_pip(command: str, stderr: str, stdout: str = "") -> str | None:
+    """Pip package for a ModuleNotFoundError that should not re-ensure a pack."""
+    _ = command
+    blob = f"{stderr}\n{stdout}"
+    for m in _IMPORT_FAIL_RE.finditer(blob):
+        mod = m.group(1).split(".")[0]
+        if mod in LAZY_PIP:
+            return LAZY_PIP[mod]
     return None
 
 

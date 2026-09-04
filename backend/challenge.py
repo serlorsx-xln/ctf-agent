@@ -22,8 +22,10 @@ Prompt follows Veria's skeleton — see ``backend/prompts.py``.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from backend.prompts import ChallengeMeta
@@ -196,6 +198,56 @@ def challenges_cache_root() -> Path:
     return cache_dir() / "challenges"
 
 
+def load_allowlist_roots() -> list[Path]:
+    """Host paths that may be copied into a challenge workspace."""
+    roots: list[Path] = []
+
+    def _add(raw: Path | str) -> None:
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except OSError:
+            return
+        if resolved not in roots:
+            roots.append(resolved)
+
+    _add(Path.cwd())
+    _add(challenges_cache_root())
+    _add(Path(__file__).resolve().parents[1] / "challenges")
+    try:
+        _add(tempfile.gettempdir())
+    except OSError:
+        pass
+    for part in (os.environ.get("ARTEMIS_LOAD_ROOTS") or "").split(os.pathsep):
+        if part.strip():
+            _add(part.strip())
+    return roots
+
+
+def is_allowed_load_path(path: Path | str) -> bool:
+    """True when ``path`` (after symlink resolve) stays under an allowlisted root."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return False
+    for root in load_allowlist_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def assert_allowed_load_path(path: Path | str) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    if not is_allowed_load_path(resolved):
+        raise PermissionError(
+            f"load path outside allowlist (cwd, cache, repo challenges/, "
+            f"temp, ARTEMIS_LOAD_ROOTS): {resolved}"
+        )
+    return resolved
+
+
 def slugify_challenge_name(text: str, fallback: str = "paste") -> str:
     first = ""
     for line in (text or "").splitlines():
@@ -245,6 +297,7 @@ def _copy_attachments(dist: Path, attachments: list[str] | None) -> None:
         src = Path(str(raw)).expanduser().resolve()
         if not src.exists():
             continue
+        assert_allowed_load_path(src)
         target = dist / src.name
         if src.is_dir():
             if target.exists():
@@ -329,6 +382,7 @@ def resolve_load_target(
         root = Path(p).expanduser().resolve()
         if not root.exists():
             raise FileNotFoundError(f"path not found: {root}")
+        assert_allowed_load_path(root)
         if root.is_dir():
             if text:
                 # Do not mutate the user's folder; paste must reach /challenge.

@@ -19,8 +19,18 @@ from pathlib import Path
 
 logger = logging.getLogger("ctf.setup")
 
-# Default warm set — covers most Jeopardy without pulling ml/linux/containers.
-DEFAULT_BAKE_PACKS: tuple[str, ...] = (
+# First-run / TUI Install gate: Docker + L0 only. Packs attach on demand.
+GATE_REQUIRED_PACKS: tuple[str, ...] = ()
+
+# ``artemis setup`` default — cheap Jeopardy packs (no Sage / pwn / mobile).
+LITE_BAKE_PACKS: tuple[str, ...] = (
+    "web",
+    "steg",
+    "forensics",
+)
+
+# ``artemis setup --full`` — previous default Jeopardy set (still skips ml).
+FULL_BAKE_PACKS: tuple[str, ...] = (
     "mobile",
     "pwn",
     "ghidra",
@@ -30,6 +40,19 @@ DEFAULT_BAKE_PACKS: tuple[str, ...] = (
     "forensics",
     "web",
     "linux",
+)
+
+# Alias kept for older imports / docs; default bake is the lite set.
+DEFAULT_BAKE_PACKS: tuple[str, ...] = LITE_BAKE_PACKS
+
+# Donor images used only as extract sources (not L0 runtimes). Safe to drop
+# after pack cache ``.ready`` — keep core / pwn / mobile / warm-*.
+EXTRACT_ONLY_DONOR_IMAGES: tuple[str, ...] = (
+    "ctf-sandbox-crypto",
+    "ctf-sandbox-ghidra",
+    "ctf-sandbox-crypto-tools",
+    "ctf-sandbox-linux",
+    "ctf-sandbox-steg",
 )
 
 # Host-cache paths that must exist after a successful donor extract. Top-level
@@ -540,7 +563,7 @@ async def run_setup(
         if not ok:
             return lines
 
-    chosen = list(packs) if packs else list(DEFAULT_BAKE_PACKS)
+    chosen = list(LITE_BAKE_PACKS) if packs is None else list(packs)
     total = len(chosen)
     for i, pack_id in enumerate(chosen, start=1):
         _emit(f"Pack {i}/{total}: {pack_id}…")
@@ -550,7 +573,7 @@ async def run_setup(
         _emit(line)
 
     # Blutter VM warm needs the mobile pack tree; skip when mobile was not baked.
-    want_blutter = (packs is None or "mobile" in chosen) and not skip_blutter_vm
+    want_blutter = "mobile" in chosen and not skip_blutter_vm
     _emit("Blutter shared cache…")
     blutter = await warm_shared_blutter_state(
         skip_vm_compile=not want_blutter,
@@ -563,10 +586,6 @@ async def run_setup(
 
     if not skip_warm_runtime:
         warm_ids = [p for p in chosen if p in WARM_BAKE_PACKS]
-        # Always include default warm set when using DEFAULT_BAKE_PACKS so
-        # ``artemis setup`` alone kills cold apt on first solve.
-        if packs is None:
-            warm_ids = list(WARM_BAKE_PACKS)
         for pack_id in warm_ids:
             _emit(f"Warm runtime: {pack_id}…")
             ok, msg = await warm_pack_runtime(pack_id)
@@ -576,5 +595,68 @@ async def run_setup(
     else:
         _emit("Skipping warm runtime commits (use `artemis setup` later for faster solves).")
 
+    for line in await prune_extract_only_donors(
+        pack_ids=chosen, on_progress=on_progress
+    ):
+        lines.append(line)
+        _emit(line)
+
     _emit("Install steps finished.")
+    return lines
+
+
+def _keep_extract_donors() -> bool:
+    return (os.environ.get("ARTEMIS_KEEP_EXTRACT_DONORS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+async def prune_extract_only_donors(
+    *,
+    pack_ids: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> list[str]:
+    """``docker rmi`` extract-only donors after pack cache is ready.
+
+    Keeps ``ctf-sandbox-core`` / ``ctf-sandbox-pwn`` / ``ctf-sandbox-mobile``
+    and ``ctf-sandbox-warm-*``. When ``pack_ids`` is set, only donors for those
+    packs are removed (L0-only gate therefore prunes nothing). Set
+    ``ARTEMIS_KEEP_EXTRACT_DONORS=1`` to skip.
+    """
+    if _keep_extract_donors():
+        return ["INFO keep extract-only donors (ARTEMIS_KEEP_EXTRACT_DONORS=1)"]
+
+    from backend.sandbox.docker_client import _docker_cli
+    from backend.tool_router import PACK_SPECS
+
+    if pack_ids is None:
+        images = EXTRACT_ONLY_DONOR_IMAGES
+    else:
+        want = {
+            spec.image
+            for pid in pack_ids
+            if (spec := PACK_SPECS.get(pid)) is not None
+            and spec.image in EXTRACT_ONLY_DONOR_IMAGES
+        }
+        images = tuple(img for img in EXTRACT_ONLY_DONOR_IMAGES if img in want)
+        if not images:
+            return []
+
+    lines: list[str] = []
+    for image in images:
+        rc, _, err = await _docker_cli("rmi", image, timeout_s=90)
+        if rc == 0:
+            line = f"OK  pruned extract-only donor {image}"
+        elif err and "No such image" in err:
+            line = f"INFO extract-only donor {image} already absent"
+        else:
+            # In-use or inspect miss — not a setup failure.
+            detail = (err or "").strip().splitlines()[-1] if err else f"exit {rc}"
+            line = f"INFO skip prune {image}: {detail}"
+        lines.append(line)
+        if on_progress:
+            on_progress(line)
     return lines

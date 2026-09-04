@@ -90,7 +90,8 @@ Manual steps (equivalent):
 uv sync
 
 # Prefer: build L0 + pack caches via Artemis (scrubbed build context — safe on ExFAT/USB)
-# uv run artemis setup
+# uv run artemis setup                 # lite packs (web / steg / forensics)
+# uv run artemis setup --full          # full Jeopardy set (Sage, pwn, mobile, …)
 # uv run artemis setup --skip-warm-runtime   # host cache only (faster setup, slower first solve)
 # uv run artemis setup --skip-blutter-vm     # skip Dart VM prebuild (needs sample Flutter APK)
 #
@@ -159,8 +160,8 @@ discarded from the final image).
 
 | Layer | Tools (representative) |
 |-------|------------------------|
-| **L0 core** | python3, pwntools, z3, gdb, binutils, curl, socat, gf128-roots |
-| **pwn** | qemu-user (+ guest libc on aarch64), GEF, ROPgadget, one_gadget, patchelf, angr, r2 |
+| **L0 core** | python3, pwntools, gdb, binutils, curl, socat, gf128-roots |
+| **pwn** | qemu-user (+ guest libc on aarch64), GEF, ROPgadget, one_gadget, patchelf, r2 (angr on first import) |
 | **ghidra** | Ghidra + pyghidra / analyzeHeadless (prefetched with ELF / on `import pyghidra`) |
 | **crypto** | SageMath, pycryptodome (in Sage), galois |
 | **crypto-tools** | flatter, cado-nfs, RsaCtfTool, fpylll, gmpy2 |

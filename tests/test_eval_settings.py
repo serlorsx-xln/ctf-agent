@@ -110,6 +110,7 @@ def test_eval_budget_usd() -> None:
     s.eval_max_usd = 1.5
     assert state.budget_exceeded(s, 2.0) == EVAL_BUDGET
     assert state.budget_exceeded(s, 0.5) is None
+    assert state.budget_exceeded(s, None) == EVAL_BUDGET
 
 
 def test_agent_failed_excludes_infra() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 logger = logging.getLogger("ctf.sandbox")
@@ -95,6 +96,68 @@ def parse_challenge_network_hints(text: str) -> tuple[list[str], list[int]]:
             _add_port(part)
 
     return hosts[:8], ports[:32]
+
+
+_LAB_FQDN_SUFFIXES = (".htb", ".thm", ".lab")
+
+
+def _is_rfc1918_host(host: str) -> bool:
+    h = host.strip().lower()
+    if h.startswith("10."):
+        return True
+    if h.startswith("192.168."):
+        return True
+    if h.startswith("172."):
+        parts = h.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            return 16 <= int(parts[1]) <= 31
+    return False
+
+
+def _lab_hosts_allowlist() -> set[str]:
+    raw = os.environ.get("CTF_LAB_HOSTS") or ""
+    return {x.strip().rstrip(".").lower() for x in raw.split(",") if x.strip()}
+
+
+def _allow_raw_rfc1918_probe() -> bool:
+    return (os.environ.get("CTF_ALLOW_LAB_PROBE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def filter_lab_probe_hosts(hosts: list[str], text: str = "") -> list[str]:
+    """Drop raw RFC1918 mentions unless the operator opted in.
+
+    Always keep ``*.htb`` / ``*.thm`` / ``*.lab`` and hosts from ``nc host port``.
+    Other RFC1918 addresses require ``CTF_ALLOW_LAB_PROBE=1`` or ``CTF_LAB_HOSTS``.
+    """
+    nc_hosts: set[str] = set()
+    for m in re.finditer(r"\bnc\s+([A-Za-z0-9._-]+)\s+(\d{2,5})\b", text or "", flags=re.I):
+        nc_hosts.add(m.group(1).strip().rstrip(".").lower())
+    allow = _lab_hosts_allowlist()
+    allow_rfc = _allow_raw_rfc1918_probe()
+    out: list[str] = []
+    seen: set[str] = set()
+    for host in hosts:
+        key = host.strip().rstrip(".").lower()
+        if not key or key in seen:
+            continue
+        keep = False
+        if key in allow or key in nc_hosts:
+            keep = True
+        elif any(key.endswith(suf) for suf in _LAB_FQDN_SUFFIXES):
+            keep = True
+        elif _is_rfc1918_host(key):
+            keep = allow_rfc
+        else:
+            keep = True
+        if keep:
+            seen.add(key)
+            out.append(host)
+    return out
 
 
 def harden_nmap_command(command: str) -> str:

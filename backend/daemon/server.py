@@ -211,6 +211,11 @@ class _PeerConn:
         if hello.get("type") != "hello":
             await self._send(protocol.make_error(hello.get("id"), "expected hello first"))
             return
+        from backend.daemon.auth import hello_authorized
+
+        if not hello_authorized(hello):
+            await self._send(protocol.make_error(hello.get("id"), "unauthorized"))
+            return
         self.role = hello.get("role") or protocol.ROLE_TUI
         # Prefer hello.session; swarm/usage peers often set ARTEMIS_SESSION_ID.
         self.session = normalize_session_id(
@@ -254,7 +259,13 @@ class _PeerConn:
             await self._run_swarm()
 
     def _sid(self, msg: dict[str, Any] | None = None) -> str:
-        if msg and msg.get("session") is not None:
+        # Swarm/usage peers must stay on the hello-bound session. TUI may
+        # address a chat id per message (and rebind mid-install via hello).
+        if (
+            self.role == protocol.ROLE_TUI
+            and msg
+            and msg.get("session") is not None
+        ):
             return normalize_session_id(msg.get("session"))
         return normalize_session_id(self.session)
 
@@ -602,8 +613,10 @@ class _PeerConn:
 
 async def _async_main() -> None:
     from backend.cache import cache_dir
+    from backend.daemon.auth import ensure_daemon_token
     from backend.process_hygiene import cleanup_orphan_cursor_bridges
 
+    ensure_daemon_token()
     log_dir = cache_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "daemon.log"

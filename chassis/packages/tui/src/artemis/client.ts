@@ -273,6 +273,9 @@ class DaemonClient {
           type: "hello",
           role: "tui",
           session: this.currentSession(),
+          ...(process.env.ARTEMIS_DAEMON_TOKEN
+            ? { token: process.env.ARTEMIS_DAEMON_TOKEN }
+            : {}),
         })
       } else {
         try {
@@ -367,6 +370,9 @@ class DaemonClient {
             type: "hello",
             role: "tui",
             session: this.currentSession(),
+            ...(process.env.ARTEMIS_DAEMON_TOKEN
+              ? { token: process.env.ARTEMIS_DAEMON_TOKEN }
+              : {}),
           })
           setTimeout(() => {
             if (this.pending.has(helloId)) {

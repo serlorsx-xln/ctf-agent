@@ -18,8 +18,8 @@ for arg in "$@"; do
       cat <<EOF
 Artemis install — Python 3.14 + uv + Bun + Docker L0 (+ optional pack warm).
 
-  bash scripts/install.sh              # deps + L0 image
-  bash scripts/install.sh --full       # all donor images + pack warm (slow, Sage ~1GB)
+  bash scripts/install.sh              # deps (cursor-only) + L0 image
+  bash scripts/install.sh --full       # provider extras + all donors + full pack warm
   bash scripts/install.sh --skip-docker  # no docker build (CI / no daemon)
 
 Platforms: macOS (Intel/ARM), Linux, WSL2 (use this script, not .ps1).
@@ -193,10 +193,32 @@ EOF
   log "Global command: artemis (open a new terminal)"
 }
 
+ensure_user_path() {
+  local marker='.local/bin'
+  local line='export PATH="$HOME/.local/bin:$PATH"'
+  local f wrote=0
+  for f in "${HOME}/.zprofile" "${HOME}/.zshrc"; do
+    if [[ -f "$f" ]] && grep -F "$marker" "$f" >/dev/null 2>&1; then
+      continue
+    fi
+    printf '\n# Artemis CLI\n%s\n' "$line" >> "$f"
+    log "Added ~/.local/bin to PATH in $f"
+    wrote=1
+  done
+  if [[ "$wrote" -eq 0 ]]; then
+    log "~/.local/bin already on PATH in shell profile"
+  fi
+}
+
 sync_python_deps() {
   # External/USB volumes often cannot hardlink; copy avoids partial pydantic_ai installs.
   export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
-  uv sync --python 3.14
+  if [[ "$FULL" -eq 1 ]]; then
+    uv sync --python 3.14 --all-extras
+  else
+    # End-user default: no pytest / no Claude+Gemini SDKs.
+    uv sync --python 3.14 --no-dev
+  fi
   if ! uv run python -c "from pydantic_ai.usage import RunUsage" 2>/dev/null; then
     warn "Repairing incomplete pydantic-ai install…"
     uv sync --reinstall-package pydantic-ai-slim --reinstall-package pydantic-ai --python 3.14
@@ -226,6 +248,7 @@ if ! bash scripts/build-tui.sh; then
 fi
 
 install_cli
+ensure_user_path
 
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
   if wait_docker; then
@@ -234,8 +257,8 @@ if [[ "$SKIP_DOCKER" -eq 0 ]]; then
       build_donors
     fi
     if [[ "$SKIP_BAKE" -eq 0 && "$FULL" -eq 1 ]]; then
-      log "Warming pack caches (artemis setup)…"
-      uv run artemis setup -v
+      log "Warming pack caches (artemis setup --full)…"
+      uv run artemis setup --full -v
     fi
   else
     warn "Docker not usable — skipped image build."

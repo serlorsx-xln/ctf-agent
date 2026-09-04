@@ -35,7 +35,7 @@ PROBES: dict[str, str] = {
         "&& command -v exiftool && command -v tesseract "
         "&& python3 -c 'from PIL import Image; import pytesseract'"
     ),
-    "pwn": ("command -v q64 && command -v r2 && python3 -c 'import angr,capstone'"),
+    "pwn": ("command -v q64 && command -v r2 && python3 -c 'import capstone,keystone'"),
     "ghidra": (
         "test -x /opt/ghidra/support/analyzeHeadless "
         "&& command -v analyzeHeadless "
@@ -94,7 +94,7 @@ async def main() -> int:
     chal = tempfile.mkdtemp(prefix="ctf-pack-smoke-")
     (Path(chal) / "challenge.txt").write_text("pack smoke\n", encoding="utf-8")
 
-    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir=chal, memory_limit="16g")
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir=chal, memory_limit="4g")
     results: list[tuple[str, str, str]] = []
     try:
         print("starting L0…", flush=True)

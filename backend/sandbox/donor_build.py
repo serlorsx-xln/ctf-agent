@@ -98,7 +98,7 @@ async def _donor_image_functional(pack_id: str, image: str) -> bool:
         "python3",
         image,
         "-c",
-        "import angr, pwn, keystone",
+        "import pwn, keystone, capstone",
         timeout_s=120,
     )
     ok = rc == 0
@@ -176,12 +176,18 @@ async def ensure_donor_image(pack_id: str) -> tuple[bool, str]:
                     timeout_s,
                 )
                 # Surface progress into the agent bash stream via stderr logger.
-                rc, out, err = await _docker_cli(
+                build_args: list[str] = [
                     "build",
                     "-f",
                     str(ctx / dockerfile_name),
                     "-t",
                     image,
+                ]
+                if pack_id == "crypto-tools":
+                    jobs = (os.environ.get("ARTEMIS_DONOR_BUILD_JOBS") or "2").strip() or "2"
+                    build_args.extend(["--build-arg", f"BUILD_JOBS={jobs}"])
+                rc, out, err = await _docker_cli(
+                    *build_args,
                     str(ctx),
                     timeout_s=timeout_s,
                 )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -247,11 +249,36 @@ async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Serv
 
             if method == "POST" and content_length > 0:
                 body = await asyncio.wait_for(reader.read(content_length), timeout=5)
+                data: dict[str, Any] | None
                 try:
-                    data = json.loads(body)
-                    message = data.get("message", body.decode())
+                    parsed = json.loads(body)
+                    data = parsed if isinstance(parsed, dict) else None
+                    message = (
+                        parsed.get("message", body.decode())
+                        if isinstance(parsed, dict)
+                        else body.decode()
+                    )
                 except (json.JSONDecodeError, UnicodeDecodeError):
+                    data = None
                     message = body.decode("utf-8", errors="replace")
+
+                required = (os.environ.get("ARTEMIS_MSG_TOKEN") or "").strip()
+                if required:
+                    auth = headers.get("authorization") or headers.get("x-artemis-token") or ""
+                    got = auth[7:].strip() if auth.lower().startswith("bearer ") else auth.strip()
+                    if not got and data:
+                        got = str(data.get("token") or "")
+                    if (
+                        not got
+                        or len(got) != len(required)
+                        or not secrets.compare_digest(got, required)
+                    ):
+                        resp = json.dumps({"ok": False, "error": "unauthorized"})
+                        writer.write(
+                            f"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {len(resp)}\r\n\r\n{resp}".encode()
+                        )
+                        await writer.drain()
+                        return
 
                 inbox.put_nowait(message)
                 resp = json.dumps({"ok": True, "queued": message[:200]})

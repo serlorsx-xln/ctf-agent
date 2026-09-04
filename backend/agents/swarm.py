@@ -580,7 +580,7 @@ class ChallengeSwarm:
 
         while not self.cancel_event.is_set():
             # Eval wall / USD budgets (thin harness).
-            cost_now = 0.0
+            cost_now = None
             if self.cost_tracker is not None:
                 cost_now = _tracker_cost_usd(self.cost_tracker)
             budget = self._eval.budget_exceeded(self.settings, cost_now) if self._eval else None

@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _LOCK = asyncio.Lock()
 _SANDBOXES: dict[str, Any] = {}
+_REFS: dict[str, int] = {}
+_PINNED: set[str] = set()
 _ORPHAN_CLEANUP_AT: dict[str, float] = {}
 _ORPHAN_CLEANUP_TTL_S = 45.0
 
@@ -67,8 +69,19 @@ def _sandbox_cache_key(challenge_dir: str, session_id: str | None = None) -> str
     return f"{resolve_session_id(session_id)}::{_key(challenge_dir)}"
 
 
-async def get_sandbox(challenge_dir: str, session_id: str | None = None):
-    """Return a started DockerSandbox for challenge_dir (cached per session)."""
+async def get_sandbox(
+    challenge_dir: str,
+    session_id: str | None = None,
+    settings: Any | None = None,
+    *,
+    pin: bool = True,
+):
+    """Return a started DockerSandbox for challenge_dir (cached per session).
+
+    ``pin=True`` (TUI / bridge) keeps the box until ``stop_sandbox``. Solver
+    ``acquire_sandbox`` uses ``pin=False`` plus a refcount so one solver
+    ``stop()`` does not kill siblings on the same challenge.
+    """
     from backend.config import Settings
     from backend.sandbox import DockerSandbox, cleanup_orphan_containers
     from backend.sandbox.docker_client import ensure_start_semaphore
@@ -81,6 +94,8 @@ async def get_sandbox(challenge_dir: str, session_id: str | None = None):
         if existing is not None:
             try:
                 if getattr(existing, "container_id", None):
+                    if pin:
+                        _PINNED.add(key)
                     return existing
             except Exception:
                 pass
@@ -89,6 +104,8 @@ async def get_sandbox(challenge_dir: str, session_id: str | None = None):
             except Exception:
                 pass
             _SANDBOXES.pop(key, None)
+            _REFS.pop(key, None)
+            _PINNED.discard(key)
 
         ensure_start_semaphore(50)
         now = time.monotonic()
@@ -96,18 +113,64 @@ async def get_sandbox(challenge_dir: str, session_id: str | None = None):
         if now - last >= _ORPHAN_CLEANUP_TTL_S:
             await cleanup_orphan_containers(session_id=sid)
             _ORPHAN_CLEANUP_AT[sid] = now
-        settings = Settings()
+        cfg = settings if settings is not None else Settings()
         sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", None) or "ctf-sandbox-core",
+            image=getattr(cfg, "sandbox_image", None) or "ctf-sandbox-core",
             challenge_dir=chal,
-            memory_limit=getattr(settings, "container_memory_limit", None) or "16g",
-            settings=settings,
+            memory_limit=getattr(cfg, "container_memory_limit", None) or "4g",
+            settings=cfg,
             session_id=sid,
         )
         await sandbox.start()
         _SANDBOXES[key] = sandbox
+        if pin:
+            _PINNED.add(key)
         _write_meta(chal, getattr(sandbox, "container_id", None), session_id=sid)
         return sandbox
+
+
+async def acquire_sandbox(
+    challenge_dir: str,
+    settings: Any | None = None,
+    session_id: str | None = None,
+):
+    """Get or create the shared box and bump the solver refcount."""
+    sandbox = await get_sandbox(
+        challenge_dir, session_id=session_id, settings=settings, pin=False
+    )
+    sid = resolve_session_id(session_id)
+    key = _sandbox_cache_key(challenge_dir, sid)
+    async with _LOCK:
+        _REFS[key] = _REFS.get(key, 0) + 1
+    return sandbox
+
+
+async def release_sandbox(
+    challenge_dir: str, session_id: str | None = None
+) -> str:
+    """Drop one solver ref; stop the box when unpinned and refs hit zero."""
+    sid = resolve_session_id(session_id)
+    key = _sandbox_cache_key(challenge_dir, sid)
+    async with _LOCK:
+        n = _REFS.get(key, 0) - 1
+        if n > 0:
+            _REFS[key] = n
+            return f"Released sandbox for {key} (refs={n})"
+        _REFS.pop(key, None)
+        if key in _PINNED:
+            return f"Released sandbox for {key} (pinned)"
+        sb = _SANDBOXES.pop(key, None)
+        if sb is not None:
+            await sb.stop()
+            return f"Stopped sandbox for {key}"
+        return f"No sandbox for {key}"
+
+
+def reset_sandbox_cache_for_tests() -> None:
+    _SANDBOXES.clear()
+    _REFS.clear()
+    _PINNED.clear()
+    _ORPHAN_CLEANUP_AT.clear()
 
 
 async def stop_sandbox(
@@ -117,6 +180,8 @@ async def stop_sandbox(
     async with _LOCK:
         if challenge_dir:
             key = _sandbox_cache_key(challenge_dir, sid)
+            _PINNED.discard(key)
+            _REFS.pop(key, None)
             sb = _SANDBOXES.pop(key, None)
             if sb is not None:
                 await sb.stop()
@@ -126,6 +191,8 @@ async def stop_sandbox(
         prefix = f"{sid}::"
         keys = [k for k in _SANDBOXES if k.startswith(prefix)]
         for key in keys:
+            _PINNED.discard(key)
+            _REFS.pop(key, None)
             sb = _SANDBOXES.pop(key)
             try:
                 await sb.stop()
@@ -215,6 +282,7 @@ def _notify_daemon_session_refresh(session_id: str | None = None) -> None:
     import json
     import uuid
 
+    from backend.daemon.auth import with_hello_token
     from backend.daemon.transport import daemon_configured_in_env, sync_connect
 
     if not daemon_configured_in_env():
@@ -226,7 +294,9 @@ def _notify_daemon_session_refresh(session_id: str | None = None) -> None:
         s.sendall(
             (
                 json.dumps(
-                    {"v": 1, "id": None, "type": "hello", "role": "usage", "session": session}
+                    with_hello_token(
+                        {"v": 1, "id": None, "type": "hello", "role": "usage", "session": session}
+                    )
                 )
                 + "\n"
                 + json.dumps(

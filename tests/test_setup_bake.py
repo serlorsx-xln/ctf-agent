@@ -6,6 +6,9 @@ import pytest
 
 from backend.sandbox.setup_bake import (
     DEFAULT_BAKE_PACKS,
+    FULL_BAKE_PACKS,
+    GATE_REQUIRED_PACKS,
+    LITE_BAKE_PACKS,
     dockerfile_digest,
     pack_cache_incomplete,
     pack_cache_stale,
@@ -14,12 +17,19 @@ from backend.sandbox.setup_bake import (
 )
 
 
-def test_default_bake_packs_cover_common_jeopardy():
-    assert "mobile" in DEFAULT_BAKE_PACKS
-    assert "pwn" in DEFAULT_BAKE_PACKS
-    assert "crypto" in DEFAULT_BAKE_PACKS
-    assert "linux" in DEFAULT_BAKE_PACKS
-    assert "ml" not in DEFAULT_BAKE_PACKS  # stay light by default
+def test_lite_default_and_full_bake_sets():
+    assert GATE_REQUIRED_PACKS == ()
+    assert DEFAULT_BAKE_PACKS == LITE_BAKE_PACKS
+    assert "web" in LITE_BAKE_PACKS
+    assert "steg" in LITE_BAKE_PACKS
+    assert "forensics" in LITE_BAKE_PACKS
+    assert "crypto" not in LITE_BAKE_PACKS
+    assert "pwn" not in LITE_BAKE_PACKS
+    assert "mobile" in FULL_BAKE_PACKS
+    assert "pwn" in FULL_BAKE_PACKS
+    assert "crypto" in FULL_BAKE_PACKS
+    assert "linux" in FULL_BAKE_PACKS
+    assert "ml" not in FULL_BAKE_PACKS  # stay light even on --full
 
 
 def test_probe_docker_env_reports_something(monkeypatch, tmp_path: Path):

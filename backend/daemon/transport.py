@@ -77,18 +77,26 @@ def child_daemon_env() -> dict[str, str]:
             if env_port.isdigit():
                 port = int(env_port)
         if port <= 0:
-            return {"ARTEMIS_DAEMON_TCP": "1"}
-        endpoint = f"tcp:{DEFAULT_TCP_HOST}:{port}"
-        return {
-            "ARTEMIS_DAEMON_ENDPOINT": endpoint,
-            "ARTEMIS_DAEMON_PORT": str(port),
-            "ARTEMIS_DAEMON_TCP": "1",
+            env = {"ARTEMIS_DAEMON_TCP": "1"}
+        else:
+            endpoint = f"tcp:{DEFAULT_TCP_HOST}:{port}"
+            env = {
+                "ARTEMIS_DAEMON_ENDPOINT": endpoint,
+                "ARTEMIS_DAEMON_PORT": str(port),
+                "ARTEMIS_DAEMON_TCP": "1",
+            }
+    else:
+        sock = str(daemon_socket_path())
+        env = {
+            "ARTEMIS_DAEMON_SOCK": sock,
+            "ARTEMIS_DAEMON_ENDPOINT": f"unix:{sock}",
         }
-    sock = str(daemon_socket_path())
-    return {
-        "ARTEMIS_DAEMON_SOCK": sock,
-        "ARTEMIS_DAEMON_ENDPOINT": f"unix:{sock}",
-    }
+    from backend.daemon.auth import client_daemon_token
+
+    tok = client_daemon_token()
+    if tok:
+        env["ARTEMIS_DAEMON_TOKEN"] = tok
+    return env
 
 
 def _parse_endpoint() -> tuple[str, Any]:
@@ -206,10 +214,14 @@ def _daemon_alive_handshake(timeout: float) -> bool:
         return False
     try:
         s.settimeout(max(float(timeout), 0.15))
-        hello = protocol.make_message(
-            type="hello",
-            id="alive",
-            role=protocol.ROLE_USAGE,
+        from backend.daemon.auth import with_hello_token
+
+        hello = with_hello_token(
+            protocol.make_message(
+                type="hello",
+                id="alive",
+                role=protocol.ROLE_USAGE,
+            )
         )
         s.sendall(protocol.encode(hello))
         buf = b""

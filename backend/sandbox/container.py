@@ -37,6 +37,7 @@ from backend.sandbox.governor import (
     sandbox_nano_cpus,
 )
 from backend.sandbox.harden import (
+    filter_lab_probe_hosts,
     harden_hosts_edit_command,
     harden_nmap_command,
     parse_challenge_network_hints,
@@ -52,6 +53,23 @@ from backend.sandbox.proxy import _DEFAULT_PROBE_PORTS, _lab_probe_script
 logger = logging.getLogger(__name__)
 
 
+def allowed_sandbox_write_path(path: str) -> str:
+    """Confine agent writes to ``/challenge/workspace`` (relative paths join it)."""
+    from posixpath import normpath
+
+    raw = (path or "").strip()
+    if not raw:
+        raise ValueError("empty write path")
+    if raw.startswith("~"):
+        raise PermissionError("write_file confined to /challenge/workspace")
+    if not raw.startswith("/"):
+        raw = "/challenge/workspace/" + raw.lstrip("./")
+    norm = normpath(raw)
+    if norm != "/challenge/workspace" and not norm.startswith("/challenge/workspace/"):
+        raise PermissionError(f"write_file confined to /challenge/workspace (got {path})")
+    return norm
+
+
 @dataclass
 class ExecResult:
     exit_code: int
@@ -65,7 +83,7 @@ class DockerSandbox:
 
     image: str
     challenge_dir: str
-    memory_limit: str = "16g"
+    memory_limit: str = "4g"
     # Optional Settings (or duck-typed) for pack preflight / eval_strict_packs.
     settings: Any = None
     # Artemis TUI / swarm session id (container label + orphan cleanup scope).
@@ -393,7 +411,7 @@ class DockerSandbox:
                         elif pack == "ghidra":
                             hint = "ghidra apt/pip ~3–5 min on fresh core"
                         elif pack == "pwn":
-                            hint = "pwn pip/angr ~5–8 min on fresh core"
+                            hint = "pwn apt/pip ~2–4 min on fresh core (angr is lazy)"
                         else:
                             hint = "usually under 2 min"
                         logger.info("Prefetch bootstrap pack=%s (%s)…", pack, hint)
@@ -604,9 +622,10 @@ class DockerSandbox:
 
     def _challenge_probe_hosts(self) -> list[str]:
         """Lab/target IPs from challenge text (for direct-vs-SOCKS calibration)."""
-        hosts, ports = parse_challenge_network_hints(self._challenge_text())
+        text = self._challenge_text()
+        hosts, ports = parse_challenge_network_hints(text)
         self._challenge_ports = ports
-        return hosts
+        return filter_lab_probe_hosts(hosts, text)
 
     def _probe_ports(self) -> list[int]:
         """Challenge-mentioned ports first, then generic defaults (incl. sentinels)."""
@@ -1506,6 +1525,7 @@ class DockerSandbox:
         """Write a file into the container via tar archive."""
         if not self.workspace_dir:
             raise RuntimeError("Sandbox not started")
+        path = allowed_sandbox_write_path(path)
 
         if isinstance(content, str):
             content = content.encode("utf-8")

@@ -23,9 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dbg \
     && rm -rf /var/lib/apt/lists/*
 
-# Core already ships pwntools + pyelftools; add the heavy RE/pwn stack once here.
+# Core already ships pwntools + pyelftools; add the RE/pwn stack once here.
+# angr is lazy-pip on first ``import angr`` (keeps the default pwn image lighter).
 RUN pip3 install --no-cache-dir --break-system-packages \
-    ROPgadget capstone unicorn keystone-engine angr
+    ROPgadget capstone unicorn keystone-engine
 
 RUN gem install one_gadget seccomp-tools --no-document
 

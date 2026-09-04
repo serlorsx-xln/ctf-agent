@@ -11,7 +11,7 @@ dnfile               Parse .NET PE metadata / methods / user strings (pip).
                      python3 -c 'from dnfile import dnPE; pe=dnPE("x.dll"); ...'
 monodis              Mono IL disassembler for managed assemblies.
                      monodis --output=il.txt /challenge/distfiles/app.dll
-r2 / angr            Also in the pwn pack for lighter RE / symbolic work.
+r2 / angr            r2 is in the pwn pack; ``import angr`` pip-installs angr.
 
 == NOTES ==
 First ensure may download/extract a large tree into the host pack cache.

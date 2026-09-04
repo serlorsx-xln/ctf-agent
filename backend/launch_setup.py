@@ -1,8 +1,9 @@
 """Pre-TUI launch setup gate — terminal prompt + live logs, never opens the TUI.
 
-Called by ``chassis/bin/artemis`` before Bun/TUI starts. If the sandbox is not
-fully ready, asks interactively whether to run ``artemis setup``-equivalent work
-(L0 + pack bake + warm runtimes). Declining continues with whatever is installed.
+Called by ``chassis/bin/artemis`` before Bun/TUI starts. If Docker/L0 is
+missing, asks interactively whether to build the core image. Pack bake is
+lazy (``artemis setup`` / ``artemis setup --full``). Declining continues
+with whatever is installed.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import TextIO
 
 @dataclass
 class LaunchSetupReport:
-    """What is missing before a full warm setup."""
+    """What is missing before the L0 gate (packs/warm are informational)."""
 
     gate_ready: bool
     docker_ok: bool
@@ -27,20 +28,22 @@ class LaunchSetupReport:
 
     @property
     def needs_prompt(self) -> bool:
-        return (not self.gate_ready) or bool(self.warm_missing)
+        return not self.gate_ready
 
     def summary_lines(self) -> list[str]:
         lines: list[str] = []
         lines.append(f"  Docker: {'ok' if self.docker_ok else 'not reachable'}")
         lines.append(f"  L0 core (ctf-sandbox-core): {'ok' if self.core_image else 'missing'}")
         if self.packs_missing:
-            lines.append(f"  Pack caches missing: {', '.join(self.packs_missing)}")
+            lines.append(
+                f"  Pack caches (lazy, not required): {', '.join(self.packs_missing)}"
+            )
         else:
-            lines.append("  Pack caches: ok")
+            lines.append("  Pack caches: lazy (not required to start)")
         if self.warm_missing:
             lines.append(
-                f"  Warm runtimes missing: {', '.join(self.warm_missing)} "
-                "(first solve of those packs may be slow)"
+                f"  Warm runtimes (optional): {', '.join(self.warm_missing)} "
+                "— first solve of those packs may be slow"
             )
         else:
             lines.append("  Warm runtimes: ok")
@@ -116,15 +119,15 @@ def _print(stderr: TextIO, text: str) -> None:
 
 
 async def _run_full_setup(*, stderr: TextIO) -> list[str]:
-    from backend.sandbox.setup_bake import run_setup
+    from backend.sandbox.setup_ready import run_gate_install
 
     def on_progress(line: str) -> None:
         _print(stderr, f"  {line}")
 
-    _print(stderr, "artemis: starting full setup (L0 + packs + warm runtimes)…")
-    return await run_setup(
-        skip_core=False,
-        skip_warm_runtime=False,
+    _print(stderr, "artemis: starting L0 setup (Docker core image)…")
+    return await run_gate_install(
+        skip_warm_runtime=True,
+        skip_blutter_vm=True,
         on_progress=on_progress,
     )
 
@@ -154,7 +157,7 @@ def run_launch_setup_gate(
     if not report.needs_prompt:
         return 0
 
-    _print(stderr, "artemis: sandbox is not fully set up yet:")
+    _print(stderr, "artemis: sandbox L0 is not ready yet:")
     for line in report.summary_lines():
         _print(stderr, line)
 
@@ -174,7 +177,7 @@ def run_launch_setup_gate(
         )
     else:
         do_setup = _prompt_yes_no(
-            "Run full setup now? (logs below; TUI opens after — can take a long time)",
+            "Build L0 sandbox now? (logs below; TUI opens after — packs stay lazy)",
             default_yes=True,
             stdin=stdin,
             stderr=stderr,

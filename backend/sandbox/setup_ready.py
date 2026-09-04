@@ -1,7 +1,7 @@
-"""Sandbox setup readiness — Docker L0 + baked pack caches.
+"""Sandbox setup readiness — Docker reachable + L0 ``ctf-sandbox-core``.
 
 Used by the daemon/TUI first-run gate so operators cannot solve until
-``ctf-sandbox-core`` exists and common packs are materialized.
+the core image exists. Pack caches attach lazily at solve time.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ class SetupStatus:
     message: str = ""
     global_cli: str = ""
     path_hint: str = ""
+    dns_ok: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +37,7 @@ class SetupStatus:
             "message": self.message,
             "global_cli": self.global_cli,
             "path_hint": self.path_hint,
+            "dns_ok": self.dns_ok,
         }
 
 
@@ -112,6 +114,27 @@ def _docker_ok() -> bool:
     return False
 
 
+def _container_dns_ok() -> bool | None:
+    """Probe name resolution inside L0. None when the probe itself could not run."""
+    proc = _docker_run(
+        [
+            "run",
+            "--rm",
+            "--network",
+            "bridge",
+            "--entrypoint",
+            "getent",
+            "ctf-sandbox-core",
+            "hosts",
+            "pypi.org",
+        ],
+        timeout_s=10,
+    )
+    if proc is None:
+        return None
+    return proc.returncode == 0 and bool((proc.stdout or b"").strip())
+
+
 def _path_hint() -> tuple[str, str]:
     """Return (global_cli_path, hint if ~/.local/bin missing from PATH)."""
     from pathlib import Path
@@ -148,12 +171,13 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
             message="Setup gate skipped (ARTEMIS_SKIP_SETUP_GATE=1).",
             global_cli=cli,
             path_hint=hint,
+            dns_ok=True,
         )
 
     from backend.sandbox.packs import _pack_cache_is_ready
-    from backend.sandbox.setup_bake import DEFAULT_BAKE_PACKS
+    from backend.sandbox.setup_bake import GATE_REQUIRED_PACKS
 
-    packs = list(required_packs) if required_packs is not None else list(DEFAULT_BAKE_PACKS)
+    packs = list(required_packs) if required_packs is not None else list(GATE_REQUIRED_PACKS)
     docker_ok = _docker_ok()
     core = _docker_image_exists("ctf-sandbox-core") if docker_ok else False
     ready_packs: list[str] = []
@@ -167,13 +191,19 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
     cli, hint = _path_hint()
     ready = bool(docker_ok and core and not missing)
     if ready:
-        parts = ["Sandbox ready (L0 + pack caches)."]
+        parts = ["Sandbox ready (Docker + L0). Packs attach on demand."]
     elif not docker_ok:
         parts = ["Docker is not reachable. Start Docker Desktop / Colima, then Install."]
     elif not core:
         parts = ["Missing ctf-sandbox-core image. Install builds it."]
     else:
         parts = [f"Pack caches not baked yet: {', '.join(missing[:6])}"]
+    dns_ok = _container_dns_ok() if docker_ok and core else None
+    if dns_ok is False:
+        parts.append(
+            "Container DNS failed (getent pypi.org). Pack bake / pip may stall — "
+            "check Docker Desktop DNS, then retry."
+        )
     if hint:
         parts.append(hint)
     return SetupStatus(
@@ -185,6 +215,7 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
         message=" ".join(parts),
         global_cli=cli,
         path_hint=hint,
+        dns_ok=dns_ok,
     )
 
 
@@ -194,16 +225,16 @@ async def run_gate_install(
     skip_blutter_vm: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Build L0 + materialize default packs (first-run TUI gate).
+    """Build L0 only (first-run TUI / launch gate).
 
-    Warm runtime commits and blutter Dart VM prebuild are optional here — they
-    can take a long time; operators can run ``artemis setup`` later for max
-    speed. Gate defaults to skip both so Install finishes sooner; full warm
-    remains ``artemis setup``.
+    Pack bake, warm runtime commits, and blutter Dart VM prebuild are not
+    required to start solving. Use ``artemis setup`` (lite) or
+    ``artemis setup --full`` later for faster first-pack attaches.
     """
     from backend.sandbox.setup_bake import run_setup
 
     return await run_setup(
+        packs=[],
         skip_core=False,
         skip_warm_runtime=skip_warm_runtime,
         skip_blutter_vm=skip_blutter_vm,

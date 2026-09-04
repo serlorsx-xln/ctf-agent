@@ -33,7 +33,7 @@ def test_assess_reports_warm_missing(monkeypatch):
     )
     report = assess_launch_setup()
     assert report.gate_ready is True
-    assert report.needs_prompt is True
+    assert report.needs_prompt is False
     assert "ghidra" in report.warm_missing
 
 
@@ -162,12 +162,12 @@ def test_auto_yes_runs_without_tty(monkeypatch):
     monkeypatch.setattr(
         "backend.launch_setup.assess_launch_setup",
         lambda: LaunchSetupReport(
-            gate_ready=True,
+            gate_ready=False,
             docker_ok=True,
-            core_image=True,
+            core_image=False,
             packs_missing=[],
             warm_missing=["linux"],
-            message="ok",
+            message="Missing core",
         ),
     )
 

@@ -5,15 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    ResultMessage,
-    create_sdk_mcp_server,
-    tool,
-)
-
 from backend.agents.coordinator_core import (
     do_broadcast,
     do_bump_agent,
@@ -28,6 +19,34 @@ from backend.agents.coordinator_core import (
 from backend.agents.coordinator_loop import build_deps, run_event_loop
 from backend.config import Settings
 from backend.deps import CoordinatorDeps
+
+try:
+    from claude_agent_sdk import (
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        HookMatcher,
+        ResultMessage,
+        create_sdk_mcp_server,
+        tool,
+    )
+except ImportError as _claude_sdk_err:
+    _CLAUDE_SDK_IMPORT_ERROR: ImportError | None = _claude_sdk_err
+    ClaudeAgentOptions = object  # type: ignore[misc,assignment]
+    ClaudeSDKClient = object  # type: ignore[misc,assignment]
+    HookMatcher = object  # type: ignore[misc,assignment]
+    ResultMessage = object  # type: ignore[misc,assignment]
+
+    def create_sdk_mcp_server(*_a, **_k):  # type: ignore[no-redef]
+        raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
+
+    def tool(*_a, **_k):  # type: ignore[no-redef]
+        raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
+else:
+    _CLAUDE_SDK_IMPORT_ERROR = None
+
+_CLAUDE_EXTRA_HINT = (
+    "Claude coordinator requires the 'claude' extra. Install with: uv sync --extra claude"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +164,8 @@ async def run_claude_coordinator(
     msg_port: int = 0,
 ) -> dict[str, Any]:
     """Run the Claude Agent SDK coordinator with the shared event loop."""
+    if _CLAUDE_SDK_IMPORT_ERROR is not None:
+        raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
     cost_tracker, deps = build_deps(settings, model_specs, challenges_root)
     deps.msg_port = msg_port
 

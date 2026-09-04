@@ -446,6 +446,7 @@ async def _swarm_via_daemon(payload: dict) -> str:
     """Stream a daemon-supervised swarm into this process's stdout."""
     import json as _json
 
+    from backend.daemon.auth import with_hello_token
     from backend.daemon.transport import open_connection
     from backend.shell.sandbox_session import resolve_session_id
 
@@ -454,7 +455,9 @@ async def _swarm_via_daemon(payload: dict) -> str:
     try:
         writer.write(
             _json.dumps(
-                {"v": 1, "id": None, "type": "hello", "role": "tui", "session": sid}
+                with_hello_token(
+                    {"v": 1, "id": None, "type": "hello", "role": "tui", "session": sid}
+                )
             ).encode()
             + b"\n"
         )

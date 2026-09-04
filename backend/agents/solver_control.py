@@ -50,6 +50,38 @@ def stash_bump(solver: Any, insights: str) -> None:
         tracer.event("bump", insights=(insights or "")[:500])
 
 
+async def acquire_solver_sandbox(solver: Any) -> Any:
+    """Share one Docker sandbox per (session, challenge) across solvers."""
+    from backend.shell.sandbox_session import acquire_sandbox
+
+    solver.sandbox = await acquire_sandbox(
+        solver.challenge_dir, settings=getattr(solver, "settings", None)
+    )
+    solver._sandbox_acquired = True
+    return solver.sandbox
+
+
+async def release_solver_sandbox(solver: Any) -> None:
+    """Drop this solver's sandbox hold; stop only when the last holder leaves."""
+    if getattr(solver, "_sandbox_acquired", False):
+        from backend.shell.sandbox_session import release_sandbox
+
+        try:
+            await release_sandbox(solver.challenge_dir)
+        except Exception:
+            pass
+        solver._sandbox_acquired = False
+        solver.sandbox = None
+        return
+    sb = getattr(solver, "sandbox", None)
+    if sb is not None:
+        try:
+            await sb.stop()
+        except Exception:
+            pass
+        solver.sandbox = None
+
+
 async def start_sandbox_basics(
     sandbox: Any,
     meta: ChallengeMeta,

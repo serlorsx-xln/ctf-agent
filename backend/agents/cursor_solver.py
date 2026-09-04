@@ -55,7 +55,6 @@ from backend.flags import is_decoy_flag
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.prompts import ChallengeMeta, build_prompt
-from backend.sandbox import DockerSandbox
 from backend.solver_base import (
     CANCELLED,
     ERROR,
@@ -214,12 +213,8 @@ class CursorSolver:
         # emit a global [artemis] outcome (would unlock TUI while Claude continues).
         self.emit_global_quota = emit_global_quota
 
-        self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
-            challenge_dir=challenge_dir,
-            memory_limit=getattr(settings, "container_memory_limit", "4g"),
-            settings=settings,
-        )
+        self.sandbox = None
+        self._sandbox_acquired = False
         self.use_vision = supports_vision(model_spec)
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
@@ -246,7 +241,7 @@ class CursorSolver:
         self._active_run: Any | None = None
 
     async def start(self) -> None:
-        from backend.agents.solver_control import start_sandbox_basics
+        from backend.agents.solver_control import acquire_solver_sandbox, start_sandbox_basics
 
         self._api_key = resolve_api_key(self.settings)
         self._workdir = tempfile.TemporaryDirectory(prefix="ctf-cursor-")
@@ -279,6 +274,7 @@ class CursorSolver:
             agents_md += "\n" + skill_body + "\n"
         (workdir / "AGENTS.md").write_text(agents_md, encoding="utf-8")
 
+        await acquire_solver_sandbox(self)
         sandbox_result, client_result = await asyncio.gather(
             start_sandbox_basics(self.sandbox, self.meta, self.challenge_dir),
             acquire_client(),
@@ -1329,11 +1325,13 @@ class CursorSolver:
             except Exception:
                 pass
             self._workdir = None
-        if self.sandbox:
+        if self.sandbox or getattr(self, "_sandbox_acquired", False):
             try:
-                await asyncio.wait_for(self.sandbox.stop(), timeout=15.0)
+                from backend.agents.solver_control import release_solver_sandbox
+
+                await asyncio.wait_for(release_solver_sandbox(self), timeout=15.0)
             except Exception:
                 logger.warning(
-                    "[%s] sandbox.stop timed out or failed during cleanup",
+                    "[%s] sandbox.release timed out or failed during cleanup",
                     self.agent_name,
                 )

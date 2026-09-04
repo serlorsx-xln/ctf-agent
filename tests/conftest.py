@@ -22,3 +22,5 @@ def _force_unix_daemon_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     # Never block or prompt during pytest helper launches.
     monkeypatch.setenv("ARTEMIS_SKIP_LAUNCH_SETUP", "1")
     monkeypatch.setenv("ARTEMIS_SKIP_SOLVER_HOLD", "1")
+    # Leftover ~/.cache/artemis/daemon.token must not reject in-process peers.
+    monkeypatch.delenv("ARTEMIS_DAEMON_TOKEN", raising=False)

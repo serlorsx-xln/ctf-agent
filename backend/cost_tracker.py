@@ -235,6 +235,7 @@ def _emit_usage_to_daemon(payload: dict) -> None:
     Uses role ``usage`` (not ``swarm``) so disconnects do not cancel pending
     flag-confirm dialogs owned by the real swarm peer.
     """
+    from backend.daemon.auth import with_hello_token
     from backend.daemon.transport import daemon_configured_in_env, sync_connect
 
     if not daemon_configured_in_env():
@@ -247,7 +248,9 @@ def _emit_usage_to_daemon(payload: dict) -> None:
             session = os.environ.get("ARTEMIS_SESSION_ID")
             s.sendall(
                 json.dumps(
-                    {"v": 1, "id": None, "type": "hello", "role": "usage", "session": session}
+                    with_hello_token(
+                        {"v": 1, "id": None, "type": "hello", "role": "usage", "session": session}
+                    )
                 ).encode()
                 + b"\n"
             )

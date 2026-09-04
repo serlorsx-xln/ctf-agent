@@ -18,18 +18,6 @@ import tempfile
 import time
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    ResultMessage,
-    TextBlock,
-    ThinkingBlock,
-    create_sdk_mcp_server,
-    tool,
-)
-
 from backend.agents.live_log import live as _live
 from backend.agents.live_log import live_json
 from backend.bash_intercept import (
@@ -45,9 +33,44 @@ from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.prompts import ChallengeMeta, build_prompt
-from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tracing import SolverTracer
+
+CLAUDE_DENIED_HOST_TOOLS = frozenset({"WebFetch", "WebSearch"})
+
+try:
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ClaudeSDKClient,
+        HookMatcher,
+        ResultMessage,
+        TextBlock,
+        ThinkingBlock,
+        create_sdk_mcp_server,
+        tool,
+    )
+except ImportError as _claude_sdk_err:  # optional extra
+    _CLAUDE_SDK_IMPORT_ERROR: ImportError | None = _claude_sdk_err
+    AssistantMessage = object  # type: ignore[misc,assignment]
+    ClaudeAgentOptions = object  # type: ignore[misc,assignment]
+    ClaudeSDKClient = object  # type: ignore[misc,assignment]
+    HookMatcher = object  # type: ignore[misc,assignment]
+    ResultMessage = object  # type: ignore[misc,assignment]
+    TextBlock = object  # type: ignore[misc,assignment]
+    ThinkingBlock = object  # type: ignore[misc,assignment]
+
+    def create_sdk_mcp_server(*_a, **_k):  # type: ignore[no-redef]
+        raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
+
+    def tool(*_a, **_k):  # type: ignore[no-redef]
+        raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
+else:
+    _CLAUDE_SDK_IMPORT_ERROR = None
+
+_CLAUDE_EXTRA_HINT = (
+    "Claude solver requires the 'claude' extra. Install with: uv sync --extra claude"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +90,8 @@ class ClaudeSolver:
         message_bus=None,
         notify_coordinator=None,
     ) -> None:
+        if _CLAUDE_SDK_IMPORT_ERROR is not None:
+            raise ImportError(_CLAUDE_EXTRA_HINT) from _CLAUDE_SDK_IMPORT_ERROR
         self.model_spec = model_spec
         # Swarm picker wins. /connect model_id is only the fallback when the
         # spec has no id (custom Claude URL with an empty catalog).
@@ -82,12 +107,8 @@ class ClaudeSolver:
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
 
-        self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
-            challenge_dir=challenge_dir,
-            memory_limit=getattr(settings, "container_memory_limit", "4g"),
-            settings=settings,
-        )
+        self.sandbox = None
+        self._sandbox_acquired = False
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
@@ -209,15 +230,31 @@ class ClaudeSolver:
                 ]
             }
 
+        @tool(
+            "web_fetch",
+            "Fetch a URL through the host allowlist (blocks RFC1918 / metadata).",
+            {"url": str, "method": str, "body": str},
+        )
+        async def web_fetch(args: dict) -> dict:
+            from backend.tools.core import do_web_fetch
+
+            text = await do_web_fetch(
+                str(args.get("url") or ""),
+                method=str(args.get("method") or "GET"),
+                body=str(args.get("body") or ""),
+            )
+            return {"content": [{"type": "text", "text": text}]}
+
         return create_sdk_mcp_server(
             name="ctf",
             version="1.0.0",
-            tools=[submit_flag, notify_coordinator],
+            tools=[submit_flag, notify_coordinator, web_fetch],
         )
 
     async def start(self) -> None:
-        from backend.agents.solver_control import start_sandbox_basics
+        from backend.agents.solver_control import acquire_solver_sandbox, start_sandbox_basics
 
+        await acquire_solver_sandbox(self)
         container_arch, distfile_names = await start_sandbox_basics(
             self.sandbox, self.meta, self.challenge_dir
         )
@@ -230,7 +267,9 @@ class ClaudeSolver:
             "Prefer the submit_flag tool when you recover a candidate "
             "(any format; human confirms; ACCEPTED = more needed; CORRECT = done). "
             "Bash `submit_flag 'FLAG'` also works (even after `cd … &&`). "
-            "Use notify_coordinator to message the coordinator.\n\n"
+            "Use notify_coordinator to message the coordinator. "
+            "Use web_fetch for HTTP from the host allowlist (no RFC1918). "
+            "Do not use WebFetch/WebSearch.\n\n"
         )
         # Claude MCP only exposes submit_flag / notify_coordinator — not view_image
         # / webhook_*. Keep prompt honest (bash-oriented image/web hints).
@@ -244,6 +283,7 @@ class ClaudeSolver:
         mcp_server = self._build_solver_mcp()
         mcp_submit = "mcp__ctf__submit_flag"
         mcp_notify = "mcp__ctf__notify_coordinator"
+        mcp_fetch = "mcp__ctf__web_fetch"
 
         # PreToolUse hook: rewrite Bash commands to run in the sandbox container.
         # Block Read/Write/Edit — model should use bash for file access.
@@ -380,8 +420,20 @@ class ClaudeSolver:
                     result["systemMessage"] = warn_msg
                 return result
 
-            if tool_name in ("WebFetch", "WebSearch"):
-                return {"systemMessage": warn_msg} if warn_msg else {}
+            if tool_name in CLAUDE_DENIED_HOST_TOOLS:
+                deny_reason = (
+                    f"{tool_name} blocked — host web tools are disabled. "
+                    "Use mcp__ctf__web_fetch or bash curl inside the sandbox."
+                )
+                _live(f"{self.agent_name} tool#{self._step_count} ✗ {tool_name}", deny_reason)
+                return {
+                    "systemMessage": deny_reason,
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": deny_reason,
+                    },
+                }
 
             # Everything else is denied — Glob/Grep/Read/Write/Edit/Agent/etc.
             # would run on the host filesystem, breaking sandbox isolation.
@@ -454,10 +506,9 @@ class ClaudeSolver:
             mcp_servers={"ctf": mcp_server},
             allowed_tools=[
                 "Bash",
-                "WebFetch",
-                "WebSearch",
                 mcp_submit,
                 mcp_notify,
+                mcp_fetch,
             ],
             permission_mode="bypassPermissions",
             hooks={
@@ -772,7 +823,9 @@ class ClaudeSolver:
             notes.append(f"Challenge: {name}")
         desc = (getattr(self.meta, "description", "") or "").strip()
         if desc:
-            notes.append(desc[:1500])
+            from backend.prompts import fence_untrusted
+
+            notes.append(fence_untrusted(desc[:1500], kind="description"))
         if self._findings.strip():
             notes.append("Session notes:\n" + self._findings.strip()[:4000])
         if not notes:
@@ -847,5 +900,7 @@ class ClaudeSolver:
             except Exception:
                 pass
             self._client = None
-        if self.sandbox:
-            await self.sandbox.stop()
+        if self.sandbox or getattr(self, "_sandbox_acquired", False):
+            from backend.agents.solver_control import release_solver_sandbox
+
+            await release_solver_sandbox(self)

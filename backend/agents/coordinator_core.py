@@ -14,6 +14,21 @@ from backend.solver_base import FLAG_FOUND
 logger = logging.getLogger(__name__)
 
 
+def resolve_swarm_solver(swarm, key: str):
+    """Find a solver by ``runner_id``, then by unique ``model_spec``."""
+    solvers = getattr(swarm, "solvers", None) or {}
+    if key in solvers:
+        return solvers[key]
+    matches = []
+    for rid, solver in solvers.items():
+        spec = getattr(solver, "model_spec", None)
+        if spec == key or str(rid).split("#", 1)[0] == key:
+            matches.append(solver)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _solved_names(deps: CoordinatorDeps) -> set[str]:
     """Challenge names that are fully complete (not partial ACCEPTED progress)."""
     solved: set[str] = set()
@@ -207,7 +222,7 @@ async def do_bump_agent(
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
         return f"No swarm running for {challenge_name}"
-    solver = swarm.solvers.get(model_spec)
+    solver = resolve_swarm_solver(swarm, model_spec)
     if not solver:
         return f"No solver for {model_spec} in {challenge_name}"
     solver.bump(insights)
@@ -221,7 +236,7 @@ async def do_read_solver_trace(
     swarm = deps.swarms.get(challenge_name)
     if not swarm:
         return f"No swarm for {challenge_name}"
-    solver = swarm.solvers.get(model_spec)
+    solver = resolve_swarm_solver(swarm, model_spec)
     if not solver:
         return f"No solver for {model_spec}"
     trace_path = getattr(solver, "tracer", None)

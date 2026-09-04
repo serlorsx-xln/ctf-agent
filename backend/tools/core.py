@@ -21,6 +21,33 @@ def _truncate(text: str, limit: int = MAX_OUTPUT) -> str:
     return head[:limit] + f"\n... [truncated — {len(text)} total chars, {len(lines)} lines]"
 
 
+async def _try_lazy_pip(
+    sandbox,
+    command: str,
+    timeout_seconds: int,
+    result,
+    out: str,
+) -> str | None:
+    """Install a one-shot pip package (e.g. angr) and retry the command."""
+    from backend.tool_router import infer_lazy_pip
+
+    pkg = infer_lazy_pip(command, result.stderr or "", result.stdout or "")
+    if not pkg:
+        return None
+    done = getattr(sandbox, "_lazy_pip_done", None)
+    if done is None:
+        done = set()
+        sandbox._lazy_pip_done = done
+    if pkg in done:
+        return None
+    done.add(pkg)
+    pip_r = await sandbox.exec(f"pip3 install {shlex.quote(pkg)}", timeout_s=600)
+    if pip_r.exit_code != 0:
+        return f"{out}\n\n[sandbox] lazy pip {pkg} failed\n{_format_exec(pip_r)}"
+    result2 = await sandbox.exec(command, timeout_s=timeout_seconds)
+    return f"[sandbox] pip installed {pkg}\n\n{_format_exec(result2)}"
+
+
 async def do_bash(sandbox, command: str, timeout_seconds: int = 300) -> str:
     from backend.tool_router import (
         infer_pack_from_failure,
@@ -40,14 +67,19 @@ async def do_bash(sandbox, command: str, timeout_seconds: int = 300) -> str:
     # (e.g. `nmap … | head` → head exits 0).
     blob = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
     missing_cmd = "command not found" in blob
-    if (result.exit_code == 0 and not missing_cmd) or not hasattr(sandbox, "ensure_pack"):
+    if result.exit_code == 0 and not missing_cmd:
         return out
+    if not hasattr(sandbox, "ensure_pack"):
+        lazy = await _try_lazy_pip(sandbox, command, timeout_seconds, result, out)
+        return lazy if lazy is not None else out
 
     pack = infer_pack_from_failure(command, result.stderr, result.stdout)
     if not pack:
-        return out
+        lazy = await _try_lazy_pip(sandbox, command, timeout_seconds, result, out)
+        return lazy if lazy is not None else out
     if pack in getattr(sandbox, "ensured_packs", ()):
-        return out
+        lazy = await _try_lazy_pip(sandbox, command, timeout_seconds, result, out)
+        return lazy if lazy is not None else out
 
     ensure_msg = await sandbox.ensure_pack(pack)
     # If ensure failed, don't retry forever.
@@ -55,8 +87,14 @@ async def do_bash(sandbox, command: str, timeout_seconds: int = 300) -> str:
         return f"{out}\n\n[sandbox] {ensure_msg}"
 
     result2 = await sandbox.exec(command, timeout_s=timeout_seconds)
-    out2 = _format_exec(result2)
-    return f"[sandbox] {ensure_msg}\n\n{out2}"
+    if result2.exit_code == 0:
+        return f"[sandbox] {ensure_msg}\n\n{_format_exec(result2)}"
+    lazy = await _try_lazy_pip(
+        sandbox, command, timeout_seconds, result2, _format_exec(result2)
+    )
+    if lazy is not None:
+        return f"[sandbox] {ensure_msg}\n\n{lazy}"
+    return f"[sandbox] {ensure_msg}\n\n{_format_exec(result2)}"
 
 
 def _format_exec(result) -> str:
@@ -369,9 +407,11 @@ async def soft_idle_operator_notes(
     parts: list[str] = []
     op_notes = [n for n in (queue_notes + steer_notes) if str(n or "").strip()]
     if op_notes:
+        from backend.prompts import fence_untrusted
+
         parts.append(
             "**Operator notes:**\n\n"
-            + "\n\n".join(f"Operator note: {n}" for n in op_notes)
+            + fence_untrusted("\n\n".join(str(n) for n in op_notes), kind="operator")
         )
     if rest and "No new findings from other agents." not in rest:
         parts.append(rest)

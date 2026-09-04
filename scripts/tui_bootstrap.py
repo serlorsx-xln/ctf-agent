@@ -246,6 +246,9 @@ def ensure_background_services() -> None:
     from backend.stdio_platform import ensure_standard_streams
 
     ensure_standard_streams()
+    from backend.daemon.auth import ensure_daemon_token
+
+    ensure_daemon_token()
 
     if daemon_alive(timeout=0.05) and port_open("127.0.0.1", 18765):
         if not daemon_code_stale():
@@ -300,13 +303,21 @@ def ensure_background_services() -> None:
 
 def emit_credentials(mode: str) -> None:
     ensure_import_path()
+    from backend.daemon.auth import client_daemon_token, ensure_daemon_token
     from backend.shell.credentials import read_tui_api_keys
 
+    ensure_daemon_token()
     for key, value in read_tui_api_keys().items():
         if mode == "export":
             print(f"export {key}={shlex.quote(value)}")
         else:
             print(f"{key}={value}")
+    tok = client_daemon_token()
+    if tok:
+        if mode == "export":
+            print(f"export ARTEMIS_DAEMON_TOKEN={shlex.quote(tok)}")
+        else:
+            print(f"ARTEMIS_DAEMON_TOKEN={tok}")
 
 
 def _emit_mode(argv: list[str]) -> str:

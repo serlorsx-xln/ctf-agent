@@ -23,15 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Minimal Python CTF helpers (packs add more via pip/apt on ensure)
+# Minimal Python CTF helpers (packs add more via pip/apt on ensure).
+# z3 / numpy live on the crypto pack (and lazy-pip on first import).
 RUN pip3 install --no-cache-dir --break-system-packages \
         pwntools \
         requests \
         pyelftools \
         pycryptodome \
-        sympy \
-        z3-solver \
-        numpy
+        sympy
 
 # Low-memory GF(2^128) root finder (GCM field) — always available on L0
 COPY scripts/gf128_roots.py /opt/ctf/gf128_roots.py

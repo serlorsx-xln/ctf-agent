@@ -42,10 +42,14 @@ async function daemonOp(
       if (typeof res.text === "string") return res.text.trim() || "(ok)"
     }
     return "(ok)"
-  } catch {
-    const env = bridgeEnv()
-    if (sessionID) env.ARTEMIS_SESSION_ID = sessionID
-    return await runPython(op, input, env)
+  } catch (err) {
+    const unsafe = String(process.env.ARTEMIS_UNSAFE_BRIDGE || "").trim().toLowerCase()
+    if (unsafe === "1" || unsafe === "true" || unsafe === "yes" || unsafe === "on") {
+      const env = bridgeEnv()
+      if (sessionID) env.ARTEMIS_SESSION_ID = sessionID
+      return await runPython(op, input, env)
+    }
+    throw err instanceof Error ? err : new Error(String(err))
   }
 }
 

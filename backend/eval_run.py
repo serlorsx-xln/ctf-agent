@@ -27,14 +27,19 @@ class EvalRunState:
     def wall_s(self) -> float:
         return time.monotonic() - self.started_monotonic
 
-    def budget_exceeded(self, settings: Any, cost_usd: float) -> str | None:
-        """Return ``eval_budget`` reason if wall or USD limit hit; else None."""
+    def budget_exceeded(self, settings: Any, cost_usd: float | None) -> str | None:
+        """Return ``eval_budget`` reason if wall or USD limit hit; else None.
+
+        Unknown USD (``None``) fails closed when ``eval_max_usd`` is set — Cursor
+        and other providers often omit cost. Use ``--eval-max-wall-s`` instead.
+        """
         max_wall = getattr(settings, "eval_max_wall_s", None)
         if max_wall is not None and float(max_wall) > 0 and self.wall_s() >= float(max_wall):
             return EVAL_BUDGET
         max_usd = getattr(settings, "eval_max_usd", None)
-        if max_usd is not None and float(max_usd) > 0 and cost_usd >= float(max_usd):
-            return EVAL_BUDGET
+        if max_usd is not None and float(max_usd) > 0:
+            if cost_usd is None or float(cost_usd) >= float(max_usd):
+                return EVAL_BUDGET
         return None
 
 

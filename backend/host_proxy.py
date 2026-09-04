@@ -11,13 +11,13 @@ Force with ``CTF_HOST_PROXY=1`` / ``0``.
 from __future__ import annotations
 
 import asyncio
-import errno
 import logging
 import os
 import platform
+import secrets
 import socket
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +50,57 @@ def host_proxy_port() -> int:
 
 @dataclass
 class _ProxyState:
-    server: asyncio.AbstractServer | None = None
+    servers: list[asyncio.AbstractServer] = field(default_factory=list)
     port: int = 0
     leases: int = 0
-    # False when we adopted an orphan listener we did not start.
     owned: bool = True
     task_loop: asyncio.AbstractEventLoop | None = None
+    user: str = ""
+    password: str = ""
 
 
 _state = _ProxyState()
 _mu = asyncio.Lock()
+
+
+def socks_bind_hosts() -> list[str]:
+    """Interfaces the SOCKS hop may listen on (never ``0.0.0.0``).
+
+    Override with ``CTF_HOST_PROXY_BIND=127.0.0.1,172.17.0.1``.
+    Default: loopback; on Linux also the docker0 gateway so
+    ``host.docker.internal`` (host-gateway) can reach the hop.
+    """
+    raw = (os.environ.get("CTF_HOST_PROXY_BIND") or "").strip()
+    if raw:
+        return [h.strip() for h in raw.split(",") if h.strip() and h.strip() != "0.0.0.0"]
+    hosts = ["127.0.0.1"]
+    if platform.system() != "Darwin":
+        gw = _linux_docker_bridge_ip()
+        if gw and gw not in hosts:
+            hosts.append(gw)
+    return hosts
+
+
+def _linux_docker_bridge_ip() -> str:
+    import re
+    import subprocess
+
+    try:
+        out = subprocess.check_output(
+            ["ip", "-4", "-o", "addr", "show", "dev", "docker0"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else ""
+
+
+def host_proxy_socks_auth() -> tuple[str, str]:
+    """Username/password the sandbox proxychains client must present."""
+    return _state.user, _state.password
 
 
 async def _socks5_greeting_ok(port: int, host: str = "127.0.0.1") -> bool:
@@ -90,41 +131,40 @@ async def acquire_host_proxy() -> int | None:
     port = host_proxy_port()
     async with _mu:
         _state.leases += 1
-        if _state.server is not None or (_state.port and not _state.owned):
+        if _state.servers:
             return _state.port or port
+        if not _state.user or not _state.password:
+            _state.user = "artemis"
+            _state.password = secrets.token_urlsafe(18)
+        hosts = socks_bind_hosts()
+        started: list[asyncio.AbstractServer] = []
         try:
-            server = await asyncio.start_server(
-                _handle_client,
-                host="0.0.0.0",
-                port=port,
-            )
-        except OSError as e:
-            in_use = (
-                getattr(e, "errno", None) in (errno.EADDRINUSE, 48)
-                or "address already in use" in str(e).lower()
-            )
-            if in_use and await _socks5_greeting_ok(port):
-                # Previous ctf-solve left a live SOCKS on this port — adopt it.
-                logger.warning(
-                    "Host SOCKS5 :%s already in use — reusing existing listener",
-                    port,
+            for host in hosts:
+                started.append(
+                    await asyncio.start_server(_handle_client, host=host, port=port)
                 )
-                _state.server = None
-                _state.port = port
-                _state.owned = False
-                _state.task_loop = asyncio.get_running_loop()
-                return port
+        except OSError as e:
+            for srv in started:
+                srv.close()
             _state.leases = max(0, _state.leases - 1)
-            logger.error("Host SOCKS5 proxy failed to bind :%s: %s", port, e)
+            logger.error(
+                "Host SOCKS5 proxy failed to bind %s:%s: %s "
+                "(will not adopt an existing listener)",
+                hosts,
+                port,
+                e,
+            )
             return None
-        _state.server = server
+        _state.servers = started
         _state.port = port
         _state.owned = True
         _state.task_loop = asyncio.get_running_loop()
-        addrs = ", ".join(str(s.getsockname()) for s in server.sockets or [])
+        addrs: list[str] = []
+        for srv in started:
+            addrs.extend(str(s.getsockname()) for s in srv.sockets or [])
         logger.info(
             "Host SOCKS5 proxy listening on %s (sandboxes use host.docker.internal:%s)",
-            addrs,
+            ", ".join(addrs),
             port,
         )
         return port
@@ -136,36 +176,43 @@ async def release_host_proxy() -> None:
             _state.leases -= 1
         if _state.leases > 0:
             return
-        if not _state.owned:
-            # Orphan listener — leave it for the next run to adopt.
-            _state.port = 0
-            return
-        if _state.server is None:
-            return
-        server = _state.server
-        _state.server = None
+        servers = list(_state.servers)
+        _state.servers.clear()
         _state.port = 0
-        server.close()
-        try:
-            await server.wait_closed()
-        except Exception:
-            pass
-        logger.info("Host SOCKS5 proxy stopped")
+        _state.user = ""
+        _state.password = ""
+        for server in servers:
+            server.close()
+            try:
+                await server.wait_closed()
+            except Exception:
+                pass
+        if servers:
+            logger.info("Host SOCKS5 proxy stopped")
 
 
-def proxychains_conf(port: int, proxy_host: str = "host.docker.internal") -> str:
+def proxychains_conf(
+    port: int,
+    proxy_host: str = "host.docker.internal",
+    *,
+    user: str = "",
+    password: str = "",
+) -> str:
     """Config that sends non-local TCP via host SOCKS (incl. HTB 10.x).
 
     ``proxy_host`` must be a numeric IP for proxychains4 (hostnames are rejected
     as the first hop unless proxy_dns quirks apply — we resolve before write).
     """
+    if not user and not password:
+        user, password = host_proxy_socks_auth()
+    auth = f" {user} {password}" if user and password else ""
     return f"""# Generated by ctf-agent — do not edit
 strict_chain
 proxy_dns
 tcp_read_time_out 15000
 tcp_connect_time_out 10000
 [ProxyList]
-socks5 {proxy_host} {port}
+socks5 {proxy_host} {port}{auth}
 """
 
 
@@ -179,9 +226,33 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         ver, nmethods = data[0], data[1]
         if ver != 5:
             return
-        await reader.readexactly(nmethods)
-        writer.write(b"\x05\x00")  # no auth
-        await writer.drain()
+        methods = await reader.readexactly(nmethods)
+        user, password = _state.user, _state.password
+        if user and password:
+            if 0x02 not in methods:
+                writer.write(b"\x05\xff")
+                await writer.drain()
+                return
+            writer.write(b"\x05\x02")
+            await writer.drain()
+            auth_ver = (await asyncio.wait_for(reader.readexactly(1), timeout=10))[0]
+            if auth_ver != 1:
+                return
+            ulen = (await reader.readexactly(1))[0]
+            uname = await reader.readexactly(ulen)
+            plen = (await reader.readexactly(1))[0]
+            passwd = await reader.readexactly(plen)
+            if uname.decode("utf-8", errors="replace") != user or passwd.decode(
+                "utf-8", errors="replace"
+            ) != password:
+                writer.write(b"\x01\x01")
+                await writer.drain()
+                return
+            writer.write(b"\x01\x00")
+            await writer.drain()
+        else:
+            writer.write(b"\x05\x00")  # no auth (tests / auth not yet set)
+            await writer.drain()
 
         hdr = await asyncio.wait_for(reader.readexactly(4), timeout=10)
         ver, cmd, _, atyp = hdr

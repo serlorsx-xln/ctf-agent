@@ -21,6 +21,21 @@ def _materialize_pack_cache(root: Path, pack_id: str) -> None:
             dest.write_text("sentinel\n", encoding="utf-8")
 
 
+def test_probe_default_gate_is_l0_only(monkeypatch):
+    monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
+    monkeypatch.setattr("backend.sandbox.setup_ready._docker_ok", lambda: True)
+    monkeypatch.setattr(
+        "backend.sandbox.setup_ready._docker_image_exists",
+        lambda tag: tag == "ctf-sandbox-core",
+    )
+    monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
+    st = probe_setup_status()
+    assert st.ready is True
+    assert st.core_image is True
+    assert st.packs_missing == []
+    assert "L0" in st.message
+
+
 def test_probe_reports_missing_without_docker(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
     monkeypatch.setattr(
@@ -57,6 +72,7 @@ def test_probe_ready_when_core_and_packs(monkeypatch, tmp_path: Path):
         "backend.sandbox.setup_bake.pack_cache_incomplete",
         lambda pack_id: False,
     )
+    monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
     for pack in ("web", "pwn"):
         _materialize_pack_cache(tmp_path, pack)
     st = probe_setup_status(required_packs=["web", "pwn"])
@@ -88,6 +104,7 @@ def test_probe_not_ready_when_pack_paths_missing(monkeypatch, tmp_path: Path):
     d = tmp_path / "pwn" / "arm64"
     d.mkdir(parents=True)
     (d / ".ready").write_text("ok\n", encoding="utf-8")
+    monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
     st = probe_setup_status(required_packs=["pwn"])
     assert st.ready is False
     assert st.packs_missing == ["pwn"]
@@ -153,3 +170,17 @@ def test_docker_image_exists_retries_timeout_then_lists(monkeypatch):
     from backend.sandbox.setup_ready import _docker_image_exists
 
     assert _docker_image_exists("ctf-sandbox-core") is True
+
+
+def test_dns_probe_advisory_does_not_block_ready(monkeypatch):
+    monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
+    monkeypatch.setattr("backend.sandbox.setup_ready._docker_ok", lambda: True)
+    monkeypatch.setattr(
+        "backend.sandbox.setup_ready._docker_image_exists",
+        lambda tag: tag == "ctf-sandbox-core",
+    )
+    monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: False)
+    st = probe_setup_status()
+    assert st.ready is True
+    assert st.dns_ok is False
+    assert "DNS" in st.message

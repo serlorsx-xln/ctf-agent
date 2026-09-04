@@ -7,8 +7,8 @@ cat /tools.txt
 
 == CORE ==
 bash / curl / wget / git / openssl
-python3 + pwntools + requests + pyelftools + pycryptodome + sympy + z3 + numpy
-                       from z3 import *; s=Solver(); s.add(...); s.check()
+python3 + pwntools + requests + pyelftools + pycryptodome + sympy
+                       z3 / numpy load with the crypto pack (or first import)
 file / strings / xxd / binutils (objdump, readelf, nm)
 rg (ripgrep)           Fast recursive search. rg PATTERN [PATH]
 gdb / strace / ltrace

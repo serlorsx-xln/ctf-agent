@@ -31,7 +31,6 @@ def _make_solver(monkeypatch: pytest.MonkeyPatch) -> GeminiSolver:
     meta = ChallengeMeta(name="demo", description="d", flags_required=1)
 
     # Avoid real Docker / genai in unit tests.
-    monkeypatch.setattr("backend.agents.gemini_solver.DockerSandbox", lambda **kw: MagicMock())
     monkeypatch.setattr("backend.agents.gemini_solver.SolverTracer", lambda *a, **kw: MagicMock())
     monkeypatch.setattr("backend.agents.gemini_solver.LoopDetector", lambda: MagicMock())
 

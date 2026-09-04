@@ -24,7 +24,7 @@ one_gadget               one_gadget /usr/x86_64-linux-gnu/lib/libc.so.6
 patchelf                 patchelf --set-interpreter --set-rpath
 seccomp-tools            seccomp-tools dump ./chal
 r2 / radare2             Reverse engineering. r2 ./chal
-angr                     Symbolic execution. import angr
+angr                     Symbolic execution. First ``import angr`` pip-installs it.
 pyghidra / Ghidra        Decompiler API — loads with the ghidra pack (import pyghidra)
 capstone / unicorn       Disasm / CPU emulate (Python)
 strace / ltrace          Syscall / libc tracing

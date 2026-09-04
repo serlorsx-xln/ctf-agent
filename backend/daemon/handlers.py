@@ -534,7 +534,7 @@ class Handlers:
         return status
 
     async def _h_setup_install(self, payload: dict, *, session: str) -> dict:
-        """Start (or report) first-run L0+pack bake. Progress via setup_log pushes."""
+        """Start (or report) first-run L0 install. Progress via setup_log pushes."""
         if getattr(self, "_setup_task", None) is not None and not self._setup_task.done():
             return {"ok": True, "running": True}
         skip_warm = payload.get("skip_warm_runtime", True)
@@ -558,7 +558,7 @@ class Handlers:
             def _push(text: str) -> None:
                 _fanout({"type": "setup_log", "text": text})
 
-            _push("Starting sandbox install (Docker L0 + pack bake)…")
+            _push("Starting sandbox install (Docker L0)…")
             try:
                 await run_gate_install(
                     skip_warm_runtime=bool(skip_warm),

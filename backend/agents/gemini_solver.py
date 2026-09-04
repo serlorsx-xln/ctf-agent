@@ -25,7 +25,6 @@ from backend.cost_tracker import CostTracker, usage_from_provider
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.prompts import ChallengeMeta, build_prompt
-from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tracing import SolverTracer
 
@@ -108,12 +107,8 @@ class GeminiSolver:
         self.message_bus = message_bus
         self.notify_coordinator = notify_coordinator
 
-        self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
-            challenge_dir=challenge_dir,
-            memory_limit=getattr(settings, "container_memory_limit", "4g"),
-            settings=settings,
-        )
+        self.sandbox = None
+        self._sandbox_acquired = False
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
@@ -134,10 +129,16 @@ class GeminiSolver:
         self._gen_epoch: int = 0
 
     async def start(self) -> None:
-        from google import genai
-        from google.genai.types import HttpOptions
+        try:
+            from google import genai
+            from google.genai.types import HttpOptions
+        except ImportError as e:
+            raise ImportError(
+                "Gemini solver requires the 'gemini' extra. "
+                "Install with: uv sync --extra gemini"
+            ) from e
 
-        from backend.agents.solver_control import start_sandbox_basics
+        from backend.agents.solver_control import acquire_solver_sandbox, start_sandbox_basics
 
         api_key = getattr(self.settings, "gemini_api_key", "") or None
         project = getattr(self.settings, "gemini_project", "") or None
@@ -161,6 +162,7 @@ class GeminiSolver:
             kwargs["http_options"] = HttpOptions(base_url=base_url)
 
         self._client = genai.Client(**kwargs)
+        await acquire_solver_sandbox(self)
         self._container_arch, self._distfile_names = await start_sandbox_basics(
             self.sandbox, self.meta, self.challenge_dir
         )
@@ -620,6 +622,8 @@ class GeminiSolver:
 
     async def stop(self) -> None:
         try:
-            await self.sandbox.stop()
+            from backend.agents.solver_control import release_solver_sandbox
+
+            await release_solver_sandbox(self)
         except Exception:
             logger.debug("gemini sandbox stop failed", exc_info=True)

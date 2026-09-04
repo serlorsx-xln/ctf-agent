@@ -28,7 +28,6 @@ from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
 from backend.prompts import ChallengeMeta, build_prompt
-from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
 from backend.tools.core import (
     do_bash,
@@ -180,12 +179,8 @@ class CodexSolver:
         self.cancel_event = cancel_event or asyncio.Event()
         self.submit_fn = submit_fn
 
-        self.sandbox = DockerSandbox(
-            image=getattr(settings, "sandbox_image", "ctf-sandbox-core"),
-            challenge_dir=challenge_dir,
-            memory_limit=getattr(settings, "container_memory_limit", "4g"),
-            settings=settings,
-        )
+        self.sandbox = None
+        self._sandbox_acquired = False
         self.use_vision = supports_vision(model_spec)
         self.loop_detector = LoopDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
@@ -211,8 +206,9 @@ class CodexSolver:
         self._pending_soft_notes: list[str] = []
 
     async def start(self) -> None:
-        from backend.agents.solver_control import start_sandbox_basics
+        from backend.agents.solver_control import acquire_solver_sandbox, start_sandbox_basics
 
+        await acquire_solver_sandbox(self)
         container_arch, distfile_names = await start_sandbox_basics(
             self.sandbox, self.meta, self.challenge_dir
         )
@@ -944,5 +940,7 @@ class CodexSolver:
                 except Exception:
                     pass
             self._proc = None
-        if self.sandbox:
-            await self.sandbox.stop()
+        if self.sandbox or getattr(self, "_sandbox_acquired", False):
+            from backend.agents.solver_control import release_solver_sandbox
+
+            await release_solver_sandbox(self)

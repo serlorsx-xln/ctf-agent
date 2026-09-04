@@ -552,6 +552,7 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
     import time
     import uuid
 
+    from backend.daemon.auth import with_hello_token
     from backend.daemon.transport import daemon_configured_in_env, sync_connect
 
     if not daemon_configured_in_env():
@@ -573,7 +574,11 @@ def _prompt_flag_confirmation_daemon(flag: str) -> bool | tuple[bool, str]:
     try:
         # hello
         s.sendall(
-            _json.dumps({"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}).encode()
+            _json.dumps(
+                with_hello_token(
+                    {"v": 1, "id": None, "type": "hello", "role": "swarm", "session": session}
+                )
+            ).encode()
             + b"\n"
         )
         # request

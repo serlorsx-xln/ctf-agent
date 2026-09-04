@@ -9,6 +9,10 @@ FROM ubuntu:24.04 AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
+# Cap parallelism so Docker Desktop default RAM (8 GB) does not OOM cado-nfs.
+# Override: docker build --build-arg BUILD_JOBS=4
+ARG BUILD_JOBS=2
+ENV BUILD_JOBS=${BUILD_JOBS}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl wget git cmake g++ make pkg-config \
@@ -20,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git clone --depth=1 https://github.com/keeganryan/flatter /tmp/flatter \
     && cmake -S /tmp/flatter -B /tmp/flatter/build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /tmp/flatter/build -j"$(nproc)" \
+    && cmake --build /tmp/flatter/build -j"${BUILD_JOBS}" \
     && cmake --install /tmp/flatter/build \
     && ldconfig \
     && mkdir -p /opt/flatter/bin \
@@ -32,7 +36,7 @@ RUN git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool /opt/RsaCtfTool
     && pip3 install --no-cache-dir --break-system-packages /opt/RsaCtfTool
 
 RUN git clone --depth=1 https://gitlab.inria.fr/cado-nfs/cado-nfs.git /opt/cado-nfs \
-    && cd /opt/cado-nfs && make -j"$(nproc)" \
+    && cd /opt/cado-nfs && make -j"${BUILD_JOBS}" \
     && mkdir -p /opt/cado-nfs/bin \
     && printf '%s\n' \
     '#!/bin/bash' \
