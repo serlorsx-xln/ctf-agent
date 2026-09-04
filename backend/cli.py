@@ -172,7 +172,11 @@ def main(ctx: click.Context, verbose: bool) -> None:
     "--eval-max-usd",
     default=None,
     type=float,
-    help="Cancel single-challenge run after this many reported USD",
+    help=(
+        "Cancel after this many provider-reported USD. Unknown cost "
+        "(Cursor often omits it) fails open only when --eval-max-wall-s "
+        "is also set; USD-only + unknown cost trips the budget."
+    ),
 )
 @click.option(
     "--eval-strict-packs",

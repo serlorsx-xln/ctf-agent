@@ -178,3 +178,24 @@ def test_auto_yes_runs_without_tty(monkeypatch):
     stderr = io.StringIO()
     assert run_launch_setup_gate(stdin=io.StringIO(), stderr=stderr, interactive=False) == 0
     assert "ARTEMIS_SETUP_AUTO=1" in stderr.getvalue()
+
+
+def test_full_setup_bakes_packs(monkeypatch):
+    import asyncio
+
+    from backend.launch_setup import _run_full_setup
+
+    captured: dict = {}
+
+    async def fake_setup(**kwargs):
+        captured.update(kwargs)
+        return ["ok"]
+
+    monkeypatch.setattr("backend.sandbox.setup_bake.run_setup", fake_setup)
+    stderr = io.StringIO()
+    assert asyncio.run(_run_full_setup(stderr=stderr)) == ["ok"]
+    assert captured["packs"] is None
+    assert captured["skip_core"] is False
+    assert captured["skip_warm_runtime"] is False
+    assert captured["skip_blutter_vm"] is True
+    assert "full sandbox setup" in stderr.getvalue()

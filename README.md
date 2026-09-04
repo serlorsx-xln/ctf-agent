@@ -50,13 +50,14 @@ bash Artemis-Install.sh                              # macOS / Linux / WSL2
 # After install: open a NEW terminal, then run:  artemis
 ```
 
-After install: open a **new** terminal → `artemis`. If L0 / packs / warm runtimes
-are incomplete, the launcher asks **in the terminal** (before TUI) whether to run
-full setup and prints live logs; answer `n` to continue with what you have.
-`ARTEMIS_SETUP_AUTO=1` forces setup; `ARTEMIS_SKIP_LAUNCH_SETUP=1` skips the
-prompt. Rebuild the fast TUI binary with `bash scripts/build-tui.sh` after
-chassis changes. The in-TUI **Install** screen still blocks solving if core/packs
-are missing.
+After install: open a **new** terminal → `artemis`. If Docker or L0 is missing,
+the launcher asks **in the terminal** (before TUI) whether to run full setup
+and prints live logs; answer `n` to continue with what you have. Packs attach
+on demand and do not block the gate. `ARTEMIS_SETUP_AUTO=1` forces setup;
+`ARTEMIS_SKIP_LAUNCH_SETUP=1` skips the prompt. Rebuild the fast TUI binary
+with `bash scripts/build-tui.sh` after chassis changes. The in-TUI **Install**
+screen still blocks solving if Docker/L0 is missing (L0 only; packs attach
+on demand).
 
 
 **Verify / full install test:**

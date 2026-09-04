@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-CHAL = Path("/tmp/artemis-e2e-pico-garden")
+REPO = Path(__file__).resolve().parents[1]
+CHAL = REPO / "eval" / "fixtures" / "forensics-dump"
 OUT = Path("/tmp/artemis-e2e/tools.json")
 
 
@@ -55,7 +56,7 @@ async def main() -> None:
     rows.append(
         rec(
             "load_challenge",
-            meta.name == "artemis-e2e-pico-garden" and "garden.jpg" in names,
+            meta.name == "forensics-dump" and "evidence.dat" in names,
             f"conn={meta.connection_info!r} packs={packs}",
         )
     )
@@ -98,7 +99,7 @@ async def main() -> None:
     try:
         await sb.start()
         listed = await do_list_files(sb)
-        rows.append(rec("list_files", "garden.jpg" in listed, listed.split("\n")[0][:80]))
+        rows.append(rec("list_files", "evidence.dat" in listed, listed.split("\n")[0][:80]))
 
         tools = await do_read_file(sb, "/challenge/TOOLS.txt")
         rows.append(rec("read_file", "CTF SANDBOX TOOLS" in tools, f"len={len(tools)}"))
@@ -115,10 +116,19 @@ async def main() -> None:
         )
 
         bash = await do_bash(sb, "ls /challenge/distfiles && echo L0_OK")
-        rows.append(rec("bash", "garden.jpg" in bash and "L0_OK" in bash, bash[:80]))
+        rows.append(rec("bash", "evidence.dat" in bash and "L0_OK" in bash, bash[:80]))
 
-        img = await do_view_image(sb, "garden.jpg", use_vision=False)
-        img_ok = isinstance(img, tuple) and img[1].startswith("image/") and len(img[0]) > 1000
+        from backend.jeopardy_fixtures import FLAGS, _tiny_png
+
+        png = _tiny_png()
+        hex_png = png.hex()
+        await do_bash(
+            sb,
+            "python3 -c \"open('/challenge/workspace/tiny.png','wb')"
+            f".write(bytes.fromhex('{hex_png}'))\"",
+        )
+        img = await do_view_image(sb, "tiny.png", use_vision=False)
+        img_ok = isinstance(img, tuple) and img[1].startswith("image/") and len(img[0]) > 20
         rows.append(
             rec(
                 "view_image",
@@ -127,12 +137,12 @@ async def main() -> None:
             )
         )
         img_path = await do_view_image(
-            sb, view_image_arg({"path": "/challenge/distfiles/garden.jpg"}), use_vision=False
+            sb, view_image_arg({"path": "/challenge/workspace/tiny.png"}), use_vision=False
         )
         path_ok = (
             isinstance(img_path, tuple)
             and img_path[1].startswith("image/")
-            and len(img_path[0]) > 1000
+            and len(img_path[0]) > 20
         )
         rows.append(
             rec(
@@ -144,14 +154,15 @@ async def main() -> None:
             )
         )
 
+        want = FLAGS["forensics-dump"]
         strings_out = await do_bash(
             sb,
-            "strings /challenge/distfiles/garden.jpg | rg -o 'picoCTF\\{[^}]+\\}' | head -1",
+            "strings /challenge/distfiles/evidence.dat | rg -o 'flag\\{[^}]+\\}' | head -1",
         )
         flag = strings_out.strip().splitlines()[-1] if strings_out.strip() else ""
-        rows.append(rec("bash_strings_flag", flag.startswith("picoCTF{"), flag[:80]))
+        rows.append(rec("bash_strings_flag", flag == want, flag[:80]))
 
-        if flag.startswith("picoCTF{"):
+        if flag == want:
             msg, done = await do_submit_flag(
                 meta.name, flag, auto_confirm=True, challenge_dir=str(CHAL)
             )

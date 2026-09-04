@@ -171,10 +171,10 @@ Operator TUI (OpenCode)
 
 #### M2 — งบ USD นับ cost ที่ขาดเป็น `$0`
 
-- ที่อยู่: `backend/agents/swarm.py:583`
-- หลักฐาน: Cursor/Gemini/Codex มักได้ `cost_usd=None`; eval เทียบ `0.0` กับ `--eval-max-usd`
-- ผลกระทบ: รัน eval แบบเสียเงินไม่หยุดตามงบสำหรับ lineup Cursor เริ่มต้น
-- แก้: ปิดงบ USD ถ้าไม่รู้ cost หรือใส่เพดาน token
+- ที่อยู่: `backend/eval_run.py` (`EvalRunState.budget_exceeded`)
+- หลักฐาน: Cursor/Gemini/Codex มักได้ `cost_usd=None`
+- พฤติกรรมปัจจุบัน: ไม่เทียบ `None` เป็น `$0`. `--eval-max-usd` ตัดเมื่อ provider รายงานตัวเลข. ถ้า cost ไม่ทราบ — fail-open เฉพาะตอนมี `--eval-max-wall-s` คู่กัน (wall เป็น hard stop ของ unattended); USD-only + cost ไม่ทราบ = fail-closed เพื่อไม่ให้เพดานเป็น no-op
+- ผลกระทบเดิม: รัน eval แบบเสียเงินไม่หยุด / หรือตัด Cursor ทันทีถ้าถือ `None` เป็นเกินงบ
 
 #### M3 — `MemorySwap` เท่า `Memory`; live bump พังเงียบ
 
@@ -351,7 +351,7 @@ Operator TUI (OpenCode)
 | H5 | แก้แล้ว | allowlist CWD / cache / `challenges/` / temp / `ARTEMIS_LOAD_ROOTS` |
 | H6 | แก้แล้ว | `write_file` จำกัดที่ `/challenge/workspace` |
 | H10 | แก้แล้ว | RFC1918 จากข้อความต้อง `CTF_ALLOW_LAB_PROBE=1` หรือ `CTF_LAB_HOSTS`; `*.htb`/`nc` ผ่าน |
-| M2 | แก้แล้ว | `eval_max_usd` + cost ไม่ทราบ → `EVAL_BUDGET` |
+| M2 | แก้แล้ว | USD นับเฉพาะ cost ที่รายงาน; `None` fail-open เฉพาะเมื่อมี wall คู่กัน |
 | M5 | แก้แล้ว | `install.sh` เขียน `~/.local/bin` ลง `.zprofile` / `.zshrc` |
 | M6 | แก้แล้ว | plugin ถอยไป bridge เฉพาะ `ARTEMIS_UNSAFE_BRIDGE=1` |
 | M7 | แก้แล้ว | `/msg` ตรวจ token เมื่อตั้ง `ARTEMIS_MSG_TOKEN` |

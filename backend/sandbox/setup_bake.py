@@ -39,9 +39,12 @@ FULL_BAKE_PACKS: tuple[str, ...] = (
     "linux",
 )
 
-# Status inventory on setup_status (on-demand attach). Does **not** block TUI
-# load — ready is Docker + L0 only. ``artemis setup`` still bakes this set.
-GATE_REQUIRED_PACKS: tuple[str, ...] = FULL_BAKE_PACKS
+# Status inventory listed on setup_status (on-demand attach). Does **not**
+# block TUI load — ready is Docker + L0 only. ``artemis setup`` still bakes
+# this set. Name is not a readiness gate.
+STATUS_INVENTORY_PACKS: tuple[str, ...] = FULL_BAKE_PACKS
+# Back-compat alias — do not treat as "must be baked before ready".
+GATE_REQUIRED_PACKS: tuple[str, ...] = STATUS_INVENTORY_PACKS
 
 # Alias kept for older imports / docs; default bake is the full set.
 DEFAULT_BAKE_PACKS: tuple[str, ...] = FULL_BAKE_PACKS

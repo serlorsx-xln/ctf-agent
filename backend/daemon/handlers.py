@@ -534,12 +534,12 @@ class Handlers:
         return status
 
     async def _h_setup_install(self, payload: dict, *, session: str) -> dict:
-        """Start (or report) first-run full install. Progress via setup_log pushes."""
+        """Start (or report) first-run L0 install. Progress via setup_log pushes."""
         if getattr(self, "_setup_task", None) is not None and not self._setup_task.done():
             return {"ok": True, "running": True}
-        skip_warm = payload.get("skip_warm_runtime", False)
+        skip_warm = payload.get("skip_warm_runtime", True)
         if skip_warm is None:
-            skip_warm = False
+            skip_warm = True
 
         async def _run() -> None:
             from backend.sandbox.setup_ready import probe_setup_status, run_gate_install
@@ -558,7 +558,7 @@ class Handlers:
             def _push(text: str) -> None:
                 _fanout({"type": "setup_log", "text": text})
 
-            _push("Starting full sandbox install (L0 + Jeopardy packs)…")
+            _push("Starting L0 sandbox install (packs attach on demand)…")
             try:
                 await run_gate_install(
                     skip_warm_runtime=bool(skip_warm),

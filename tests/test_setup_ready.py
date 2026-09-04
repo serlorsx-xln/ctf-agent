@@ -1,5 +1,6 @@
 """First-run setup readiness probe (no Docker required for unit bits)."""
 
+import asyncio
 from pathlib import Path
 
 from backend.sandbox.setup_ready import probe_setup_status
@@ -176,14 +177,26 @@ def test_docker_image_exists_retries_timeout_then_lists(monkeypatch):
     assert _docker_image_exists("ctf-sandbox-core") is True
 
 
-def test_gate_install_bakes_full_packs_but_skips_blutter():
+def test_gate_install_is_l0_only(monkeypatch):
     import inspect
 
     from backend.sandbox.setup_ready import run_gate_install
 
     params = inspect.signature(run_gate_install).parameters
-    assert params["skip_warm_runtime"].default is False
+    assert params["skip_warm_runtime"].default is True
     assert params["skip_blutter_vm"].default is True
+
+    captured: dict = {}
+
+    async def fake_setup(**kwargs):
+        captured.update(kwargs)
+        return ["ok"]
+
+    monkeypatch.setattr("backend.sandbox.setup_bake.run_setup", fake_setup)
+
+    asyncio.run(run_gate_install())
+    assert captured["packs"] == []
+    assert captured["skip_core"] is False
 
 
 def test_dns_probe_advisory_does_not_block_ready(monkeypatch):

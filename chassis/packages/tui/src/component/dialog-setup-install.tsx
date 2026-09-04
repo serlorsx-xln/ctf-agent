@@ -62,7 +62,7 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
           const lastLog = daemon.setupLogs[0]().at(-1) || ""
           if (/disconnected|interrupted/i.test(lastLog)) {
             setErr(
-              "Lost Artemis daemon during install — quit and run `artemis` again (packs may already be ready).",
+              "Lost Artemis daemon during install — quit and run `artemis` again (L0 may already be ready).",
             )
           } else {
             setErr(daemon.setupMessage[0]() || "Install failed")
@@ -84,7 +84,7 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
             lastLogAt = Date.now()
           } catch {
             setErr(
-              "Lost Artemis daemon during install — quit and run `artemis` again (packs may already be ready).",
+              "Lost Artemis daemon during install — quit and run `artemis` again (L0 may already be ready).",
             )
             setBusy(false)
             daemon.setupInstalling[1](false)
@@ -178,10 +178,11 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
       </box>
       <text fg={theme.textMuted} wrapMode="word">
         Docker and the L0 image (`ctf-sandbox-core`) are required before
-        solving. Tool packs (pwn, crypto, ghidra, …) attach on demand — a
-        file-only challenge does not wait for a full bake. Optional full
-        bake: `artemis setup` (or `artemis setup --lite`). Blutter Dart VM
-        prebuild stays on `artemis setup`, not this gate.
+        solving. This Install builds L0 only. Tool packs (pwn, crypto,
+        ghidra, …) attach on demand. Optional full bake / warm images:
+        `artemis setup` (or `artemis setup --full`). `--lite` is a smaller
+        pack set, not this dialog. Blutter Dart VM prebuild stays on
+        `artemis setup`, not this gate.
       </text>
       <Show when={message()}>
         <text fg={theme.warning} wrapMode="word">

@@ -119,13 +119,19 @@ def _print(stderr: TextIO, text: str) -> None:
 
 
 async def _run_full_setup(*, stderr: TextIO) -> list[str]:
-    from backend.sandbox.setup_ready import run_gate_install
+    from backend.sandbox.setup_bake import run_setup
 
     def on_progress(line: str) -> None:
         _print(stderr, f"  {line}")
 
     _print(stderr, "artemis: starting full sandbox setup (L0 + Jeopardy packs)…")
-    return await run_gate_install(on_progress=on_progress)
+    return await run_setup(
+        packs=None,
+        skip_core=False,
+        skip_warm_runtime=False,
+        skip_blutter_vm=True,
+        on_progress=on_progress,
+    )
 
 
 def run_launch_setup_gate(

@@ -8,6 +8,7 @@ from backend.sandbox.setup_bake import (
     DEFAULT_BAKE_PACKS,
     FULL_BAKE_PACKS,
     GATE_REQUIRED_PACKS,
+    STATUS_INVENTORY_PACKS,
     LITE_BAKE_PACKS,
     dockerfile_digest,
     pack_cache_incomplete,
@@ -20,7 +21,8 @@ from backend.sandbox.setup_bake import (
 
 
 def test_full_default_and_lite_bake_sets():
-    assert GATE_REQUIRED_PACKS == FULL_BAKE_PACKS
+    assert STATUS_INVENTORY_PACKS == FULL_BAKE_PACKS
+    assert GATE_REQUIRED_PACKS == STATUS_INVENTORY_PACKS
     assert DEFAULT_BAKE_PACKS == FULL_BAKE_PACKS
     assert "web" in LITE_BAKE_PACKS
     assert "steg" in LITE_BAKE_PACKS

@@ -175,9 +175,9 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
         )
 
     from backend.sandbox.packs import _pack_cache_is_ready
-    from backend.sandbox.setup_bake import GATE_REQUIRED_PACKS
+    from backend.sandbox.setup_bake import STATUS_INVENTORY_PACKS
 
-    packs = list(required_packs) if required_packs is not None else list(GATE_REQUIRED_PACKS)
+    packs = list(required_packs) if required_packs is not None else list(STATUS_INVENTORY_PACKS)
     docker_ok = _docker_ok()
     core = _docker_image_exists("ctf-sandbox-core") if docker_ok else False
     ready_packs: list[str] = []
@@ -225,20 +225,21 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
 
 async def run_gate_install(
     *,
-    skip_warm_runtime: bool = False,
+    skip_warm_runtime: bool = True,
     skip_blutter_vm: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Build L0 + the full Jeopardy pack set (first-run TUI / launch gate).
+    """TUI Install: Docker L0 only. Packs attach on demand.
 
-    Pack bake and warm runtimes run here so the first solve has tools.
-    The blutter Dart VM stays off the gate (10–30+ min) — ``artemis setup``
-    prebuilds it when a sample Flutter APK is available.
+    Does **not** bake the full Jeopardy set or warm images — that is
+    ``artemis setup`` / ``artemis setup --full``. The launcher terminal
+    prompt still calls ``run_setup`` for a full bake when the operator
+    asks for it.
     """
     from backend.sandbox.setup_bake import run_setup
 
     return await run_setup(
-        packs=None,
+        packs=[],
         skip_core=False,
         skip_warm_runtime=skip_warm_runtime,
         skip_blutter_vm=skip_blutter_vm,

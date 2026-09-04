@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 EVAL_BUDGET = "eval_budget"
 
 
+def _positive_limit(raw: Any) -> float | None:
+    """Parse a >0 numeric limit; ignore bools / MagicMock / junk."""
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 @dataclass
 class EvalRunState:
     """Per-challenge eval clocks and counters (shared across swarm solvers)."""
@@ -30,25 +41,24 @@ class EvalRunState:
     def budget_exceeded(self, settings: Any, cost_usd: float | None) -> str | None:
         """Return ``eval_budget`` reason if wall or USD limit hit; else None.
 
-        Unknown USD (``None``) fails open — Cursor and other providers often
-        omit cost. Cap USD only when a provider actually reported a number.
-        Use ``--eval-max-wall-s`` as the hard unattended stop.
+        Unknown USD (``None``) is common (Cursor/Gemini/Codex). Treat it as
+        fail-open **only when ``--eval-max-wall-s`` is also set** — the wall is
+        then the unattended hard stop. USD-only + unknown cost is fail-closed
+        so ``--eval-max-usd`` is not a silent no-op (audit M2).
         """
-        max_wall = getattr(settings, "eval_max_wall_s", None)
+        max_wall = _positive_limit(getattr(settings, "eval_max_wall_s", None))
+        if max_wall is not None and self.wall_s() >= max_wall:
+            return EVAL_BUDGET
+        max_usd = _positive_limit(getattr(settings, "eval_max_usd", None))
+        if max_usd is None:
+            return None
+        if cost_usd is None:
+            return None if max_wall is not None else EVAL_BUDGET
         try:
-            if max_wall is not None and float(max_wall) > 0 and self.wall_s() >= float(max_wall):
+            if float(cost_usd) >= max_usd:
                 return EVAL_BUDGET
         except (TypeError, ValueError):
-            pass
-        max_usd = getattr(settings, "eval_max_usd", None)
-        try:
-            if max_usd is not None and float(max_usd) > 0:
-                if cost_usd is None:
-                    return None
-                if float(cost_usd) >= float(max_usd):
-                    return EVAL_BUDGET
-        except (TypeError, ValueError):
-            pass
+            return None
         return None
 
 

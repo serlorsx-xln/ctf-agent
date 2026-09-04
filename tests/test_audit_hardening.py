@@ -115,13 +115,21 @@ def test_lab_probe_drops_writeup_nc_hosts() -> None:
     assert "ctftime.org" not in {h.lower() for h in filtered}
 
 
-def test_eval_usd_unknown_fails_open() -> None:
+def test_eval_usd_unknown_fails_open_with_wall() -> None:
     state = EvalRunState()
     s = Settings()
     s.eval_max_usd = 1.5
+    s.eval_max_wall_s = 180.0
     assert state.budget_exceeded(s, None) is None
     assert state.budget_exceeded(s, 0.5) is None
     assert state.budget_exceeded(s, 1.5) == EVAL_BUDGET
+
+
+def test_eval_usd_unknown_without_wall_fails_closed() -> None:
+    state = EvalRunState()
+    s = Settings()
+    s.eval_max_usd = 1.5
+    assert state.budget_exceeded(s, None) == EVAL_BUDGET
 
 
 def test_coordinator_resolves_runner_id() -> None:

@@ -186,6 +186,9 @@ def is_submit_tool(tool_name: str, args: Mapping[str, object] | str | None = Non
 class HoleDetector:
     """Track technique-family depth and off-target drift."""
 
+    # Owned Jeopardy matrix (misc/forensics/steg/crypto/rev/pwn/web) finished
+    # in 4–11 steps without a false strings/grep/nmap break. Do not tighten
+    # these until a live run shows a productive family getting cut.
     family_warn: int = 5
     family_break: int = 8
     off_target_break: int = 2
