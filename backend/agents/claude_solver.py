@@ -110,6 +110,9 @@ class ClaudeSolver:
         self.sandbox = None
         self._sandbox_acquired = False
         self.loop_detector = LoopDetector()
+        from backend.anti_hole import HoleDetector
+
+        self.hole_detector = HoleDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
 
@@ -342,8 +345,25 @@ class ClaudeSolver:
                 }
 
             # MCP harness tools execute in-process — allow through.
-            if tool_name in (mcp_submit, mcp_notify):
-                return {"systemMessage": warn_msg} if warn_msg else {}
+            if tool_name in (mcp_submit, mcp_notify, mcp_fetch):
+                extra = ""
+                if tool_name == mcp_fetch:
+                    from backend.anti_hole import apply_hole_guard
+
+                    extra = str(
+                        await apply_hole_guard(self, tool_name, tool_input, "")
+                    ).strip()
+                    if extra and "DEAD-END" in extra:
+                        return {
+                            "systemMessage": extra,
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": extra,
+                            },
+                        }
+                msg = "\n\n".join(part for part in (warn_msg, extra) if part)
+                return {"systemMessage": msg} if msg else {}
 
             if tool_name == "Bash":
                 command = tool_input.get("command", "")
@@ -415,6 +435,9 @@ class ClaudeSolver:
                     from backend.loop_detect import OOM_STUCK_MESSAGE
 
                     out = f"{out}\n\n{OOM_STUCK_MESSAGE}"
+                from backend.anti_hole import apply_hole_guard
+
+                out = await apply_hole_guard(self, tool_name, tool_input, out)
                 result = self._host_cat_result(out, tool_input)
                 if warn_msg:
                     result["systemMessage"] = warn_msg

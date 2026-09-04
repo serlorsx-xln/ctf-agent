@@ -17,9 +17,9 @@ from backend.sandbox.setup_bake import (
 )
 
 
-def test_lite_default_and_full_bake_sets():
-    assert GATE_REQUIRED_PACKS == ()
-    assert DEFAULT_BAKE_PACKS == LITE_BAKE_PACKS
+def test_full_default_and_lite_bake_sets():
+    assert GATE_REQUIRED_PACKS == FULL_BAKE_PACKS
+    assert DEFAULT_BAKE_PACKS == FULL_BAKE_PACKS
     assert "web" in LITE_BAKE_PACKS
     assert "steg" in LITE_BAKE_PACKS
     assert "forensics" in LITE_BAKE_PACKS
@@ -29,7 +29,7 @@ def test_lite_default_and_full_bake_sets():
     assert "pwn" in FULL_BAKE_PACKS
     assert "crypto" in FULL_BAKE_PACKS
     assert "linux" in FULL_BAKE_PACKS
-    assert "ml" not in FULL_BAKE_PACKS  # stay light even on --full
+    assert "ml" not in FULL_BAKE_PACKS
 
 
 def test_probe_docker_env_reports_something(monkeypatch, tmp_path: Path):

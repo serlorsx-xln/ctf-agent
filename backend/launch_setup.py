@@ -1,9 +1,8 @@
 """Pre-TUI launch setup gate — terminal prompt + live logs, never opens the TUI.
 
-Called by ``chassis/bin/artemis`` before Bun/TUI starts. If Docker/L0 is
-missing, asks interactively whether to build the core image. Pack bake is
-lazy (``artemis setup`` / ``artemis setup --full``). Declining continues
-with whatever is installed.
+Called by ``chassis/bin/artemis`` before Bun/TUI starts. If Docker, L0, or
+the default Jeopardy pack set is missing, asks whether to run full setup.
+Declining continues with whatever is installed (TUI Install may still block).
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from typing import TextIO
 
 @dataclass
 class LaunchSetupReport:
-    """What is missing before the L0 gate (packs/warm are informational)."""
+    """What is missing before the first-run gate (full pack set + optional warm)."""
 
     gate_ready: bool
     docker_ok: bool
@@ -35,11 +34,9 @@ class LaunchSetupReport:
         lines.append(f"  Docker: {'ok' if self.docker_ok else 'not reachable'}")
         lines.append(f"  L0 core (ctf-sandbox-core): {'ok' if self.core_image else 'missing'}")
         if self.packs_missing:
-            lines.append(
-                f"  Pack caches (lazy, not required): {', '.join(self.packs_missing)}"
-            )
+            lines.append(f"  Pack caches (required): {', '.join(self.packs_missing)}")
         else:
-            lines.append("  Pack caches: lazy (not required to start)")
+            lines.append("  Pack caches: ok")
         if self.warm_missing:
             lines.append(
                 f"  Warm runtimes (optional): {', '.join(self.warm_missing)} "
@@ -124,12 +121,8 @@ async def _run_full_setup(*, stderr: TextIO) -> list[str]:
     def on_progress(line: str) -> None:
         _print(stderr, f"  {line}")
 
-    _print(stderr, "artemis: starting L0 setup (Docker core image)…")
-    return await run_gate_install(
-        skip_warm_runtime=True,
-        skip_blutter_vm=True,
-        on_progress=on_progress,
-    )
+    _print(stderr, "artemis: starting full sandbox setup (L0 + Jeopardy packs)…")
+    return await run_gate_install(on_progress=on_progress)
 
 
 def run_launch_setup_gate(
@@ -157,7 +150,7 @@ def run_launch_setup_gate(
     if not report.needs_prompt:
         return 0
 
-    _print(stderr, "artemis: sandbox L0 is not ready yet:")
+    _print(stderr, "artemis: sandbox is not fully set up yet:")
     for line in report.summary_lines():
         _print(stderr, line)
 
@@ -177,7 +170,7 @@ def run_launch_setup_gate(
         )
     else:
         do_setup = _prompt_yes_no(
-            "Build L0 sandbox now? (logs below; TUI opens after — packs stay lazy)",
+            "Run full sandbox setup now? (L0 + packs; logs below, TUI opens after)",
             default_yes=True,
             stdin=stdin,
             stderr=stderr,

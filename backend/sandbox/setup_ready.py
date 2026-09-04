@@ -1,7 +1,7 @@
-"""Sandbox setup readiness — Docker reachable + L0 ``ctf-sandbox-core``.
+"""Sandbox setup readiness — Docker + L0 + default Jeopardy pack caches.
 
 Used by the daemon/TUI first-run gate so operators cannot solve until
-the core image exists. Pack caches attach lazily at solve time.
+the core image and required pack caches exist.
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
     cli, hint = _path_hint()
     ready = bool(docker_ok and core and not missing)
     if ready:
-        parts = ["Sandbox ready (Docker + L0). Packs attach on demand."]
+        parts = ["Sandbox ready (Docker + L0 + pack caches)."]
     elif not docker_ok:
         parts = ["Docker is not reachable. Start Docker Desktop / Colima, then Install."]
     elif not core:
@@ -221,20 +221,20 @@ def probe_setup_status(*, required_packs: list[str] | None = None) -> SetupStatu
 
 async def run_gate_install(
     *,
-    skip_warm_runtime: bool = True,
+    skip_warm_runtime: bool = False,
     skip_blutter_vm: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Build L0 only (first-run TUI / launch gate).
+    """Build L0 + the full Jeopardy pack set (first-run TUI / launch gate).
 
-    Pack bake, warm runtime commits, and blutter Dart VM prebuild are not
-    required to start solving. Use ``artemis setup`` (lite) or
-    ``artemis setup --full`` later for faster first-pack attaches.
+    Pack bake and warm runtimes run here so the first solve has tools.
+    The blutter Dart VM stays off the gate (10–30+ min) — ``artemis setup``
+    prebuilds it when a sample Flutter APK is available.
     """
     from backend.sandbox.setup_bake import run_setup
 
     return await run_setup(
-        packs=[],
+        packs=None,
         skip_core=False,
         skip_warm_runtime=skip_warm_runtime,
         skip_blutter_vm=skip_blutter_vm,

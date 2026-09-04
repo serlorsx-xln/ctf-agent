@@ -51,7 +51,7 @@ async def test_exec_inner_timeout_calls_reap(monkeypatch):
     sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp")
     sb.workspace_dir = "/tmp/ws"
     sb._container = AsyncMock()
-    sb._reap_timed_out_compilers = AsyncMock()  # type: ignore[method-assign]
+    sb._reap_timed_out_exec = AsyncMock()  # type: ignore[method-assign]
 
     class _Stream:
         async def read_out(self):
@@ -66,7 +66,7 @@ async def test_exec_inner_timeout_calls_reap(monkeypatch):
             return _Stream()
 
         async def inspect(self):
-            return {"ExitCode": 0}
+            return {"ExitCode": 0, "Pid": 4242}
 
     sb._container.exec = AsyncMock(return_value=_Exec())  # type: ignore[method-assign]
 
@@ -87,4 +87,28 @@ async def test_exec_inner_timeout_calls_reap(monkeypatch):
     result = await sb._exec_inner("blutter libs out", timeout_s=1, via_host_proxy=False)
     assert result.exit_code == -1
     assert "timed out" in result.stderr.lower()
-    sb._reap_timed_out_compilers.assert_awaited()
+    sb._reap_timed_out_exec.assert_awaited_once_with(4242)
+
+
+@pytest.mark.asyncio
+async def test_reap_kills_only_that_exec_tree():
+    sb = DockerSandbox(image="ctf-sandbox-core", challenge_dir="/tmp")
+    sb.workspace_dir = "/tmp/ws"
+    sb._container = object()
+    seen: list[str] = []
+
+    async def fake_exec_inner(command: str, timeout_s: int, *, via_host_proxy: bool = False):
+        seen.append(command)
+        return ExecResult(exit_code=0, stdout="", stderr="")
+
+    sb._exec_inner = fake_exec_inner  # type: ignore[method-assign]
+
+    await sb._reap_timed_out_exec(4242)
+    assert seen
+    assert "4242" in seen[0]
+    assert "pgrep" not in seen[0]
+    assert "ninja" not in seen[0]
+
+    seen.clear()
+    await sb._reap_timed_out_exec(1)
+    assert seen == []

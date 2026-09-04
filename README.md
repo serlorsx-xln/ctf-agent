@@ -71,8 +71,9 @@ powershell -File scripts\verify-install.ps1
 
 ```bash
 # macOS / Linux / WSL
-bash scripts/install.sh          # deps + L0 Docker image
-bash scripts/install.sh --full   # + donor images + pack warm (slow, ~20GB cache)
+bash scripts/install.sh          # deps + L0 + full pack bake (slow, ~20GB cache)
+bash scripts/install.sh --full   # + Claude/Gemini extras
+bash scripts/install.sh --lite   # deps + L0 only
 
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1
@@ -90,8 +91,8 @@ Manual steps (equivalent):
 uv sync
 
 # Prefer: build L0 + pack caches via Artemis (scrubbed build context — safe on ExFAT/USB)
-# uv run artemis setup                 # lite packs (web / steg / forensics)
-# uv run artemis setup --full          # full Jeopardy set (Sage, pwn, mobile, …)
+# uv run artemis setup                 # full Jeopardy set (Sage, pwn, mobile, …)
+# uv run artemis setup --lite          # web / steg / forensics only
 # uv run artemis setup --skip-warm-runtime   # host cache only (faster setup, slower first solve)
 # uv run artemis setup --skip-blutter-vm     # skip Dart VM prebuild (needs sample Flutter APK)
 #

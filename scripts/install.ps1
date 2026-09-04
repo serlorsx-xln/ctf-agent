@@ -1,7 +1,8 @@
 # Artemis one-shot installer (Windows native / PowerShell 5+).
-# Usage: powershell -ExecutionPolicy Bypass -File scripts/install.ps1 [-Full] [-SkipDocker] [-SkipBake]
+# Usage: powershell -ExecutionPolicy Bypass -File scripts/install.ps1 [-Full] [-Lite] [-SkipDocker] [-SkipBake]
 param(
   [switch]$Full,
+  [switch]$Lite,
   [switch]$SkipDocker,
   [switch]$SkipBake
 )
@@ -139,7 +140,7 @@ if ($dockerOk) {
     Start-Sleep -Seconds 20
   }
   if (-not $coreOk) { throw "docker build ctf-sandbox-core failed after 3 attempts" }
-  if ($Full) {
+  if (-not $Lite -and -not $SkipBake) {
     Log "Building all donor images..."
     $donors = @(
       @("Dockerfile.pwn", "ctf-sandbox-pwn"),
@@ -166,10 +167,10 @@ if ($dockerOk) {
       }
       if (-not $ok) { throw "docker build $($d[1]) failed after 3 attempts" }
     }
-    if (-not $SkipBake) {
-      Log "Warming pack caches..."
-      & $uv run artemis setup -v
-    }
+    Log "Warming pack caches..."
+    & $uv run artemis setup -v
+  } elseif ($Lite) {
+    Log "Skipping donor / pack bake (-Lite)."
   }
 }
 

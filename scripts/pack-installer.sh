@@ -264,8 +264,9 @@ Do NOT double-click Artemis-Install.ps1 alone.
 
 --- macOS / Linux / WSL2 ---
 
-  bash Artemis-Install.sh --full          # deps + ALL sandbox images (slow)
-  bash Artemis-Install.sh                 # deps + L0 only
+  bash Artemis-Install.sh                 # deps + L0 + full pack bake (slow)
+  bash Artemis-Install.sh --full          # + Claude/Gemini extras
+  bash Artemis-Install.sh --lite          # deps + L0 only
   bash Artemis-Install.sh --skip-docker   # no Docker build
 
 --- Windows (PowerShell as user, not Admin required) ---

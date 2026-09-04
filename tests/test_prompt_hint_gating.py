@@ -67,7 +67,9 @@ def test_header_surfaces_tags_when_present():
     assert "**Tags**    : crypto" in p
     assert "**Category**: crypto" in p  # single tag doubles as category
     assert "## Challenge" in p
-    assert "Cover maximum surface area" in p
+    assert "highest-value surfaces" in p
+    assert "Flag-only" in p
+    assert "decoy" in p.lower()
     assert "**Scope**" not in p
     assert "human confirms" in p.lower()
 

@@ -24,6 +24,7 @@ from backend.agents.live_log import live as _live
 from backend.agents.live_log import live_json
 from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker, usage_from_provider
+from backend.anti_hole import HoleDetector, apply_hole_guard
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
@@ -183,6 +184,7 @@ class CodexSolver:
         self._sandbox_acquired = False
         self.use_vision = supports_vision(model_spec)
         self.loop_detector = LoopDetector()
+        self.hole_detector = HoleDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
 
@@ -505,6 +507,7 @@ class CodexSolver:
 
                     self.tracer.event("resource_loop", tool=tool_name, step=self._step_count)
                     result = f"{result}\n\n{OOM_STUCK_MESSAGE}"
+                result = await apply_hole_guard(self, tool_name, args, result)
 
         # Build content items — handle image tuples from view_image
         if isinstance(result, tuple):

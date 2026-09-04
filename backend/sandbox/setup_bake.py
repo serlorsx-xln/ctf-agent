@@ -19,17 +19,14 @@ from pathlib import Path
 
 logger = logging.getLogger("ctf.setup")
 
-# First-run / TUI Install gate: Docker + L0 only. Packs attach on demand.
-GATE_REQUIRED_PACKS: tuple[str, ...] = ()
-
-# ``artemis setup`` default — cheap Jeopardy packs (no Sage / pwn / mobile).
+# ``artemis setup --lite`` — cheap Jeopardy packs (no Sage / pwn / mobile).
 LITE_BAKE_PACKS: tuple[str, ...] = (
     "web",
     "steg",
     "forensics",
 )
 
-# ``artemis setup --full`` — previous default Jeopardy set (still skips ml).
+# Default first-run / ``artemis setup`` — full Jeopardy set (still skips ml).
 FULL_BAKE_PACKS: tuple[str, ...] = (
     "mobile",
     "pwn",
@@ -42,8 +39,11 @@ FULL_BAKE_PACKS: tuple[str, ...] = (
     "linux",
 )
 
-# Alias kept for older imports / docs; default bake is the lite set.
-DEFAULT_BAKE_PACKS: tuple[str, ...] = LITE_BAKE_PACKS
+# TUI Install / launch gate waits for Docker + L0 + this pack set.
+GATE_REQUIRED_PACKS: tuple[str, ...] = FULL_BAKE_PACKS
+
+# Alias kept for older imports / docs; default bake is the full set.
+DEFAULT_BAKE_PACKS: tuple[str, ...] = FULL_BAKE_PACKS
 
 # Donor images used only as extract sources (not L0 runtimes). Safe to drop
 # after pack cache ``.ready`` — keep core / pwn / mobile / warm-*.
@@ -563,7 +563,7 @@ async def run_setup(
         if not ok:
             return lines
 
-    chosen = list(LITE_BAKE_PACKS) if packs is None else list(packs)
+    chosen = list(DEFAULT_BAKE_PACKS) if packs is None else list(packs)
     total = len(chosen)
     for i, pack_id in enumerate(chosen, start=1):
         _emit(f"Pack {i}/{total}: {pack_id}…")

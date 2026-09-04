@@ -7,8 +7,8 @@ import { daemon } from "../artemis/client"
 
 /**
  * First-run sandbox install gate. Blocks challenge load/solve until Docker L0
- * exists. Packs attach on demand. Esc does nothing while installing; after
- * ready, closes.
+ * and the default Jeopardy pack set exist. Esc does nothing while installing;
+ * after ready, closes.
  */
 function DialogSetupInstall(props: { onReady?: () => void }) {
   const dialog = useDialog()
@@ -177,10 +177,11 @@ function DialogSetupInstall(props: { onReady?: () => void }) {
         </Show>
       </box>
       <text fg={theme.textMuted} wrapMode="word">
-        Docker L0 (`ctf-sandbox-core`) is required before solving. Packs attach
-        on demand after Install. Prefer answering Yes to the terminal setup
-        prompt when launching `artemis` (before this UI). For faster first-pack
-        attaches later, run `artemis setup` (lite) or `artemis setup --full`.
+        Docker L0 and the Jeopardy pack caches (pwn, crypto, ghidra, …) are
+        required before solving. Prefer answering Yes to the terminal setup
+        prompt when launching `artemis`. Same bake: `artemis setup` (or
+        `artemis setup --lite` for web/steg/forensics only). Blutter Dart VM
+        prebuild stays on `artemis setup`, not this gate.
       </text>
       <Show when={message()}>
         <text fg={theme.warning} wrapMode="word">

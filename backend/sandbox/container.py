@@ -1434,7 +1434,15 @@ class DockerSandbox:
                 await stream.close()
             except Exception:
                 pass
-            await self._reap_timed_out_compilers()
+            exec_pid = None
+            try:
+                inspect = await exec_instance.inspect()
+                raw_pid = inspect.get("Pid")
+                if raw_pid is not None and int(raw_pid) > 1:
+                    exec_pid = int(raw_pid)
+            except Exception:
+                logger.debug("timed-out exec inspect failed", exc_info=True)
+            await self._reap_timed_out_exec(exec_pid)
             return ExecResult(
                 exit_code=-1,
                 stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
@@ -1450,30 +1458,41 @@ class DockerSandbox:
             stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
         )
 
-    async def _reap_timed_out_compilers(self) -> None:
-        """Best-effort kill leftover ninja/c++ from a timed-out blutter/build.
+    async def _reap_timed_out_exec(self, exec_pid: int | None) -> None:
+        """Kill only the timed-out docker-exec tree.
 
-        ``timeout(1)`` SIGTERM can leave zombies and busy compilers that starve
-        later ``docker exec`` calls. Do not hold the lifecycle lock here.
+        Shared sandboxes run several solvers in one container. A global
+        ``pgrep ninja|c++|blutter`` would murder a sibling compile. Descendants
+        of this exec (including reparented children still under that pid) are
+        the only safe target. Do not hold the lifecycle lock here.
         """
-        if not self._container:
+        if not self._container or getattr(self, "_reaping", False):
             return
+        if exec_pid is None or exec_pid <= 1:
+            return
+        pid = int(exec_pid)
         reap = (
-            "for p in $(pgrep -f "
-            "'ninja|/usr/bin/c\\+\\+|cc1plus|dartvm_fetch_build|blutter\\.py' "
-            "2>/dev/null || true); do "
-            "kill -TERM \"$p\" 2>/dev/null || true; done; "
-            "sleep 0.5; "
-            "for p in $(pgrep -f "
-            "'ninja|/usr/bin/c\\+\\+|cc1plus|dartvm_fetch_build' "
-            "2>/dev/null || true); do "
-            "kill -KILL \"$p\" 2>/dev/null || true; done; "
-            "true"
+            f"pid={pid}; "
+            "_walk() { "
+            '  local p="$1" c; '
+            '  for c in $(ps -o pid= --ppid "$p" 2>/dev/null || true); do '
+            '    _walk "$c"; '
+            "  done; "
+            '  kill -"$2" "$p" 2>/dev/null || true; '
+            "}; "
+            '_walk "$pid" TERM; sleep 0.4; _walk "$pid" KILL; true'
         )
+        self._reaping = True
         try:
             await self._exec_inner(reap, timeout_s=20, via_host_proxy=False)
         except Exception:
-            logger.debug("reap timed-out compilers failed", exc_info=True)
+            logger.debug("reap timed-out exec tree failed", exc_info=True)
+        finally:
+            self._reaping = False
+
+    async def _reap_timed_out_compilers(self) -> None:
+        """Backward-compatible name — no global compiler sweep."""
+        return None
 
     async def read_file(self, path: str) -> str | bytes:
         """Read a file from the container. Returns str for text, bytes for binary."""

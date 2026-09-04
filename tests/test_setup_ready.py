@@ -21,7 +21,7 @@ def _materialize_pack_cache(root: Path, pack_id: str) -> None:
             dest.write_text("sentinel\n", encoding="utf-8")
 
 
-def test_probe_default_gate_is_l0_only(monkeypatch):
+def test_probe_default_gate_requires_full_packs(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
     monkeypatch.setattr("backend.sandbox.setup_ready._docker_ok", lambda: True)
     monkeypatch.setattr(
@@ -29,11 +29,13 @@ def test_probe_default_gate_is_l0_only(monkeypatch):
         lambda tag: tag == "ctf-sandbox-core",
     )
     monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: True)
+    monkeypatch.setattr("backend.sandbox.packs._pack_cache_is_ready", lambda pack_id: False)
     st = probe_setup_status()
-    assert st.ready is True
+    assert st.ready is False
     assert st.core_image is True
-    assert st.packs_missing == []
-    assert "L0" in st.message
+    assert "pwn" in st.packs_missing
+    assert "crypto" in st.packs_missing
+    assert "Pack caches not baked" in st.message
 
 
 def test_probe_reports_missing_without_docker(monkeypatch, tmp_path: Path):
@@ -172,6 +174,16 @@ def test_docker_image_exists_retries_timeout_then_lists(monkeypatch):
     assert _docker_image_exists("ctf-sandbox-core") is True
 
 
+def test_gate_install_bakes_full_packs_but_skips_blutter():
+    import inspect
+
+    from backend.sandbox.setup_ready import run_gate_install
+
+    params = inspect.signature(run_gate_install).parameters
+    assert params["skip_warm_runtime"].default is False
+    assert params["skip_blutter_vm"].default is True
+
+
 def test_dns_probe_advisory_does_not_block_ready(monkeypatch):
     monkeypatch.delenv("ARTEMIS_SKIP_SETUP_GATE", raising=False)
     monkeypatch.setattr("backend.sandbox.setup_ready._docker_ok", lambda: True)
@@ -180,7 +192,7 @@ def test_dns_probe_advisory_does_not_block_ready(monkeypatch):
         lambda tag: tag == "ctf-sandbox-core",
     )
     monkeypatch.setattr("backend.sandbox.setup_ready._container_dns_ok", lambda: False)
-    st = probe_setup_status()
+    st = probe_setup_status(required_packs=[])
     assert st.ready is True
     assert st.dns_ok is False
     assert "DNS" in st.message

@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
 # Artemis one-shot installer (macOS / Linux / WSL).
-# Usage: bash scripts/install.sh [--full] [--skip-docker] [--skip-bake]
+# Usage: bash scripts/install.sh [--full] [--lite] [--skip-docker] [--skip-bake]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 FULL=0
+LITE=0
 SKIP_DOCKER=0
 SKIP_BAKE=0
 for arg in "$@"; do
   case "$arg" in
     --full) FULL=1 ;;
+    --lite) LITE=1 ;;
     --skip-docker) SKIP_DOCKER=1 ;;
     --skip-bake) SKIP_BAKE=1 ;;
     -h|--help)
       cat <<EOF
-Artemis install — Python 3.14 + uv + Bun + Docker L0 (+ optional pack warm).
+Artemis install — Python 3.14 + uv + Bun + Docker L0 + full pack warm.
 
-  bash scripts/install.sh              # deps (cursor-only) + L0 image
-  bash scripts/install.sh --full       # provider extras + all donors + full pack warm
+  bash scripts/install.sh              # deps (cursor-only) + L0 + full pack bake
+  bash scripts/install.sh --full       # + Claude/Gemini extras
+  bash scripts/install.sh --lite       # L0 only (no donor / pack bake)
   bash scripts/install.sh --skip-docker  # no docker build (CI / no daemon)
 
 Platforms: macOS (Intel/ARM), Linux, WSL2 (use this script, not .ps1).
@@ -253,12 +256,12 @@ ensure_user_path
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
   if wait_docker; then
     build_l0
-    if [[ "$FULL" -eq 1 ]]; then
+    if [[ "$LITE" -eq 0 && "$SKIP_BAKE" -eq 0 ]]; then
       build_donors
-    fi
-    if [[ "$SKIP_BAKE" -eq 0 && "$FULL" -eq 1 ]]; then
-      log "Warming pack caches (artemis setup --full)…"
-      uv run artemis setup --full -v
+      log "Warming pack caches (artemis setup)…"
+      uv run artemis setup -v
+    elif [[ "$LITE" -eq 1 ]]; then
+      log "Skipping donor / pack bake (--lite)."
     fi
   else
     warn "Docker not usable — skipped image build."

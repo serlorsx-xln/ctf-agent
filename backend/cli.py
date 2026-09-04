@@ -90,8 +90,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
     API keys: /connect in the TUI — do not edit .env by hand.
 
     \b
-      artemis setup            Warm L0 + lite packs (web/steg/forensics)
-      artemis setup --full     Bake the full Jeopardy pack set (Sage, pwn, …)
+      artemis setup            Warm L0 + full Jeopardy packs (Sage, pwn, …)
+      artemis setup --lite     Bake only web / steg / forensics
     """
     _setup_logging(verbose)
     ctx.ensure_object(dict)
@@ -632,13 +632,19 @@ async def _run_coordinator(
     "--pack",
     "packs",
     multiple=True,
-    help="Pack id to bake (repeatable). Default: lite set (web, steg, forensics).",
+    help="Pack id to bake (repeatable). Default: full Jeopardy set.",
 )
 @click.option(
     "--full",
     "full",
     is_flag=True,
-    help="Bake the full Jeopardy set (Sage, pwn, mobile, ghidra, linux, …).",
+    help="Bake the full Jeopardy set (default).",
+)
+@click.option(
+    "--lite",
+    "lite",
+    is_flag=True,
+    help="Bake only web / steg / forensics.",
 )
 @click.option("--skip-core", is_flag=True, help="Do not build/check L0 core image")
 @click.option(
@@ -655,6 +661,7 @@ async def _run_coordinator(
 def setup_cmd(
     packs: tuple[str, ...],
     full: bool,
+    lite: bool,
     skip_core: bool,
     skip_warm_runtime: bool,
     skip_blutter_vm: bool,
@@ -663,8 +670,8 @@ def setup_cmd(
     """Phase 3: warm L0 + selected tool packs on this machine (once).
 
     \b
-      artemis setup              lite packs (web, steg, forensics)
-      artemis setup --full       full Jeopardy set
+      artemis setup              full Jeopardy set
+      artemis setup --lite       web / steg / forensics only
       artemis setup --pack pwn --pack crypto
 
     Extracts donor trees into ~/.cache/ctf-agent/packs and commits warm L0
@@ -673,10 +680,15 @@ def setup_cmd(
     prebuilds the shared blutter Dart VM so the first Flutter solve is fast.
     """
     _setup_logging(verbose)
-    from backend.sandbox.setup_bake import FULL_BAKE_PACKS, run_setup
+    from backend.sandbox.setup_bake import FULL_BAKE_PACKS, LITE_BAKE_PACKS, run_setup
+
+    if lite and full:
+        raise click.UsageError("Use --lite or --full, not both.")
 
     if packs:
         chosen: list[str] | None = list(packs)
+    elif lite:
+        chosen = list(LITE_BAKE_PACKS)
     elif full:
         chosen = list(FULL_BAKE_PACKS)
     else:

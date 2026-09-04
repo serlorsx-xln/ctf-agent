@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.anti_hole import flag_only_block
 from backend.flags import normalize_flags_required
 from backend.tools.core import IMAGE_EXTS_FOR_VISION as IMAGE_EXTS
 
@@ -255,6 +256,8 @@ def build_prompt(
         )
 
     lines += [
+        flag_only_block(),
+        "",
         "## Instructions",
         "**Use tools immediately. Do not describe — execute.**",
         "",
@@ -272,7 +275,7 @@ def build_prompt(
         "4. **Ignore placeholder flags** — `CTF{flag}`, `CTF{placeholder}` are not real flags.",
         f"5. {submit_hint}",
         "6. Once CORRECT: output `FLAG: <value>` on its own line.",
-        "7. Do not guess. Do not ask. Cover maximum surface area.",
+        "7. Do not guess. Do not answer decoy questions. Cover the highest-value surfaces, then drop a dead technique.",
         (
             "8. Exit 124/137 → do not immediately retry the same heavy command; "
             "shrink scope or change approach. Prefer `submit_flag` once you have "

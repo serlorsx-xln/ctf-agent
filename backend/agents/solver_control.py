@@ -45,6 +45,9 @@ def stash_bump(solver: Any, insights: str) -> None:
     loop = getattr(solver, "loop_detector", None)
     if loop is not None and hasattr(loop, "reset"):
         loop.reset()
+    hole = getattr(solver, "hole_detector", None)
+    if hole is not None and hasattr(hole, "reset"):
+        hole.reset()
     tracer = getattr(solver, "tracer", None)
     if tracer is not None and hasattr(tracer, "event"):
         tracer.event("bump", insights=(insights or "")[:500])

@@ -22,6 +22,7 @@ from typing import Any
 from backend.agents.live_log import live as _live
 from backend.continue_prompt import build_continue_prompt
 from backend.cost_tracker import CostTracker, usage_from_provider
+from backend.anti_hole import HoleDetector, apply_hole_guard
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.prompts import ChallengeMeta, build_prompt
@@ -110,6 +111,7 @@ class GeminiSolver:
         self.sandbox = None
         self._sandbox_acquired = False
         self.loop_detector = LoopDetector()
+        self.hole_detector = HoleDetector()
         self.tracer = SolverTracer(meta.name, self.model_id)
         self.agent_name = f"{meta.name}/{self.model_id}"
         self._client = None
@@ -250,7 +252,7 @@ class GeminiSolver:
             _live(f"{self.agent_name} tool#{step} ✗ {name}", out[:2000], limit=2000)
         else:
             _live(f"{self.agent_name} tool#{step} ← {name}", out[:4000], limit=2000)
-        return out
+        return await apply_hole_guard(self, name, args, out)
 
     async def run_until_done_or_gave_up(self) -> SolverResult:
         if self._client is None:
